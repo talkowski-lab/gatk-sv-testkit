@@ -1,0 +1,106 @@
+# Contributing
+
+Before anything else:
+
+```bash
+make setup            # ./.venv with what the tools import
+make test && make audit
+```
+
+`make test` is the offline gate (syntax, `--help` with no configuration, config-layer
+self-tests) and must pass with no credentials, no data and no network. `make audit` fails if
+any file that would go public contains an internal identifier from the private working
+directory this repo was assembled out of. Both run in CI for exactly that reason.
+
+## The bar for a new tool
+
+**It removes an hour of waiting, or it catches a bug before it costs VM money.** If it does
+neither, it belongs in [gatk-sv](https://github.com/broadinstitute/gatk-sv), not here.
+
+Concretely, a tool earns its place by answering one question in one sentence ("does this WDL
+actually bind its inputs?", "did the shipped image get the bytes I tested?"). If you cannot
+say the sentence, the tool will end up as a pile of flags. Also: if an existing tool here
+almost covers it, extend that one — duplication is how bindings drift between steps, and the
+worst bugs in this repo's history were two places disagreeing about one value.
+
+## Configuration
+
+**A new environment-specific value goes in `kit/gsvtk-config`, in the same commit that reads
+it.** Tools must not read the environment directly: no `os.environ.get("GSVTK_…")`, no
+`$GSVTK_…` in a shell script that did not source `kit/config.sh`. One resolver, one
+precedence chain (env > profile > derived > default), one place to answer "where did this
+value come from" (`./gsvtk-config show`).
+
+Give it a default, or justify having none in the entry. The only keys that currently refuse a
+default are `GSVTK_PROJECT` and `GSVTK_TERRA_NAMESPACE`/`_WORKSPACE`, because they decide
+whose billing account runs and whose workspace gets written — a guessed default there spends
+someone's money or overwrites someone's configs. Anything that could plausibly default *did*
+get a default, and the reason for each is in the file.
+
+Add a row to `docs/config.md` in the same commit. A key that exists but is undocumented is a
+key nobody will find, and the next person will hardcode the value instead.
+
+## Mutating vs read-only
+
+**Read-only by default. Mutating requires an explicit, typed-out confirmation.**
+
+- Recon, status, cost, fetch, every `checks/` and `compare/` tool: never write outside
+  `GSVTK_WORK`, never submit.
+- Mutators (`create`, `copy`, `attrs --write`, `submit`) refuse without confirmation — the
+  Terra helpers additionally thread `confirm=True` internally so a caller cannot mutate by
+  accident, and `submit` needs `--confirm` on the command line as well.
+- Anything that starts compute names what it will cost. `docker/gatk-sv-build.sh` prints the
+  per-minute price from the compute API before booting, and `--dry-run` / `--check` show the
+  plan and touch nothing.
+- **No `make` target may boot compute or mutate remote state.** The money paths stay
+  human-typed. That is a review objection, not a style note.
+
+Two conventions worth keeping in mind while editing:
+
+- **Name the missing thing.** A tool fails with the key it wanted, the file to edit, and an
+  exit code (`require` exits 4). Never a traceback, never a silent empty result — an empty
+  table that reads like "no differences" is worse than a crash.
+- **A checker's findings are a diff, not a verdict.** Against upstream gatk-sv the static
+  checkers report real findings today. So they print counts and take a baseline —
+  `--compare-to <ref>` for the jq plumbing scan, a base ref as an argument for
+  `checks/wdl_gate.sh` — and the gate compares against that baseline instead of asserting
+  zero.
+
+## Adding or changing a doc
+
+Write it fresh. Do not copy a session log: `docs/archive/` is for those, and it is published
+with coordinates redacted on purpose.
+
+- One doc per loop, and it must contain a command you actually ran. **Never document a flag you
+  did not run.** `make test` catches `--help` drift, not doc drift; several wrong flags were
+  found in these docs by running them, and each was one a reader would have trusted.
+- State the failure modes you hit, with the **verbatim** error text, in
+  [docs/troubleshooting.md](docs/troubleshooting.md). That file exists so the next person can
+  paste their error into a search box. A paraphrased error message is a dead link.
+- State where the money goes and what is read-only, in the doc, near the top.
+- If you redact anything while publishing, add the pattern to `AUDIT_PATTERNS` in the
+  Makefile. The pattern list is the memory; the audit is the enforcement.
+
+## Corrections get published, not deleted
+
+When something this repo claims turns out to be wrong — a number, a mechanism, a
+"this is how it works" — fix the text **and** leave a record of what was believed and what
+replaced it. See [docs/methodology.md](docs/methodology.md); four load-bearing claims here were
+proven wrong and all four are listed with their replacements, because the shape of those
+mistakes (a mechanism asserted before it was reproduced, a number that was an artefact of
+subsampling) is the most transferable thing in the corpus.
+
+Same rule for tool behaviour: if you fix a bug that produced a wrong number, the release note
+says which published numbers are suspect. An analysis toolkit that quietly corrects itself is
+not trustworthy — the point of the frozen manifests, recorded etags and re-checkable
+`batch_cost.py` arithmetic is that someone else can redo the arithmetic and get what is written.
+
+## Style, only where it matters
+
+`kit/` is loaded by everything and must stay tiny, dependency-free and bash-3.2 compatible (macOS
+ships that; the config shim broke silently on a bash-4 feature before). Prefer the standard
+library in `compare/`. External binaries (`jq`, `bcftools`, `gsutil`) are fine when the tool says
+what is missing and how to install it — see the guarded `firecloud` import in `terra/terra.py`
+for the shape of that message.
+
+Comments explain why, not what: `# literal File values must be quoted`, not `# set variable`.

@@ -1,0 +1,56 @@
+# ----------------------------------------------------------------- config
+# Real project / workspace / registry coordinates stay out of the repo.
+# testkit.env.example is the committed template.
+testkit.env
+testkit.local.env
+*.local.env
+.env
+
+# ------------------------------------------------------------------ scratch
+# Everything the tools produce is regenerable and large: staged reference/batch
+# inputs (tens of GB), local replay runs, frozen manifests, Terra recon dumps,
+# fetched outputs, Cromwell metadata, gatk-sv-profile trees, VCFs.
+/work/
+work/
+staging/
+runs/
+runs_*/
+recon/
+manifests/
+outputs/
+metadata/
+compare_*/
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.bed.gz
+*.bed.gz.tbi
+*.txt.gz
+*.txt.gz.tbi
+*.bam
+*.bai
+*.parquet
+*.dict
+*.cutoffs
+*.MetricFile
+*_metric_file.txt
+*_geno_params.tsv
+*_sepcutoff.txt
+
+# --------------------------------------------------------------- build/log
+*.log
+*.out
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------- vendored
+# WDLs are fetched from your gatk-sv checkout by scripts/fetch_wdl.py rather
+# than committed, so they can never go stale against gatk-sv main.
+/wdl/
+vendor/wdl/

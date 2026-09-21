@@ -1,0 +1,13 @@
+{
+ "GATKSVPipelineSingleSample.acrocentric_arm_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_acrocentric_arms.bed",
+ "GATKSVPipelineSingleSample.centromere_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_centromeres.bed",
+ "GATKSVPipelineSingleSample.custom_mask_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_GD_custom_mask.bed",
+ "GATKSVPipelineSingleSample.gaps_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_gap.bed",
+ "GATKSVPipelineSingleSample.gd_table": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/GenomicDisorderRegions_hg38_2025-12-05.with_bp.tsv",
+ "GATKSVPipelineSingleSample.gtf": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gencode.v47.basic.protein_coding.canonical.gtf",
+ "GATKSVPipelineSingleSample.hard_inclusion_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_GD_inclusion_intervals.bed",
+ "GATKSVPipelineSingleSample.par_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/hg38.par.bed",
+ "GATKSVPipelineSingleSample.ref_panel_baf": "gs://gatk-sv-ref-panel-1kg-v1-1/submissions/f23790d5-6237-41ce-bac1-5a39d4dcbafc/GatherBatchEvidence/9f88923c-dc89-41fe-80a5-3b135903d117/call-BatchEvidenceMerging/BatchEvidenceMerging/2d12afe9-16a6-4cc0-9754-bec899da4a4a/call-SDtoBAF/cacheCopy/all_samples.baf.txt.gz",
+ "GATKSVPipelineSingleSample.ref_panel_baf_index": "gs://gatk-sv-ref-panel-1kg-v1-1/submissions/f23790d5-6237-41ce-bac1-5a39d4dcbafc/GatherBatchEvidence/9f88923c-dc89-41fe-80a5-3b135903d117/call-BatchEvidenceMerging/BatchEvidenceMerging/2d12afe9-16a6-4cc0-9754-bec899da4a4a/call-SDtoBAF/cacheCopy/all_samples.baf.txt.gz.tbi",
+ "GATKSVPipelineSingleSample.segdup_bed": "gs://gatk-sv-resources-public/hg38/v0/sv-resources/resources/v1/gd/hg38_SD.bed.gz"
+}

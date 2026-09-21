@@ -1,0 +1,17 @@
+# Not needed to build, replay or compare anything. Needed to run the two checkers whose
+# whole job is WDL analysis, and to run the offline gate (`make test`) with nothing skipped.
+#
+#   pip install -r requirements-dev.txt
+#
+# The gate SKIPS these instead of failing when they are absent, because a contributor
+# working only on the Terra side should not need a WDL analyzer to check in.
+
+miniwdl           # provides both the `miniwdl` CLI used by checks/wdl_gate.sh and the `WDL`
+                  # module imported by replay/build_inputs.py. Both name the missing
+                  # dependency instead of crashing, so the rest of the repo still runs
+                  # without it.
+
+# Not pip-installable, and therefore not listed here either:
+#   womtool.jar  - set WOMTOOL_JAR=/path/to/womtool.jar for terra/batch_check_inputs.py
+#                  (a GitHub release artifact of broadinstitute/womtool, not a package)
+#   jq, bcftools, gsutil, gcloud, JDK 17+  - see docs/setup.md
