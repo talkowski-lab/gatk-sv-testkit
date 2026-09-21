@@ -115,15 +115,25 @@ echo "### image driver  md5=$AMD5 lines=$(wc -l < "$DRV")   expected=${EXPECT_DR
 echo "### image fixture md5=$FMD5                        expected=${EXPECT_FX:-<not given>}"
 if [ -n "$EXPECT_DRV" ] && [ "$AMD5" != "$EXPECT_DRV" ]; then finish FAILURE "driver bytes differ from the tested commit"; fi
 if [ -n "$EXPECT_FX" ] && [ "$FMD5" != "$EXPECT_FX" ]; then finish FAILURE "fixture bytes differ from the tested commit"; fi
-if [ -z "$EXPECT_DRV" ] && [ -z "$EXPECT_FX" ]; then
-  # The whole reason this VM exists is byte identity. Silently "passing" it when no expectation
-  # was supplied would produce exactly the false proof this project documents against.
-  echo "### byte-identity NOT PROVEN: no --expect-driver-md5/--expect-fixture-md5 given."
+# Byte identity is per-file, and so is the claim about it. One expectation supplied used to put
+# this script in its "passed" branch and print a blanket "shipped bytes == tested bytes", while
+# the other half had never been compared -- and the marker said "image bytes match", which the
+# driver then repeated as a result. Each half is now named, and the marker distinguishes PROVEN
+# from SCAN_CLEAN so a scan without expectations can never be quoted as a proof.
+BYTE_PROOF=no
+MISSING=""
+[ -n "$EXPECT_DRV" ] || MISSING="$MISSING driver"
+[ -n "$EXPECT_FX" ]  || MISSING="$MISSING fixture"
+if [ -n "$MISSING" ]; then
+  echo "### byte-identity NOT PROVEN for:$MISSING -- no expectation was supplied for that file."
   echo "###   compute them from the checkout you tested:"
   echo "###     git -C <gatk-sv> show <ref>:src/sv_shell/single_sample_pipeline.sh | md5sum"
+  echo "###     git -C <gatk-sv> show <ref>:src/sv_shell/sample_inputs/single_sample_pipeline.json | md5sum"
   echo "###   the scan below still runs; its result is about the tree in THIS image only."
-else
-  echo "### byte-identity check passed (shipped bytes == tested bytes)"
+fi
+if [ -z "$MISSING" ]; then
+  BYTE_PROOF=yes
+  echo "### byte-identity PROVEN: both shipped md5s equal the ones you supplied"
 fi
 
 base64 -d > /tmp/scan.py <<'EOB64'
@@ -146,7 +156,13 @@ if [ "$HAVE_DEPTH" != yes ] || [ "$HAVE_PESR" != yes ]; then
   finish FAILURE "jar in the shipped image does not accept --rd-depth-table/--rd-pesr-table; the gatk pin is stale"
 fi
 echo "### jar accepts both split RD tables: OK"
-finish SUCCESS "image bytes match, scan complete"
+# PROVEN only when both md5s were supplied AND matched (a mismatch already called finish FAILURE).
+# Otherwise this is a clean scan of an unverified tree -- useful, and not a byte-identity proof.
+if [ "$BYTE_PROOF" = yes ]; then
+  finish PROVEN "both md5s matched, scan complete"
+else
+  finish SCAN_CLEAN "scan complete; byte identity NOT PROVEN (missing expectation:$MISSING)"
+fi
 EOS
 
 b64=$(base64 < "$SCANNER" | tr -d '\n')
@@ -199,7 +215,9 @@ else
 fi
 
 case "$RESULT" in
-  SVSHELL_IMAGE_CHECK=SUCCESS) echo "RESULT: SUCCESS — the shipped image carries the tested bytes and the plumbing scan is clean"; exit 0;;
+  SVSHELL_IMAGE_CHECK=PROVEN) echo "RESULT: PROVEN — the shipped image carries the tested bytes (both md5s matched) and the plumbing scan is clean"; exit 0;;
+  SVSHELL_IMAGE_CHECK=SCAN_CLEAN) echo "RESULT: SCAN CLEAN, BYTE IDENTITY NOT PROVEN — the md5s were not both supplied. Re-run with --expect-driver-md5 AND --expect-fixture-md5 (from the ref you tested) if you need this as evidence about shipped bytes."; exit 0;;
+  SVSHELL_IMAGE_CHECK=SUCCESS) echo "RESULT: SUCCESS (legacy marker) — treat as SCAN_CLEAN: byte identity is only proven with both --expect-* md5s"; exit 0;;
   SVSHELL_IMAGE_CHECK=FAILURE) echo "RESULT: FAILURE — see the ### lines above"; exit 1;;
   *) echo "RESULT: TIMEOUT — no marker after $((TIMEOUT_S/60)) min; VM $INSTANCE (log $LOG)"; exit 3;;
 esac

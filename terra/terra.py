@@ -54,6 +54,37 @@ class TerraError(RuntimeError):
     pass
 
 
+_ORIGINAL_EXCEPTHOOK = sys.excepthook
+
+
+def _friendly_terra_error(exc, value, tb):
+    """Print a TerraError as the sentence it already is, instead of a traceback.
+
+    These tools fail for reasons a person can act on -- application-default credentials expired,
+    a workspace you are not on, a method config that does not exist yet. TerraError carries that
+    sentence, and 20 frames of firecloud/requests above it both hides the sentence and makes the
+    toolkit look like the thing that broke. Every other exception still prints normally.
+    """
+    if isinstance(value, TerraError):
+        sys.stderr.write(f"{value}\n")
+        raise SystemExit(1)
+    try:
+        import requests
+    except ImportError:                                   # firecloud pulls it in; be defensive
+        requests = None
+    if requests is not None and isinstance(value, requests.exceptions.ConnectionError):
+        sys.stderr.write(
+            f"cannot reach Terra at {TERRA_API}\n"
+            f"  this network may not resolve api.terra.bio (it has been unreachable here while\n"
+            f"  api.firecloud.org, the same API, was fine); check VPN/DNS, or set\n"
+            f"  GSVTK_TERRA_API_ROOT. See docs/troubleshooting.md.\n")
+        raise SystemExit(1)
+    _ORIGINAL_EXCEPTHOOK(exc, value, tb)
+
+
+sys.excepthook = _friendly_terra_error
+
+
 def _j(resp: Any, what: str, ok=(200,)) -> Any:
     code = getattr(resp, "status_code", None)
     if code not in ok:
@@ -178,6 +209,29 @@ def billing_projects() -> list:
 
 
 # ----------------------------- mutations (opt-in) -----------------------------
+
+def assert_writable_target(ns: str, ws: str, what: str, allow: bool = False) -> None:
+    """Refuse to mutate the shared baseline workspace, which is a read-side default.
+
+    GSVTK_BASELINE_NAMESPACE/_WORKSPACE ship as public defaults because everyone READS that
+    workspace -- they also look exactly like coordinates you are allowed to use. Writing there is
+    a different act: entity attributes MERGE instead of replace, so a stray `attrs --write`
+    un-freezes the reference inputs every later comparison is measured against, and there is no
+    undo. Same for method configs: whatever you POST there is what the next submission anyone runs
+    reads back.
+    """
+    if allow:
+        return
+    if ns and ns == BASELINE_NS and ws and ws == BASELINE_WS:
+        raise TerraError(
+            f"refusing to {what} in the baseline workspace {ns}/{ws}.\n"
+            f"  that is the shared reference run, not your sandbox. Terra MERGES entity\n"
+            f"  attributes, so writing here silently un-freezes the inputs every later\n"
+            f"  comparison is measured against -- and there is no undo.\n"
+            f"  check GSVTK_TERRA_NAMESPACE / GSVTK_TERRA_WORKSPACE (kit/gsvtk-config show\n"
+            f"  names the file each came from), or pass --allow-shared-target if you really\n"
+            f"  mean this workspace.")
+
 
 def create_workspace(name: str, namespace: str, attributes: dict | None = None,
                      readers: list | None = None, confirm: bool = False) -> dict:

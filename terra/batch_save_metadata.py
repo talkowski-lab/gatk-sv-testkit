@@ -84,7 +84,7 @@ def fetch_tree(ns, ws, sub, wf, depth=0, max_depth=6):
     """
     r = fapi.get_workflow_metadata(ns, ws, sub, wf)
     if r.status_code != 200:
-        return None
+        return None     # callers record this as _missingSubWorkflows; quality() counts it
     meta = r.json()
     kids = []
     if depth < max_depth:
@@ -100,8 +100,49 @@ def fetch_tree(ns, ws, sub, wf, depth=0, max_depth=6):
                         kids.append(child)
                     else:
                         meta["_missingSubWorkflows"] = (meta.get("_missingSubWorkflows") or []) + [sid]
+    else:
+        # Hitting the depth cap is truncation, and unrecorded truncation looks exactly like a
+        # complete tree. Record what is still below here so batch_cost.py can refuse to call the
+        # number it computes a measurement.
+        blocked = [c.get("subWorkflowId") for calls in (meta.get("calls") or {}).values()
+                   for c in calls if c.get("subWorkflowId")]
+        if blocked:
+            meta["_unexpandedSubWorkflows"] = blocked
     meta["_children"] = kids
     return meta
+
+
+def quality(meta) -> dict:
+    """Count what is MISSING from a metadata tree -- the labels a published cost number needs.
+
+    vm_minutes() can only sum what the file contains, and three different kinds of absence produce
+    the same tidy figure:
+      fetch_failed     _missingSubWorkflows: the fetch returned non-200 twice (the old floor sign)
+      unexpanded       a sub-workflow call with no child tree below it -- a depth cap, an older
+                       saved file, or a file trimmed to keep it small. The nested minutes are
+                       simply not there (baseline step 10 read 918 VM-min instead of 1672.8 that
+                       way, which is the whole reason this function exists).
+      half_timestamped vmStartTime without vmEndTime (still running, or aborted): dropped from the
+                       minutes AND the job count, so 'jobs' under-reports too.
+    """
+    q = {"fetch_failed": 0, "unexpanded": 0, "half_timestamped": 0, "calls_seen": 0}
+
+    def walk(m):
+        q["fetch_failed"] += len(m.get("_missingSubWorkflows") or [])
+        sids = [c.get("subWorkflowId") for calls in (m.get("calls") or {}).values()
+                for c in calls if c.get("subWorkflowId")]
+        q["unexpanded"] += len(m.get("_unexpandedSubWorkflows") or [])
+        q["unexpanded"] += max(0, len(sids) - len(m.get("_children") or []))
+        for calls in (m.get("calls") or {}).values():
+            for c in calls:
+                q["calls_seen"] += 1
+                if bool(c.get("vmStartTime")) != bool(c.get("vmEndTime")):
+                    q["half_timestamped"] += 1
+        for kid in (m.get("_children") or []):
+            walk(kid)
+
+    walk(meta)
+    return q
 
 
 def vm_minutes(meta):

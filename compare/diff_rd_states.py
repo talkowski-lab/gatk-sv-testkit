@@ -113,8 +113,16 @@ common_keys = base_keys & new_keys
 print(f"matched site keys: {len(common_keys)} (of {len(base_keys)} baseline depth sites; "
       f"{len(base_keys - new_keys)} baseline keys not found on the java side)")
 
+if not common_keys:
+    # A comparison of nothing. Everything below would print 0 / 0.0000 / n/a and exit 0, which reads
+    # like "the two agree" -- which is exactly the false pass this file exists to prevent.
+    sys.exit("FATAL: no site key matched between the two files, so nothing was compared.\n"
+             "       Check the contig naming (chr20 vs 20) and that both paths are the files you\n"
+             "       think they are -- docs/local-replay.md")
+
 agree = 0
 mism = 0
+unparseable = Counter()
 conf = Counter()
 set_base13 = set()   # (key,sample) in state 1 or 3 per baseline
 set_new13 = set()
@@ -124,14 +132,34 @@ def bucket(s):
     return s if -1 <= s <= 4 else 5   # >=5 folded into one bucket for display
 
 
+def parse_state(raw):
+    """RD state as an int, or None if the field is not an integer.
+
+    `int(bs)` used to raise on any value that was not a bare integer, so one odd record (a float
+    like `3.0`, a sentinel, a truncated line) killed a run that had already read both files. None
+    means: count it, show it, do not guess a state for it.
+    """
+    if raw == ".":
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 for (key, sample), bs in base_states.items():
     if (key, sample) not in new_states:
         continue
     ns = new_states[(key, sample)]
     if bs == "." and ns == ".":
         continue
-    b = int(bs) if bs != "." else -1
-    n = int(ns) if ns != "." else -1
+    b = parse_state(bs)
+    n = parse_state(ns)
+    if b is None or n is None:
+        # Reported, never silently folded into a state: an unparseable field is a data problem, and
+        # treating it as a mismatch would blame the caller for a formatting surprise.
+        unparseable[("baseline" if b is None else "java", str(bs if b is None else ns))[:40]] += 1
+        continue
     conf[(bucket(b), bucket(n))] += 1
     if b in (1, 3):
         set_base13.add((key, sample))
@@ -143,6 +171,14 @@ for (key, sample), bs in base_states.items():
         mism += 1
 
 total = agree + mism
+if unparseable:
+    print(f"\nexcluded, not integer RD states ({sum(unparseable.values())} obs):")
+    for (side, val), c in unparseable.most_common(8):
+        print(f"  {side:8s} {val!r:20s} x{c}")
+if total == 0:
+    # Both fractions below divide by this. Zero comparable observations is not 100 % agreement.
+    sys.exit("FATAL: 0 comparable observations (every record was no-call on both sides, or "
+             "unparseable),\n       so there is no agreement figure to report.")
 print(f"\ncomparable obs: {total}; agree {agree} ({agree / total:.4f}); mismatch {mism}")
 
 print("\nconfusion matrix (baseline row, java col; -1 = no-call, 5 = state>=5):")
@@ -155,9 +191,14 @@ only_base = set_base13 - set_new13
 only_new = set_new13 - set_base13
 both = set_base13 & set_new13
 print(f"\nstate-1/3 sets: baseline {len(set_base13)}, java {len(set_new13)}, shared {len(both)}")
-print(f"symmetric difference: {len(only_base) + len(only_new)}"
+# `max(1, len(set_base13))` made an empty baseline denominator into 1, so a side that called
+# nothing was reported as a rel diff of `len(symdiff)/1` -- a huge-looking number from a denominator
+# that does not exist. Empty denominator means the ratio is undefined, so it is printed as n/a.
+_sd = len(only_base) + len(only_new)
+_rel = f"{_sd / len(set_base13):.4f}" if set_base13 else "n/a (baseline state-1/3 set is empty)"
+print(f"symmetric difference: {_sd}"
       f" (baseline-only {len(only_base)}, java-only {len(only_new)}); "
-      f"rel diff vs baseline: {(len(only_base) + len(only_new)) / max(1, len(set_base13)):.4f}")
+      f"rel diff vs baseline: {_rel}")
 
 by_state = Counter()
 for s in only_base:
@@ -169,3 +210,6 @@ for k in sorted(by_state):
 
 one_off = sum(c for (b, n), c in conf.items() if -1 <= b <= 4 and -1 <= n <= 4 and abs(b - n) == 1)
 print(f"\nobs with |state diff| == 1: {one_off} ({one_off / total:.4f} of comparable)")
+# total > 0 is proven above, so this script only ever exits 0 after comparing something.
+print(f"\nverdict: compared {total} obs across {len(common_keys)} shared site keys "
+      f"({mism} mismatched); this prints numbers, it does not judge them pass/fail.")

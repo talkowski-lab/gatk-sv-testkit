@@ -62,13 +62,34 @@ With no arguments it uses the staged baseline and the newest replay output under
 
 If you find yourself getting a suspiciously empty diff between two pipeline versions, check the
 ID namespaces before believing the emptiness. Two disjoint ID sets produce a perfect-looking
-"no differences" table.
+"no differences" table. The script now refuses to produce that table:
+
+* **zero shared site keys → `FATAL: no site key matched …`, exit 2.** Everything downstream would
+  have printed `0 / 0.0000 / n/a` and exited 0, which reads as "they agree". The usual cause is contig
+  naming (`chr20` vs `20`).
+* **zero comparable observations → `FATAL`, exit 2.** The agreement and off-by-one fractions divide
+  by that count, so 0 is not 100 % agreement.
+* **a field that is not an integer is counted, not guessed.** `int()` on a float-looking or sentinel
+  value used to abort a run that had already read both VCFs; those records are excluded and printed
+  under `excluded, not integer RD states`, per side, with the offending value.
+* **`rel diff vs baseline` prints `n/a` when the baseline state-1/3 set is empty**, instead of the
+  old `max(1, len(...))` division that turned a missing denominator into a large-looking ratio.
+
+What it still does *not* do is judge: the final line states what was compared, and pass/fail remains
+your call — this is a measurement tool, not a gate.
 
 ## Strategy-aware table diffing
 
 `compare_batch_tables.py` (stdlib only, read-only, no network, no Terra) diffs the per-sample
 metric tables that the genotyper consumes — `sr/pe_metric_file.txt`, depth and PESR sepcutoff
 tables, the metrics TSV, the cutoffs file — and is the reason `STRATEGY` exists as a verdict.
+
+File discovery is deliberate: for each role it takes **exactly one** file, and if a directory holds
+more than one candidate (`all_samples.sr_metric_file.txt` *and* `b.sr_metric_file.txt`, say) it stops
+and lists them rather than picking one — the first version quietly chose the shortest filename, so
+dropping a second batch's tables into the same directory made it cross-compare batch B's baseline
+against batch A's output and report huge `DELTA`s that were really two different experiments.
+Nothing comparable at all is reported as such, with exit 1, rather than an empty table.
 
 ```bash
 python compare/compare_batch_tables.py \

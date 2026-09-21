@@ -28,7 +28,13 @@ a statement about the VM's identity.
 | A config binding you set had no effect, WDL default won | the binding is an *expression*, not a value `batch_check_inputs.py` prints `FAIL expression-shaped bindings` and exits 1; make it a literal path or a plain attribute reference |
 | A rerun reproduced the old answer exactly | images came from workspace attributes, so it ran whatever the attribute pointed at | pin images literally (`batch_rerun_step.py` exists for this) and confirm the ref in `show` output |
 | Cost looks low vs the dashboard | `batch_cost.py` reports **VM-minutes and job counts**, never a price — it is not trying to match your bill | multiply by your own per-type rate; the difference should be explained by disk, network and spot pricing. A tree with `_missingSubWorkflows` is a floor, and the tool says so |
-| A baseline input vanished between two comparisons | it lived in an ephemeral `fc-*` bucket, or a workspace attribute moved | that is what `batch_freeze.py copy` + `verify` are for; compare `crc32c` and byte size before believing any diff |
+| A baseline input vanished between two comparisons | it lived in an ephemeral `fc-*` bucket, or a workspace attribute moved | that is what `batch_freeze.py copy --write` + `verify` are for; compare `crc32c` and byte size before believing any diff |
+| `HTTP 405` from `POST /api/workspaces//methodconfigs` — note the empty workspace between the slashes | the target workspace/project resolved to **nothing** and the URL was built from the hole. Nothing was created (Terra rejected it), but a mutating request did leave the machine with no target in it | the tools now resolve and validate the full target identity *before* the first request and exit 1 naming the missing key. Check `./kit/gsvtk-config show` — and remember a `[profile:...]` value can come from a file you are not looking at |
+| `refusing to <mutate> the shared baseline workspace ...` | your `GSVTK_TERRA_NAMESPACE`/`GSVTK_TERRA_WORKSPACE` still point at the public featured GATK-SV workspace, i.e. everyone's baseline | set your own sandbox, or pass `--allow-shared-target` if you genuinely mean to modify the shared one. Every mutator (`copy --write`, `attrs --write`, `configs create --confirm`, `rerun submit`) enforces this |
+| `chain total is PARTIAL: no saved metadata for 06/baseline` (exit 1) | one step's Cromwell dump is missing, and a missing step is not zero cost — the chain total and the ratio are withheld on purpose | run `batch_save_metadata.py` for the missing step; see [terra-head-to-head.md](terra-head-to-head.md) |
+| `N sub-workflow call(s) have no expanded tree below them -> cost is a FLOOR` | the saved tree was depth-capped, trimmed, or is an older file — `_missingSubWorkflows` was empty, so it *looked* complete | re-fetch with `batch_save_metadata.py`; treat the printed VM-minutes as a lower bound until it says `these are measurements` |
+| `N local files are named <x> with the object's size, so adoption cannot pick one` | two `--link-dir` captures both contain an object of that name and size | narrow `--link-dir` to one capture, or drop it and download. Guessing by glob order is how a stale table becomes a "baseline" input |
+| `!! NOT adopting <path>: crc32c:mismatch … -- downloading the object instead` | a same-name same-size local file is **not** the current baseline object | nothing to fix — the tool refused a wrong input. If you expected it to match, the local capture is stale |
 
 ## Docker builds
 
@@ -62,7 +68,22 @@ a statement about the VM's identity.
 | `gsvtk-config: GSVTK_PROJECT is not set ...` (exit 4) | working as designed — this key decides whose money is spent | set it in `testkit.env`; `./kit/gsvtk-config doctor` shows what is missing |
 | `... is not a git repository` | `GSVTK_GATK_SV_CHECKOUT` points at a directory that is not a clone | point it at a real clone, or unset it and let a check take `--repo` |
 | A comparison came back completely empty | two tools disagree about the attribute suffix — one wrote `*_new`, the other read `*_newest` | keep `GSVTK_NEW_SUFFIX`/`GSVTK_FROZEN_SUFFIX` constant across the profile and every invocation |
-| Something used a stale value after you edited the profile | a later file in the chain wins, an exported env var shadows it, or `GSVTK_CONFIG` is set — which **replaces** the whole chain rather than joining it | `./kit/gsvtk-config show` prints each value's source; `doctor` lists the files read and marks the missing ones |
+| Something used a stale value after you edited the profile | a later file in the chain wins, an exported env var shadows it, or `GSVTK_CONFIG` is set — which **replaces** the whole chain rather than joining it | `./kit/gsvtk-config show` prints each value's source (the **file path**, not just `profile`); `doctor` lists the files read and marks the missing ones |
+| `kit/config.sh: the configuration layer produced no exports …` on stderr | sourcing `kit/config.sh` never hard-fails (so `--help` works unconfigured), but here the resolver itself failed and the tool is about to fall back to inline defaults | fix what the printed resolver error says. Do not ignore it: a silent fallback means the run is using someone else's project/workspace, not yours |
+
+## When a check says OK and you do not believe it
+
+You are right to be suspicious — every one of these false OKs existed here and was found by attack,
+not by use. Each now fails loudly instead:
+
+| Symptom | What had been happening | Now |
+|---|---|---|
+| `=> OK: every jq block executed` | blocks written slightly differently from the canonical `jq -n \` shape were never extracted, so they were never executed | the scan prints `blocks: P in file, E extracted, X executed, …` and refuses a partial scan: `X < P` is exit 1, "a verdict from a partial scan means nothing" |
+| contract check with no findings | it compared a subset of stage calls (bare/dashed/single-quoted keys and `// default` reads were invisible) | header prints `N of M stage calls compared`; `N < M` ⇒ `NOT PROVEN` and exit 1 |
+| `byte-identity check passed` | one blanket line for the whole run, quoting md5s nobody had supplied as expectations | `PROVEN` only when both `--expect-*-md5` were given and matched; otherwise `SCAN_CLEAN`, per file |
+| `wdl_gate.sh --strict` said `no hard errors` | the workflow you named with `--wf` did not exist at that ref, so nothing was checked | named-but-absent is a failure that says nothing was checked |
+| `make selftest` printed a wall of `ok` | in a Makefile recipe, `$$($("$@") 2>&1)` is eaten by make — bash got `out="( 2>&1)"`, the command never ran, and `$?` was the substitution's success. Eight config assertions, including env > profile precedence, were permanently vacuous | assertions live in `scripts/selftest.sh` (no make escaping), and a **canary** asserts that a known-failing command is reported as failing — if the harness ever goes vacuous again, the gate fails on the canary |
+| a checker that detects nothing still passes the gate | `make test` only ran `--help` and `py_compile`, and selftests asserted "exit code was acceptable", which a blind checker satisfies | `make smoke` invokes the tools end-to-end; selftests require positive-control numbers (blocks executed == blocks present, ≥ 12 stage calls compared) |
 
 ## When a tool here is wrong
 

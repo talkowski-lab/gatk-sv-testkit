@@ -101,7 +101,7 @@ Logs/outputs: `runs/train_full_stream/train.log` (RD progress logged every 100k 
 ### Baseline coordinates
 
 - Workspace id `<baseline-workspace-id>`, bucket `fc-<baseline-workspace-id>`
-- GenotypeBatch submission `86003b19-1b93-4599-81c5-f46ceec6ff84` (v1.1.1, completed 2026-07)
+- GenotypeBatch submission `<submission-id-1>` (v1.1.1, completed 2026-07)
 - Manifest of resolved inputs/outputs: `manifests/baseline_v111.json` (~12 MB; steps 05–10)
   - entity attributes are at `manifest['entities']['sample_set']['all_samples']` — **flat**, no `attributes` sub-key
 - Terra API from this network: **`https://api.firecloud.org/api/`** (`api.terra.bio` is NXDOMAIN here)
@@ -1768,7 +1768,7 @@ the jar-pin/`GenotypeSVs`-argument comparison. What is **still not exercised**: 
 | Image (new) | `us.gcr.io/<project>/gatk-sv/sv-shell:<branch>--8748f0` = `sha256:cfe0a28f50f4…` | `add-tag` from `<you>/gatk-sv/sv-shell:<branch>--8748f0` (same digest); `gcloud container images delete <prod-tag>` to undo |
 | Dockstore entries | `SingleSamplePipeline@<branch-under-test>`, `SVShell@<branch-under-test>` | driven by `.github/.dockstore.yml`; remove the filter lines to undo |
 | Terra configs (mine) | `<billing-project>/A_baseline_main`, `<billing-project>/B_branch_<branch-under-test>` in `<public-baseline-ns>/<your-single-sample-workspace>` | `fapi.delete_workspace_config(NS, WS, '<billing-project>', <name>)` |
-| Terra submissions (mine) | A `ad6c8a60-07b7-4162-9fe9-dff9160ff838` (`Failed`, $4.31); B `51e31b4d-a657-4d2b-a74f-f5f2f571b110` (abort accepted, last seen `Running`, $1.44) | A terminal; B: `PATCH …/submissions/<id>?workflowStatus=ABORTED` **with** `{"userComment": …}` body |
+| Terra submissions (mine) | A `<submission-id-2>` (`Failed`, $4.31); B `<submission-id-3>` (abort accepted, last seen `Running`, $1.44) | A terminal; B: `PATCH …/submissions/<id>?workflowStatus=ABORTED` **with** `{"userComment": …}` body |
 | GCS objects (mine) | `gs://<workspace-bucket>/genotyping_tables/all_samples.rd_{depth,pesr}_geno_params.tsv` (copies of my step-10 rerun tables) | `gsutil rm` them; sources untouched in `gs://<workspace-bucket>…` |
 | a colleague | **read-only all session**; no writes to `<colleague-ns>/*`, no writes to `gs://<gcp-project>-vj` or `gs://<workspace-bucket>…` | — |
 
@@ -1781,7 +1781,7 @@ the jar-pin/`GenotypeSVs`-argument comparison. What is **still not exercised**: 
  git -C <gatk-sv-checkout> diff --stat origin/main HEAD | tail -1   # expect 32 files, +414 -89
  timeout 200 python3 ~/.pi/agent/skills/terra-monitor/scripts/twatch.py \
    -w <public-baseline-ns>/<your-single-sample-workspace> \
-   status ad6c8a60-07b7-4162-9fe9-dff9160ff838 51e31b4d-a657-4d2b-a74f-f5f2f571b110
+   status <submission-id-2> <submission-id-3>
    # 29.0 saw B still Running after the abort was accepted; it should be Aborted by now. Cost must not exceed ~$2.
  GSV_CFG_VERSION=1 .venv/bin/python svshell-replay/svshell_arms.py prep
    # the real next step: it prints UNRESOLVED required inputs per arm. 74 were unresolved at freeze.

@@ -7,8 +7,23 @@ make setup            # ./.venv with what the tools import
 make test && make audit
 ```
 
-`make test` is the offline gate (syntax, `--help` with no configuration, config-layer
-self-tests) and must pass with no credentials, no data and no network. `make audit` fails if
+`make test` is the offline gate and must pass with no credentials, no data and no network. Its five
+parts each exist because the previous one proved insufficient:
+
+| part | what it proves | why `--help` + `py_compile` were not enough |
+|---|---|---|
+| `syntax` | every `.sh` parses (`bash -n`), every `.py` compiles | — |
+| `undefmods` | no attribute access on a module the file never imports | `os.path.isdir` in a file with no `import os` compiles fine and dies on first real call |
+| `helpsweep` | `--help` works on every tool with zero configuration | argument parsers are the only code path `--help` reaches |
+| `smoke` | the tools actually **run** end-to-end on hostile/empty fixtures | `--help` never reaches `main()`; the comparator that was dead on every real invocation passed all of the above |
+| `selftest` | the config layer, both checkers' parsing, and the checkers against a real clone — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared) | "exit code was acceptable" is satisfied by a checker that detects nothing |
+
+`selftest` also runs a **canary** (it asserts a known-failing command is reported as failing). That
+exists because the assertions used to live in a Makefile recipe where `$$($("$@") 2>&1)` is expanded
+by make into nothing — bash received `out="( 2>&1)"`, no command ran, and all eight config
+assertions reported `ok` forever. Keep assertions in `scripts/selftest.sh`, never in a recipe.
+
+`make audit` fails if
 any file that would go public contains an internal identifier from the private working
 directory this repo was assembled out of. Both run in CI for exactly that reason.
 

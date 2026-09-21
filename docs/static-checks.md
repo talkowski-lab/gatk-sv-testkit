@@ -65,6 +65,20 @@ The checker cross-references statically:
 reads, mostly gcnv hyperparameters that arrive from elsewhere in real use. Their value is the
 diff: run before and after your change, and any *new* unsupplied read is a rename you missed.
 
+**Coverage is printed, and partial coverage is a failure, not a clean run.** The header reports
+`N of M stage calls compared`; if `N < M` the verdict is `NOT PROVEN` and the exit status is 1,
+because "no findings" from a checker that did not look is the most expensive possible output. (This
+is not hypothetical: the first version of this checker compared a handful of the ~14 stage calls — it
+missed bare object keys, dashed keys, single-quoted module reads and `// default` reads — and still
+reported a clean run on the subset it saw. It now compares 14 of 14 against real gatk-sv.) Key
+recognition was also widened, so a key written *any* of `KEY:`, `"KEY":`, `'KEY':`, `"KEY":` with
+dashes, or read with a `// default`, is no longer invisible.
+
+`--strict` turns the pre-existing upstream findings into a nonzero exit as well; `--selftest` runs
+the parser against hostile inline fixtures so a regression in *detection* fails the gate rather than
+quietly shrinking coverage (`make selftest` runs it, and pins a minimum number of compared stage
+calls).
+
 ## `svshell_jq_plumbing_scan.py` — execute the plumbing instead of reading it
 
 ```bash
@@ -85,6 +99,15 @@ change, which fails only on nulls the branch *introduced*.
 Needs `jq` on PATH. `--compare-to` exists so a PR gate reports only findings that are new to the
 branch, which is the difference between a useful gate and one that gets ignored.
 
+The scan reports its own **coverage** on one line — `blocks: P in file, E extracted, X executed,
+Y errored, Z with null/empty` — and refuses to summarise a partial scan: if `X < P` you get a
+nonzero exit and a message saying the verdict means nothing. Extraction used to skip blocks that were
+written a little differently from the canonical `jq -n \` shape (quoting, line breaks, a redirect on
+the same line) while the summary still said *every jq block executed*; blocks that cannot be resolved
+are now counted and named instead of dropped. Each producer block gets a stub carrying the keys its
+consumers read, so a stale reader against another block's output is detectable rather than silently
+null, and `--selftest` pins both behaviours for `make selftest`.
+
 ## `image-check/` — proof about shipped bytes, not checkout bytes
 
 A checkout can be checked statically; an image has to be asked. Both scripts boot one throwaway
@@ -97,7 +120,12 @@ checks/image-check/svshell_image_check.sh --image "$(./kit/gsvtk-config get IMAG
 checks/image-check/jar_flag_probe.sh --image <ref>     # which GenotypeSVs flags the shipped jar accepts
 ```
 
-`--expect-driver-md5` / `--expect-fixture-md5` are what make it a proof rather than a demo.
+`--expect-driver-md5` / `--expect-fixture-md5` are what make it a proof rather than a demo, and the
+verdict says which of the two you got: **`PROVEN`** only when both expected md5s were supplied and
+matched the shipped bytes, **`SCAN_CLEAN`** when the scan ran clean but no expected md5 was given for
+something — per file, so a clean scan of a file nobody pinned can never be quoted as byte identity.
+The earlier wording printed one blanket "byte-identity check passed" for the whole run, which people
+(naturally) quoted as proof about files it had never compared to anything.
 
 `svshell_image_check.sh` extracts `/opt/sv_shell` with `docker create` + `docker cp` (no bind
 mounts, no daemon config) and md5s the driver and shipped fixture. **The `--expect-*` values are

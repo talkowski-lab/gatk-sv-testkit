@@ -26,13 +26,27 @@ if [ -z "${GSVTK_PYTHON:-}" ]; then
 fi
 export GSVTK_PYTHON
 
-# Loading must never be fatal: a script that needs a value calls gsvtk_require
-# for it and gets a written instruction. This way `--help` keeps working with no
-# configuration at all.
+# Loading must never be fatal: a script that needs a value calls gsvtk_require for it and gets a
+# written instruction, so `--help` keeps working with no configuration at all.
+#
+# "Not fatal" is not "invisible", though. This call used to carry 2>/dev/null, so a resolver that
+# failed for any reason -- bad interpreter, a syntax error introduced in gsvtk-config, a profile it
+# could not parse -- left every GSVTK_* UNSET and printed nothing. Each bash tool then fell back to
+# its own inline defaults (ZONE us-central1-a, DISK_GB 60, TIMEOUT_H 8), so the failure surfaced
+# many steps later as a build in someone's guessed region, or never. One warning here, carrying the
+# resolver's own stderr, is the difference between a silent fallback and a diagnosable one.
 if _gsvtk_env="$("$GSVTK_PYTHON" "$GSVTK_ROOT/kit/gsvtk-config" env 2>/dev/null)"; then
     eval "$_gsvtk_env"
+else
+    _gsvtk_err="$("$GSVTK_PYTHON" "$GSVTK_ROOT/kit/gsvtk-config" env 2>&1 1>/dev/null)"
+    {
+        echo "kit/config.sh: the configuration layer produced no exports; every GSVTK_* stays"
+        echo "  unset and tools will fall back to their own inline defaults. Fix it, or pass the"
+        echo "  values explicitly -- see docs/config.md."
+        [ -n "$_gsvtk_err" ] && printf '%s\n' "$_gsvtk_err" | head -4 | sed 's/^/    /'
+    } >&2
 fi
-unset _gsvtk_env
+unset _gsvtk_env _gsvtk_err
 
 # gsvtk_require KEY [extra hint] — exit 4 with the fix, never run with a guess.
 gsvtk_require() {

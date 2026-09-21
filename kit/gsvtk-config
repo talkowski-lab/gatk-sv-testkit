@@ -122,27 +122,45 @@ def _parse_profile(path: Path) -> dict[str, str]:
     return values
 
 
-def _file_vars() -> dict[str, str]:
+def _short(path) -> str:
+    """$HOME as ~, so provenance stays readable on one line."""
+    home = str(Path.home())
+    s = str(path)
+    return "~" + s[len(home):] if s.startswith(home) else s
+
+
+def _file_vars():
+    """(merged values, key -> the file that won).
+
+    The origin is returned because it is the answer to the only question that matters before a
+    write: profile files are merged last-wins, so `testkit.local.env` and ~/.config/... outrank
+    the repo's `testkit.env`, and the coordinates that decide whose workspace gets written and
+    whose project gets billed can come from a file you are not looking at. Printing `[profile]`
+    hides that; printing the path makes it one glance in `show`.
+    """
     merged: dict[str, str] = {}
+    origin: dict[str, str] = {}
     for path in _profile_files():
         for key, value in _parse_profile(path).items():
             merged[key] = value
             merged[key.removeprefix(PREFIX)] = value  # accept bare `PROJECT=`
-    return merged
+            origin[key] = _short(path)
+            origin[key.removeprefix(PREFIX)] = _short(path)
+    return merged, origin
 
 
 def resolve() -> dict[str, tuple[str, str]]:
     """Return key -> (value, provenance)."""
-    files = _file_vars()
+    files, origin = _file_vars()
     resolved: dict[str, tuple[str, str]] = {}
     for key, (default, _help, _req) in DEFAULTS.items():
         env_name = PREFIX + key
         if os.environ.get(env_name):
             resolved[key] = (os.environ[env_name], "env")
         elif files.get(env_name):
-            resolved[key] = (files[env_name], "profile")
+            resolved[key] = (files[env_name], f"profile:{origin[env_name]}")
         elif files.get(key):
-            resolved[key] = (files[key], "profile")
+            resolved[key] = (files[key], f"profile:{origin[key]}")
         else:
             resolved[key] = (default, "default" if default else "unset")
 
@@ -212,10 +230,18 @@ def cmd_show(a):
 
 
 def cmd_work(a):
+    """Print the directory it created -- including the subdirs, not just their parent.
+
+    Every caller is `SOMETHING="$(gsvtk_work staging)"`. Printing the root made those assignments
+    succeed quietly with the WRONG path: the staging tree and the run outputs both landed in the
+    work dir, and two runs (`gsvtk_work runs/train_chr20` and `runs/train_definitive`) wrote into
+    the same directory and overwrote each other while every log said it had its own. This is the
+    behaviour scripts/selftest.sh now pins with a real assertion.
+    """
     root = Path(require("WORK")).expanduser()
-    for sub in a.subdirs:
-        (root / sub).mkdir(parents=True, exist_ok=True)
-    sys.stdout.write(str(root) + "\n")
+    target = root.joinpath(*a.subdirs) if a.subdirs else root
+    target.mkdir(parents=True, exist_ok=True)
+    sys.stdout.write(str(target) + "\n")
 
 
 def cmd_doctor(a):

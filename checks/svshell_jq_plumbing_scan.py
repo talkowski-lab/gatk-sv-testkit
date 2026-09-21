@@ -11,62 +11,113 @@ the container -- but the jq blocks are pure and self-contained, so they can be e
 executed against fixtures in seconds, with no data and no docker.
 
 Method per block:
-  * locate `jq -n \\` .. `> "${target}"`
-  * substitute shell variables: the top-level input file -> a fixture; any `*outputs_json*` var
-    -> a synthesized stub carrying every key the driver reads from any slurped var (so the
-    outputs side can never be the reason a key is missing -- we are testing the inputs side,
-    which is where this PR's change lives)
+  * locate every `jq -n` invocation, whatever shape it is written in, ending at its
+    `> "${target}"` redirect
+  * substitute shell variables: the top-level input file -> the real fixture; any variable this
+    driver PRODUCES -> a stub carrying exactly the keys that producer block wrote (a key the
+    driver reads from a variable it does NOT produce is stubbed as present and COUNTED in the
+    report -- see --list-keys -- this tool cannot prove the WDL supplied it)
   * run the block verbatim with real jq (a boundary error shows up as a jq parse error, so
     extraction cannot silently pass)
   * collect every key whose resulting value is null / empty string / the string "null"
 
-Compare branch vs a baseline ref to answer "does this change introduce new nulls?".
+Two passes, because a producer's output is what defines its consumers' stub. Pass 1 runs with
+permissive stubs to learn each produced key set (including which of those keys came out null, so
+a null propagates downstream in pass 2 exactly as it would at runtime).
+
+What this proves is bounded, and the bounds are printed: "N of M blocks executed". A scan that
+executed fewer blocks than the driver contains is a coverage failure and exits nonzero -- the
+first version of this file silently executed 1 block out of 5 in a reformatting-shaped driver and
+still printed "every jq block executed".
+
+Compare branch vs a baseline ref to answer "does this change introduce new nulls?". That gate is
+only meaningful with full coverage, so --compare-to also fails on incomplete coverage.
 
 Usage:
   svshell_jq_plumbing_scan.py --repo <worktree> [--fixture PATH] [--list-keys]
   svshell_jq_plumbing_scan.py --repo <worktree> --compare-to main     # PR gate form
+  svshell_jq_plumbing_scan.py --selftest                              # no repo, no data
 """
 import argparse
 import json
+import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kit"))
+import config  # noqa: E402
+
 DRIVER = 'src/sv_shell/single_sample_pipeline.sh'
-BLOCK_START = re.compile(r'^\s*jq\s+-n\s+\\\s*$')
-BLOCK_END = re.compile(r'^\s*(?:.*?>\s*)?"?\$\{?([A-Za-z0-9_]+)\}?"?\s*$')
+# A `jq -n` invocation however written: leading assignments and any number of flags allowed, and
+# the flag order is not assumed. Anchored on a word boundary that is not glued to a path so
+# `/opt/.../jq` still counts and a jq program mentioning the word does not.
+JQ_N = re.compile(r'(^|[^\w./-])jq\s+(?:-\S+\s+)*-n\b')
+# The block's end: a redirect into a braced shell variable. Anything after it (2> log, || die,
+# | tee) is the driver's business and must not stop us finding the target.
+REDIRECT = re.compile(r'>\s*"?\$\{?([A-Za-z0-9_]+)\}?')
 VAR_ANY = re.compile(r'\$\{([A-Za-z0-9_]+)\}|\$([a-z_][a-z0-9_]*)')
 SLURPED_KEY = re.compile(r'\$([a-z_][a-z0-9_]*)\[0\]\.([A-Za-z_][A-Za-z0-9_]*)')
+SLURP_ARG = re.compile(r'--slurpfile\s+([A-Za-z_][A-Za-z0-9_]*)\s+"\$\{([A-Za-z0-9_]+)\}"')
+ARGJSON_ARG = re.compile(r'--argjson\s+([A-Za-z_][A-Za-z0-9_]*)\s+"\$\{([A-Za-z0-9_]+)\}"')
+# Keys are read out of the fixture by name; a fixture line is a comment if it starts with one.
+STUB_OUT = {}
+
+
+def count_jq_n(lines):
+    """How many `jq -n` invocations the file contains.
+
+    Deliberately a line count with the same pattern the extractor starts from: that is not
+    independence, and it is not claimed as such. It catches the failure that actually happened --
+    an extractor that stops early and then cascades past the following block, so `executed` drifts
+    below `present` while nothing compares them.
+    """
+    return sum(1 for ln in lines
+               if not ln.lstrip().startswith('#') and JQ_N.search(ln))
 
 
 def extract_blocks(lines):
-    """Return [(target_var, start_line, block_text)] for every jq -n block."""
-    out, i = [], 0
-    while i < len(lines):
-        if BLOCK_START.match(lines[i]):
-            start = i
-            j = i + 1
-            target = None
-            while j < len(lines):
-                m = BLOCK_END.match(lines[j])
-                if m and '--' not in lines[j] and not BLOCK_START.match(lines[j]):
-                    target = m.group(1)
-                    break
-                if BLOCK_START.match(lines[j]):
-                    break
+    """Return [(target_var_or_None, start_line_1based, block_text)].
+
+    target is None when no redirect was found before the next block started: that block did not
+    execute, and it is reported rather than dropped. Resumption after such a block is at
+    start+1, never past the scan -- resuming past it is what used to swallow the next block too.
+    """
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if line.lstrip().startswith('#') or not JQ_N.search(line):
+            i += 1
+            continue
+        start = i
+        m = REDIRECT.search(line)
+        if m:                                     # one-liner: jq -n ... '{...}' > "${x}"
+            out.append((m.group(1), start + 1, line))
+            i += 1
+            continue
+        target, j = None, i + 1
+        while j < n:
+            nxt = lines[j]
+            if nxt.lstrip().startswith('#'):
                 j += 1
-            if target:
-                out.append((target, start + 1, '\n'.join(lines[start:j + 1])))
+                continue
+            if JQ_N.search(nxt):                  # next block began: this one never closed
+                break
+            m = REDIRECT.search(nxt)
+            if m:
+                target = m.group(1)
+                break
+            j += 1
+        if target:
+            out.append((target, start + 1, '\n'.join(lines[start:j + 1])))
             i = j + 1
         else:
-            i += 1
+            out.append((None, start + 1, '\n'.join(lines[start:min(j, start + 60)])))
+            i = start + 1
     return out
-
-
-SLURP_ARG = re.compile(r'--slurpfile\s+([A-Za-z_][A-Za-z0-9_]*)\s+"\$\{([A-Za-z0-9_]+)\}"')
-ARGJSON_ARG = re.compile(r'--argjson\s+([A-Za-z_][A-Za-z0-9_]*)\s+"\$\{([A-Za-z0-9_]+)\}"')
 
 
 def _argjson_literal(m):
@@ -74,8 +125,8 @@ def _argjson_literal(m):
     return f"--argjson {m.group(1)} '[\"stub://{m.group(2)}\"]'"
 
 
-def shell_subst(block, fixture, stub_paths, dummy_dir, target=None, out_path=None):
-    """Replace ${VAR} / $var so the block can run standalone."""
+def shell_subst(block, fixture, stub_for, dummy_dir, target=None, out_path=None):
+    """Replace ${VAR} so the block can run standalone."""
     # Any var handed to `--slurpfile` must name a real, parseable JSON file or jq aborts before
     # evaluating the program -- which would look like a defect in the driver rather than in us.
     slurped = {v for _, v in SLURP_ARG.findall(block)}
@@ -94,7 +145,7 @@ def shell_subst(block, fixture, stub_paths, dummy_dir, target=None, out_path=Non
         if low == 'input_json':
             return fixture             # also slurped, but the real fixture is the point of the test
         if name in slurped or 'outputs_json' in low:
-            return stub_paths.setdefault(name, _write_stub(name, dummy_dir))
+            return stub_for(name)
         if low in ('working_dir', 'output_dir', 'base_dir', 'log_dir'):
             return dummy_dir
         return f'{dummy_dir}/stub_{name}'
@@ -103,17 +154,12 @@ def shell_subst(block, fixture, stub_paths, dummy_dir, target=None, out_path=Non
     return re.sub(r'\$\{([A-Za-z0-9_]+)\}', rep, block)
 
 
-def _write_stub(name, dummy_dir):
-    p = pathlib.Path(dummy_dir) / f'{name}.json'
-    p.write_text(json.dumps(STUB_OUT))
-    return str(p)
-
-
-STUB_OUT = {}
-
-
 def build_stub(driver_text):
-    """Every key the driver reads from any slurped var, so outputs can't cause a null."""
+    """Fallback stub: every key the driver reads from any slurped var.
+
+    This is the shape that cannot expose a rename, so it is now only used for variables this
+    driver does not produce. Those selects are counted and printed; they are not proven.
+    """
     keys = sorted({k for _, k in SLURPED_KEY.findall(driver_text)})
     return {k: f'stub://{k}' for k in keys}
 
@@ -133,36 +179,86 @@ def scan_nulls(obj, prefix=''):
     return hits
 
 
-def run_blocks(repo, fixture):
-    """`repo` is a repo root (src/sv_shell/...) or an installed tree (the dir holding *.sh)."""
+def run_blocks(repo, fixture, passes=2):
+    """`repo` is a repo root (src/sv_shell/...) or an installed tree (the dir holding *.sh).
+
+    Returns (results, coverage). coverage['present'] is the file's own count of `jq -n`, so a
+    caller can tell "clean" apart from "did not look".
+    """
+    global STUB_OUT
     driver = _driver_path(repo).read_text(errors='replace')
     lines = driver.splitlines()
-    global STUB_OUT
     STUB_OUT = build_stub(driver)
+    blocks = extract_blocks(lines)
+    jqvar_to_shell = dict(SLURP_ARG.findall(driver))     # jq name -> shell var it was bound to
+    coverage = {'present': count_jq_n(lines), 'extracted': len(blocks),
+                'executed': 0, 'errors': 0, 'unresolved': [], 'external_vars': set()}
     results = {}
-    with tempfile.TemporaryDirectory() as dd:
-        dummy = dd
-        stubs = {}
-        for target, lineno, block in extract_blocks(lines):
-            out = pathlib.Path(dd) / f'{target}.json'
-            script = shell_subst(block, str(fixture), stubs, dummy, target, str(out))
-            if not out.exists():
-                pass  # created by the run below
-            with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as fh:
-                fh.write('set -euo pipefail\n' + script + '\n')
-                path = fh.name
-            r = subprocess.run(['bash', path], capture_output=True, text=True)
-            if r.returncode != 0:
-                last = (r.stderr or r.stdout).strip().splitlines()
-                results[f'{target}@L{lineno}'] = {'error': last[-1] if last else 'failed'}
-                continue
-            try:
-                obj = json.loads(out.read_text())
-            except Exception as exc:                                    # noqa: BLE001
-                results[f'{target}@L{lineno}'] = {'error': f'unparseable output: {exc}'}
-                continue
-            results[f'{target}@L{lineno}'] = {'nulls': dict(scan_nulls(obj))}
-    return results
+    produced = {}                       # shell var -> {key: value}, from its producer block
+    for attempt in range(max(1, passes)):
+        results = {}
+        produced_next = {}
+        # Per-pass, not cumulative: pass 1 has no producer key sets yet, so everything looks
+        # external there. Coverage must describe the final, fully-informed pass.
+        unresolved, external = [], set()
+        with tempfile.TemporaryDirectory() as dd:
+            cache = {}
+
+            def stub_for(name):
+                if name in cache:
+                    return cache[name]
+                keys = produced.get(name)
+                if keys is None:
+                    external.add(name)
+                    content = STUB_OUT
+                else:
+                    # Exactly what the producer wrote -- nulls included, so a null that a producer
+                    # emits propagates into its consumers here just as it does at runtime.
+                    content = dict(keys)
+                p = pathlib.Path(dd) / f'{name}.json'
+                p.write_text(json.dumps(content))
+                cache[name] = str(p)
+                return cache[name]
+
+            for target, lineno, block in blocks:
+                if target is None:
+                    unresolved.append(lineno)
+                    results[f'<no redirect>@L{lineno}'] = {
+                        'error': 'no > "${var}" redirect before the next jq block: block NOT '
+                                 'executed, so its output is unproven'}
+                    continue
+                out = pathlib.Path(dd) / f'{target}.json'
+                script = shell_subst(block, str(fixture), stub_for, dd, target, str(out))
+                with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as fh:
+                    fh.write('set -euo pipefail\n' + script + '\n')
+                    path = fh.name
+                r = subprocess.run(['bash', path], capture_output=True, text=True)
+                if r.returncode != 0:
+                    last = (r.stderr or r.stdout).strip().splitlines()
+                    results[f'{target}@L{lineno}'] = {'error': last[-1] if last else 'failed'}
+                    continue
+                try:
+                    obj = json.loads(out.read_text())
+                except Exception as exc:                                    # noqa: BLE001
+                    results[f'{target}@L{lineno}'] = {'error': f'unparseable output: {exc}'}
+                    continue
+                info = {'nulls': dict(scan_nulls(obj))}
+                if isinstance(obj, dict):
+                    # Top-level keys this block wrote, with nulls kept null: that is what makes a
+                    # producer's own defect visible to its consumers on the next pass.
+                    top_null = {p for p, _ in scan_nulls(obj) if '.' not in p and '[' not in p}
+                    info['keys'] = {k: (None if k in top_null else f'stub://{k}') for k in obj}
+                    produced_next[target] = info['keys']
+                results[f'{target}@L{lineno}'] = info
+        coverage['executed'] = sum(1 for v in results.values() if 'error' not in v)
+        coverage['errors'] = len(results) - coverage['executed']
+        coverage['unresolved'], coverage['external_vars'] = unresolved, external
+        produced = produced_next
+        if attempt + 1 >= passes:
+            break
+    coverage['unprovable'] = sum(1 for jq, _k in SLURPED_KEY.findall(driver)
+                                 if jqvar_to_shell.get(jq) in coverage['external_vars'])
+    return results, coverage
 
 
 def _driver_path(root):
@@ -183,22 +279,41 @@ def _fixture_for(root, name):
     raise SystemExit(f'fixture {name} not found under {p}')
 
 
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kit"))
-import config  # noqa: E402
+def report(res, cov, list_keys=False):
+    """Print the run. The headline is coverage first: 'clean' only means something if M of M ran."""
+    print(f"blocks: {cov['present']} in file, {cov['extracted']} extracted, "
+          f"{cov['executed']} executed, {cov['errors']} errored, "
+          f"{cov.get('nulls', 0)} with null/empty")
+    for tgt, info in res.items():
+        if 'error' in info:
+            print(f'  ERROR {tgt}: {info["error"]}')
+    for tgt, hits in sorted(cov['null_items']):
+        print(f'  {tgt}: {len(hits)} null/empty'
+              + (f" -> {', '.join(sorted(hits)[:14])}{' ...' if len(hits) > 14 else ''}"
+                 if list_keys else ''))
+    if cov['unprovable']:
+        print(f"  note: {cov['unprovable']} select(s) read keys from "
+              f"{len(cov['external_vars'])} variable(s) this driver does not produce "
+              f"({', '.join(sorted(n for n in cov['external_vars'] if 'outputs_json' in n.lower())[:4])}"
+              f"{'' if len([n for n in cov['external_vars'] if 'outputs_json' in n.lower()]) <= 4 else ' ...'}). "
+              f"Their keys are stubbed as present, so a rename there is INVISIBLE to this run.")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tree', help='installed sv_shell tree (e.g. an extracted /opt/sv_shell); '
                                    'scans the shipped bytes instead of a git checkout')
-    ap.add_argument('--repo', default=config.get('GATK_SV_CHECKOUT') or '.',
+    ap.add_argument('--repo', default=None,
                     help='gatk-sv checkout to read (default: GSVTK_GATK_SV_CHECKOUT, else cwd)')
     ap.add_argument('--fixture', default='src/sv_shell/sample_inputs/single_sample_pipeline.json')
     ap.add_argument('--compare-to', help='git ref to baseline against (PR gate form)')
     ap.add_argument('--list-keys', action='store_true')
+    ap.add_argument('--selftest', action='store_true',
+                    help='assert extraction/coverage/stale-reader detection on a built-in fixture')
     a = ap.parse_args()
-    repo = pathlib.Path(a.tree or a.repo).resolve()
+    if a.selftest:
+        return _selftest()
+    repo = pathlib.Path(a.tree or a.repo or (config.get('GATK_SV_CHECKOUT') or '.')).resolve()
     fxname = pathlib.Path(a.fixture).name
     fixture = pathlib.Path(a.fixture) if pathlib.Path(a.fixture).is_absolute() else _fixture_for(repo, fxname)
     if a.tree:
@@ -212,54 +327,56 @@ def main():
             raise SystemExit('--compare-to needs a git checkout; scan the baseline image/tree '
                              'separately and diff the two reports')
 
-    res = run_blocks(repo, fixture)
-    nblocks = len(res)
-    nerr = sum(1 for v in res.values() if 'error' in v)
-    nnull = {k: v['nulls'] for k, v in res.items() if v.get('nulls')}
-    print(f'blocks executed: {nblocks}   jq errors: {nerr}   blocks with null/empty values: {len(nnull)}')
-    for tgt, info in res.items():
-        if 'error' in info:
-            print(f'  ERROR {tgt}: {info["error"]}')
-    if a.list_keys:
-        for tgt, hits in sorted(nnull.items()):
-            print(f'  {tgt}: {len(hits)} null/empty -> {", ".join(sorted(hits)[:14])}'
-                  f'{" ..." if len(hits) > 14 else ""}')
-    else:
-        for tgt, hits in sorted(nnull.items()):
-            print(f'  {tgt}: {len(hits)} null/empty')
+    res, cov = run_blocks(repo, fixture)
+    cov['null_items'] = [(k, v['nulls']) for k, v in res.items() if v.get('nulls')]
+    cov['nulls'] = len(cov['null_items'])
+    report(res, cov, a.list_keys)
+    nerr = cov['errors'] + len(cov['unresolved'])
+    incomplete = (cov['present'] != cov['executed']) or bool(cov['unresolved'])
 
     if a.compare_to:
-        base = _baseline(repo, a.compare_to, a.fixture)
+        base, bcov = _baseline(repo, a.compare_to, a.fixture)
         # keyed by block (redirect target), since line numbers move between refs
         base = {k.split('@')[0]: v for k, v in base.items()}
-        nnull_n = {k.split('@')[0]: v for k, v in nnull.items()}
-        new = {t: {k: v for k, v in hits.items() if k not in base.get(t, {})} for t, hits in nnull_n.items()}
+        nnull_n = {k.split('@')[0]: v for k, v in cov['null_items']}
+        new = {t: {k: v for k, v in hits.items() if k not in base.get(t, {})}
+               for t, hits in nnull_n.items()}
         new = {t: h for t, h in new.items() if h}
-        gone = {t: sorted(set(base.get(t, {})) - set(nnull_n.get(t, {}))) for t in base}
-        gone = {t: g for t, g in gone.items() if g}
-        print(f'\nvs baseline {a.compare_to}: NEW null/empty in {sum(len(h) for h in new.values())} key(s) '
-              f'across {len(new)} block(s)')
+        gone = {t for t in base if t not in nnull_n and t not in {k.split('@')[0] for k in res}}
+        print(f'\nvs baseline {a.compare_to}: NEW null/empty in {sum(len(h) for h in new.values())} '
+              f'key(s) across {len(new)} block(s)')
         for t, h in sorted(new.items()):
             print(f'  REGRESSION {t}: {", ".join(sorted(h))}')
-        for t, g in sorted(gone.items()):
-            print(f'  fixed {t}: {", ".join(g)}')
+        for t in sorted(gone):
+            print(f'  NOTE {t}: this block reported nulls at {a.compare_to} and is not in this '
+                  f'report at all -- deleted, or no longer extracted')
+        # The compare branch used to consult only the null diff, so a branch where a producer
+        # stopped compiling -- or was reformatted out of the extractor -- was certified green.
+        if incomplete or bcov['present'] != bcov['executed']:
+            print(f'=> FAIL: coverage is incomplete ({cov["executed"]}/{cov["present"]} now, '
+                  f'{bcov["executed"]}/{bcov["present"]} at {a.compare_to}); "no new nulls" is not '
+                  f'established by a partial scan')
+            return 1
         if new:
             print('=> FAIL: this change introduces nulls that reach module arguments')
             return 1
-        print('=> OK: no new nulls introduced')
+        print('=> OK: full coverage on both refs and no new nulls introduced')
         return 0
 
     # Without --compare-to this is an absolute scan, and the docstring promises it fails on
     # nulls. Note that upstream gatk-sv has pre-existing nulls, so a plain run is red there by
     # design: --compare-to <ref> is the form that gates a change (docs/static-checks.md).
-    if nerr:
-        print(f'=> FAIL: {nerr} jq block(s) did not execute -- the plumbing was not proven')
+    if incomplete or nerr:
+        print(f'=> FAIL: {cov["executed"]} of {cov["present"]} blocks executed -- the plumbing was '
+              f'not fully exercised (errored={cov["errors"]}, no redirect={len(cov["unresolved"])})')
         return 1
-    if nnull:
-        print(f'=> FAIL: {len(nnull)} block(s) put null/empty into a module argument '
+    if cov['nulls']:
+        print(f'=> FAIL: {cov["nulls"]} block(s) put null/empty into a module argument '
               f'(gate a change with --compare-to <ref>)')
         return 1
-    print('=> OK: every jq block executed and none produced a null argument')
+    print(f'=> OK: all {cov["executed"]} jq block(s) executed and none produced a null argument'
+          + (f" ({cov['unprovable']} select(s) against externally-supplied variables, noted above)"
+             if cov['unprovable'] else ''))
     return 0
 
 
@@ -284,7 +401,110 @@ def _baseline(repo, ref, fixture_arg):
             fx.write_bytes(r.stdout)
         else:                                      # fixture did not exist at that ref
             fx.write_bytes(pathlib.Path(fixture_arg).read_bytes())
-        return {k: v.get('nulls', {}) for k, v in run_blocks(troot, fx).items()}
+        res, cov = run_blocks(troot, fx)
+        return {k: v.get('nulls', {}) for k, v in res.items()}, cov
+
+
+# --selftest: assertions, not a demo. Each one reproduces a hole this file actually shipped with:
+# extraction that only matched one formatting style, blocks dropped without a word, coverage
+# claimed rather than counted, and an outputs stub that supplied every key a reader might want.
+_ST_DRIVER = """#!/usr/bin/env bash
+set -euo pipefail
+
+jq -n \\
+--slurpfile inputs "${input_json}" \\
+--arg gatk_jar "${gatk_jar}" \\
+'{
+  "rd_file": $inputs[0].rd_depth_table
+}' > "${median_cov_inputs_json_filename}"
+
+jq -n --slurpfile inputs "${input_json}" '{"pe_table": $inputs[0].genotyping_pe_table_RENAMED}' > "${evidence_qc_inputs_json_filename}"
+
+jq -n \\
+--slurpfile inputs "${input_json}" \\
+'{
+  "merged_PE": "gs://stub/pe.vcf.gz",
+  "batch": "all"
+}' > "${gather_batch_evidence_outputs_json_filename}" 2> gather.stderr
+
+jq -n \\
+--slurpfile gbe "${gather_batch_evidence_outputs_json_filename}" \\
+'{
+  "merged_pe": $gbe[0].merged_PE_vcf_LEFTOVER_READER
+}' > "${cnmops_inputs_json_filename}"
+
+jq -n \\
+--slurpfile inputs "${input_json}" \\
+'{
+  "orphan": $inputs[0].output_prefix
+}'
+
+jq -n \\
+--slurpfile inputs "${input_json}" \\
+'{
+  "vcf": $inputs[0].output_prefix
+}' > "${genotype_svs_inputs_json_filename}"
+"""
+_ST_FIXTURE = '{"sample_name":"S","output_prefix":"out","rd_depth_table":"rd.txt",' \
+              '"genotyping_pe_table":"pe.txt"}\n'
+
+
+def _selftest():
+    fails = []
+
+    def check(desc, cond, detail=''):
+        print(('  ok    ' if cond else '  FAIL  ') + desc + (f'\n          {detail}'
+                                                            if (detail and not cond) else ''))
+        if not cond:
+            fails.append(desc)
+
+    if not shutil.which('jq'):
+        print('  SKIP  jq is not on PATH: the plumbing selftest cannot execute any block')
+        return 0
+    with tempfile.TemporaryDirectory() as dd:
+        root = pathlib.Path(dd)
+        (root / 'src/sv_shell/sample_inputs').mkdir(parents=True)
+        (root / DRIVER).write_text(_ST_DRIVER)
+        fx = root / 'src/sv_shell/sample_inputs/single_sample_pipeline.json'
+        fx.write_text(_ST_FIXTURE)
+        lines = _ST_DRIVER.splitlines()
+
+        # 1. extraction shape-independence: canonical, one-line, and `2> log` after the redirect
+        blocks = extract_blocks(lines)
+        check('extract_blocks finds all 6 jq -n invocations regardless of formatting',
+              len(blocks) == 6 and count_jq_n(lines) == 6,
+              f'extracted={len(blocks)} present={count_jq_n(lines)}')
+
+        # 2. a block with no redirect is reported, and does not swallow its successor
+        check('a block with no redirect is reported instead of silently dropped',
+              any(t is None for t, _l, _b in blocks),
+              f'targets={[t for t, _l, _b in blocks]}')
+        check('the block AFTER an unterminated one is still extracted',
+              any(t == 'genotype_svs_inputs_json_filename' for t, _l, _b in blocks),
+              f'targets={[t for t, _l, _b in blocks]}')
+
+        res, cov = run_blocks(root, fx)
+        # 3. coverage is counted, and a missing block is not "clean"
+        check('coverage counts 6 present / 5 executed (the orphan did not run)',
+              cov['present'] == 6 and cov['executed'] == 5 and len(cov['unresolved']) == 1,
+              f'present={cov["present"]} executed={cov["executed"]} '
+              f'unresolved={cov["unresolved"]}')
+
+        # 4. the rename this tool exists for is detected on the inputs side
+        nulls = {k.split('@')[0]: v['nulls'] for k, v in res.items() if v.get('nulls')}
+        check('a stale reader of a renamed fixture key yields a null',
+              'pe_table' in str(nulls.get('evidence_qc_inputs_json_filename', {})),
+              f'nulls={nulls}')
+
+        # 5. ... and on the outputs side, which the old all-keys stub made unrepresentable
+        check('a stale reader of another block outputs.json is detected (per-producer stub)',
+              'merged_pe' in str(nulls.get('cnmops_inputs_json_filename', {})),
+              f'nulls={nulls}')
+        check('externally-supplied variables are counted as unprovable, not silently stubbed',
+              cov['unprovable'] == 0, f"unprovable={cov['unprovable']} "
+                                      f"external={sorted(cov['external_vars'])}")
+    print('selftest: ' + ('PASS' if not fails else f'{len(fails)} FAILED'))
+    return 0 if not fails else 1
 
 
 if __name__ == '__main__':

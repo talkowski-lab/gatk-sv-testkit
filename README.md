@@ -32,7 +32,8 @@ make setup                          # .venv with the python dependencies
 cp testkit.env.example testkit.env  # then edit it: project + workspace are yours to name
 ./kit/gsvtk-config doctor           # tells you exactly what is still missing
 
-make test                           # syntax everywhere, `--help` on every CLI, config+checker self-tests
+make test                           # the offline gate: syntax, undefined-module refs, `--help` on
+                                    # every CLI, real end-to-end invocations, self-tests + canary
 ```
 
 Then pick a loop. The two most common first runs:

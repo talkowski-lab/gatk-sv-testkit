@@ -27,8 +27,12 @@ frozen baseline, so a local difference is attributable to your code and nothing 
 2. **The frozen inputs.** Either from the Terra path (they are already in your workspace bucket):
 
    ```bash
-   python terra/batch_freeze.py copy && python terra/batch_freeze.py attrs --write
+   python terra/batch_freeze.py copy --write && python terra/batch_freeze.py attrs --write
    ```
+
+   (`copy` without `--write` is a dry run that prints the object count and GiB; `attrs` will not
+   publish over a `verify` that failed. See
+   [terra-head-to-head.md](terra-head-to-head.md#2-freeze-the-baseline).)
 
    or from a run you have metadata for — `replay/` rebuilds a launchable input set from a
    captured successful run:
@@ -53,6 +57,20 @@ frozen baseline, so a local difference is attributable to your code and nothing 
 
    `--region` tabix-slices bgzf objects, which is the cheap way to get a chromosome-scale run.
    `--dry-run` prints the plan and touches nothing.
+
+   Adoption is **verified, not assumed**. Pipeline object names are stable across runs
+   (`<batch>.depth.depth_sepcutoff.txt`, `<batch>.cutoffs`) and those tables are fixed-shape, so
+   “same basename, same byte count” used to adopt an older capture as if it were the current baseline
+   object — and every later `compare/*` verdict inherited the wrong input. Now:
+
+   * every candidate under every `--link-dir` is collected first; **more than one same-size match is
+     an error** that lists them, rather than a race to the first glob hit;
+   * the one candidate must match the object's `crc32c`. A mismatch means “this local file is not that
+     object” — it prints `!! NOT adopting …` and downloads the real object instead;
+   * when `crc32c` cannot be compared (composite upload has none, no `gsutil`, or the file is over
+     the 64 MiB hashing budget) the adoption still happens and the log line says
+     `unverified: …`. `staged.json` carries the verdict per file in `identity`, so a staged tree
+     built on unverified adoptions is visible after the fact.
 
 ## Run it
 

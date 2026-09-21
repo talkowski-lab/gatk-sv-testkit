@@ -78,9 +78,36 @@ def load_rows():
         src = ent.get(attr)
         if not src or not src.startswith("gs://"):
             raise SystemExit(f"entity attribute {attr} is not a gs:// path: {src!r}")
-        name = src.split("/")[-1]
-        rows.append({"attr": attr, "src": src, "name": name,
-                     "dest": f"gs://{dest_bucket()}/{DEST_PREFIX}/{name}"})
+        rows.append({"attr": attr, "src": src, "name": src.split("/")[-1]})
+
+    # The frozen object name used to be the source basename, which silently collided: two baseline
+    # attributes whose objects share a basename (this model nests same-named objects under different
+    # batch/run directories, e.g. merged_PE and merged_SR both called merged_pe.out) mapped to ONE
+    # object -- copy wrote it twice, last writer won, and `attrs --write` published the same path
+    # under both names. One of the two inputs steps 06/07 read was then simply the wrong file, and
+    # every head-to-head after it compared against partly wrong inputs.
+    # Objects that are genuinely the same source object share one dest (no duplicate copy); objects
+    # that merely share a name get attribute-qualified names.
+    srcs, names = {}, {}
+    for r in rows:
+        srcs.setdefault(r["src"], set()).add(r["name"])
+        names.setdefault(r["name"], set()).add(r["src"])
+    bucket = dest_bucket()
+    shared = sorted(n for n, s in names.items() if len(s) == 1 and len(srcs) > 1)
+    for r in rows:
+        object_name = r["name"] if len(names[r["name"]]) == 1 else f"{r['attr']}__{r['name']}"
+        r["dest"] = f"gs://{bucket}/{DEST_PREFIX}/{object_name}"
+    by_dest = {}
+    for r in rows:
+        by_dest.setdefault(r["dest"], set()).add(r["src"])
+    clashes = sorted(d for d, srcs_here in by_dest.items() if len(srcs_here) > 1)
+    if clashes:
+        raise SystemExit(f"two different source objects still map to one frozen path: {clashes}")
+    collide = sorted(n for n, s in names.items() if len(s) > 1)
+    if collide:
+        print(f"   note: {len(collide)} basename(s) are shared by different source objects "
+              f"({', '.join(collide[:4])}); frozen under attribute-qualified names instead of "
+              f"sharing one object")
     return rows
 
 
@@ -118,6 +145,21 @@ def plan(rows):
 
 
 def copy(rows):
+    """Server-side GCS->GCS copy of the frozen inputs into the sandbox bucket.
+
+    Gated like every other mutator here, because it is the one that writes tens of GiB: the
+    objects are new (so nothing is overwritten, and a re-run only pays for what is missing) but
+    they cost storage from the moment they exist, and `attrs --write` later points the batch at
+    them.
+    """
+    total = sum(int(stat_field(r["src"], "bytes") or 0) for r in rows)
+    print(f"{len(rows)} object(s), {total / 2**30:.2f} GiB "
+          f"-> gs://{dest_bucket()}/{DEST_PREFIX}")
+    if "--write" not in sys.argv:
+        print("dry run: nothing was copied. Re-run with --write to copy into the bucket above.")
+        return
+    terra.assert_writable_target(SANDBOX_NS, SANDBOX_WS, "copy the frozen baseline inputs",
+                                allow="--allow-shared-target" in sys.argv)
     todo = []
     for r in rows:
         if stat_field(r["dest"]) is not None:
@@ -157,9 +199,14 @@ def verify(rows):
         if a is None or a != b:
             bad.append((r["attr"], a, b))
         print(f"{'OK  ' if a == b else 'DIFF'} {r['attr']:26s} crc32c={b} bytes={size}")
-    json.dump({"dest_prefix": f"gs://{dest_bucket()}/{DEST_PREFIX}", "objects": out,
-               "total_bytes": total}, open(MANIFEST, "w"), indent=1)
-    print(f"\nmanifest -> {MANIFEST}  total {total/2**30:.2f} GiB")
+    # The manifest is what later steps (and later people) trust, so it must record the VERDICT, not
+    # just the object list: a manifest written by a FAILED verify used to be indistinguishable from
+    # a successful one.
+    doc = {"dest_prefix": f"gs://{dest_bucket()}/{DEST_PREFIX}", "objects": out,
+           "total_bytes": total, "verified": not bad,
+           "mismatches": [{"attr": a, "crc32c_src": x, "crc32c_dest": y} for a, x, y in bad]}
+    json.dump(doc, open(MANIFEST, "w"), indent=1)
+    print(f"\nmanifest -> {MANIFEST}  total {total/2**30:.2f} GiB  verified={not bad}")
     if bad:
         raise SystemExit(f"crc32c mismatch on {len(bad)} objects: {bad}")
 
@@ -168,6 +215,20 @@ def attrs(rows):
     """Write <attr>{FROZEN_SUFFIX} onto the batch sample_set (Terra merges attributes)."""
     lines = ["entity:sample_set_id\t" + "\t".join(f"{r['attr']}{FZ}" for r in rows)]
     lines.append(f"{BATCH}\t" + "\t".join(r["dest"] for r in rows))
+    # Publish only over a verify that PASSED. `attrs --write` used to trust nothing at all: the
+    # verify step was optional, and its failure was invisible afterwards.
+    if os.path.exists(MANIFEST):
+        try:
+            man = json.load(open(MANIFEST))
+        except (OSError, ValueError):
+            man = {}
+        if man.get("verified") is False:
+            raise SystemExit(
+                f"{MANIFEST} records a FAILED crc32c verify "
+                f"({len(man.get('mismatches') or [])} object(s)). Re-run "
+                f"`python terra/batch_freeze.py verify` and resolve it before publishing "
+                f"attributes -- publishing an unverified frozen path means the head-to-head runs "
+                f"on inputs nobody confirmed.")
     tsv = "\n".join(lines) + "\n"
     path = str(config.work_dir("staging") / "frozen_baseline_attrs.tsv")
     open(path, "w").write(tsv)
@@ -175,6 +236,8 @@ def attrs(rows):
     if "--write" not in sys.argv:
         print("dry run: re-run with --write to upload")
         return
+    terra.assert_writable_target(SANDBOX_NS, SANDBOX_WS, "write frozen-input attributes",
+                                allow="--allow-shared-target" in sys.argv)
     # fapi.upload_entities_tsv() opens the argument as a FILENAME (it is not content) - passing the
     # TSV body raises OSError "File name too long".
     r = terra.upload_entities_tsv(SANDBOX_NS, SANDBOX_WS, path, confirm=True)
@@ -192,8 +255,12 @@ def usage(code=0):
 
   plan     list what would be copied (read-only: Terra + gsutil stat only)
   copy     server-side GCS->GCS copy of the frozen inputs into the sandbox bucket
+           (--write: it creates tens of GiB of billable objects that nothing overwrites)
   verify   compare crc32c on both sides; nonzero exit on any mismatch
   attrs    write <attr>{FROZEN_SUFFIX} onto the batch sample_set (--write to upload)
+
+Both mutators refuse GSVTK_BASELINE_NAMESPACE/_WORKSPACE unless --allow-shared-target: that
+workspace is the shared reference run, and Terra merges entity attributes rather than replacing.
 
 Workspace, batch and the frozen suffix come from the profile; see docs/config.md.""",
           file=sys.stderr if code else sys.stdout)

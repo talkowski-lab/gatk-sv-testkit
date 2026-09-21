@@ -47,11 +47,30 @@ python terra/recon.py --ns "$GSVTK_TERRA_NAMESPACE" --ws "$GSVTK_TERRA_WORKSPACE
 Two separate things get pinned, and conflating them is how a comparison silently becomes invalid:
 
 ```bash
-python terra/batch_freeze.py plan              # costs nothing, prints the whole plan
-python terra/batch_freeze.py copy              # server-side gs://→gs:// into YOUR workspace bucket
-python terra/batch_freeze.py verify            # re-crc32cs both sides; nonzero on any mismatch
-python terra/batch_freeze.py attrs --write     # publish coordinates as new sample_set attributes
+python terra/batch_freeze.py plan                      # costs nothing, prints the whole plan
+python terra/batch_freeze.py copy                      # dry run: prints N objects, GiB, destination
+python terra/batch_freeze.py copy --write              # server-side gs://→gs:// into YOUR bucket
+python terra/batch_freeze.py verify                    # re-crc32cs both sides; nonzero on mismatch
+python terra/batch_freeze.py attrs --write             # publish coordinates as new attributes
 ```
+
+Three gates on this path, because it is the one that both spends money and can silently corrupt a
+comparison:
+
+* **`copy` and `attrs` need `--write`.** Without it they print and return. `copy` is not cheap just
+  because it is server-side: tens of GiB start accruing storage cost the moment they exist.
+* **Both refuse the shared baseline workspace.** Writing your frozen copies or your attributes onto
+  the workspace everyone reads from is a change to other people's baseline; the tools refuse unless
+  you pass `--allow-shared-target` on purpose.
+* **`attrs --write` refuses over a failed verify.** `verify` writes `"verified": true|false` (plus
+  the mismatching objects) into the manifest, and `attrs` refuses to publish if the last verify for
+  that prefix failed. Publishing a frozen path nobody confirmed is how a head-to-head ends up running
+  on inputs that are not the baseline.
+
+Frozen object names are the source basename, **except** when two *different* source objects share a
+basename (this model does — e.g. two batches each holding `merged_pe.out`): those freeze as
+`<attribute>__<basename>`. Without that, both attributes end up pointing at one object, the last
+writer wins, and one of the inputs steps 06/07 read is quietly the wrong file.
 
 **Object coordinates.** The baseline's input files get copied into your workspace bucket with
 their **names, `crc32c` and byte size** recorded in
@@ -141,9 +160,22 @@ reported in **VM-minutes and job counts** — no rates, no currency, because you
 not mine. The accounting is `sum(vmEndTime - vmStartTime)` over every call record at any nesting
 depth (`batch_save_metadata.vm_minutes`), which is deliberately not the root `call start→end` span:
 spans are printed as a separate column because they are what produced two bogus headline figures
-here. A metadata tree containing `_missingSubWorkflows` is flagged: those numbers are a floor, not
-a measurement. Multiply the VM-minutes by your own per-type price and re-run the arithmetic against
-the JSON — that is the point of storing it.
+here. Multiply the VM-minutes by your own per-type price and re-run the arithmetic against the JSON —
+that is the point of storing it.
+
+**The chain total and the ratio are refused when the data is incomplete**, because every one of these
+forms used to print a tidy wrong number and exit 0:
+
+| What is missing | What the tool now says |
+|---|---|
+| one step's metadata file on either side | `chain total is PARTIAL: no saved metadata for 06/baseline`, `ratio new/baseline: n/a`, **exit 1**. That step counted as *zero* in the sum — deleting one file once flipped the conclusion from “4.5× cheaper” to “20× more expensive” |
+| a sub-workflow whose tree was never expanded (depth cap, older or hand-trimmed file) | `N sub-workflow call(s) have no expanded tree below them -> cost is a FLOOR`. `_missingSubWorkflows` alone was not enough: a truncated tree looks exactly like a complete one, and baseline step 10 read 918 VM-min instead of 1672.8 that way |
+| a call with `vmStartTime` but no `vmEndTime` (running or aborted) | `excluded from BOTH minutes and job count` — the job count under-reports too, not just the minutes |
+| no step files at all in `--outdir` | says so and exits 1, rather than printing a table of zeros |
+
+So `every step present on both sides, every tree expanded -> these are measurements` is a claim the
+tool has checked, and `these are FLOORS, not measurements (fetch_failed=…, unexpanded=…,
+half-timestamped=…)` is what an incomplete tree gets called.
 
 ## 6. Fetch and compare
 

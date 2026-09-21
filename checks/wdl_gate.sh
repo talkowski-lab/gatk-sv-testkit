@@ -83,7 +83,17 @@ for ref in "${REFS[@]}"; do
     }
     sha=$(sed -n 's/^sha=//p' "$dir/.provenance" 2>/dev/null | cut -c1-8)
     for wf in "${WFS[@]}"; do
-        [ -f "$dir/$wf.wdl" ] || { printf '%-30s %-16s %s\n' "$wf" "$ref" "absent at $sha"; continue; }
+        # An absent workflow is a failure, not a blank cell. A typo'd name, or a name that only
+        # exists on newer refs (v1.1.1 has no SVShell.wdl), used to contribute nothing to the exit
+        # code even under --strict -- so the gate certified "no hard errors" having checked
+        # nothing, which is the exact shape of wrong answer this script exists to catch.
+        if [ ! -f "$dir/$wf.wdl" ]; then
+            printf '%-30s %-16s %s\n' "$wf" "$ref" "ABSENT at $sha"
+            status=1
+            echo "        nothing was checked for $wf at $ref: wrong name, or it did not exist at"
+            echo "        that ref. This is a failure, not a pass."
+            continue
+        fi
         log="$dir/$wf.check.txt"
         ( cd "$dir" && "$MINIWDL" check "$wf.wdl" >"$log" 2>&1 ); rc=$?
         inc=$(grep -c "IncompleteCall" "$log" 2>/dev/null || true)
@@ -97,7 +107,10 @@ for ref in "${REFS[@]}"; do
     done
 done
 
-if [ "$status" -eq 0 ]; then
+if [ "$status" -eq 0 ] && [ "$STRICT" -eq 1 ]; then
+    echo "no hard errors, and --strict is satisfied: no IncompleteCall, no stale binding, and"
+    echo "every workflow named was actually present at the ref given."
+elif [ "$status" -eq 0 ]; then
     echo "no hard errors. Re-run with --strict to treat IncompleteCall / stale bindings as failure"
     echo "(today's gatk-sv carries a few IncompleteCall warnings on purpose, so --strict is a"
     echo " diff-against-baseline decision, not a default)."

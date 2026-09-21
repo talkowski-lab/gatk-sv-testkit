@@ -8,14 +8,14 @@
 SHELL      := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 .DEFAULT_GOAL := help
-.PHONY: help setup test syntax helpsweep selftest lint audit clean-work
+.PHONY: help setup test syntax helpsweep undefmods smoke selftest lint audit clean-work
 
 PYTHON ?= python3
 GSVTK  := ./kit/gsvtk-config
 
 # ----------------------------------------------------------------- file sets
 SH_FILES := $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
-                   examples/*.sh kit/*.sh)
+                   examples/*.sh kit/*.sh scripts/*.sh)
 PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py \
                    scripts/*.py examples/*.py docs/archive/as-run/*.py)
 
@@ -42,7 +42,7 @@ help:
 	@echo "gatk-sv-testkit — make targets"
 	@echo
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent)"
-	@echo "  test        the offline gate: syntax + --help on every CLI + config self-tests"
+	@echo "  test        the offline gate: syntax + undef-mods + --help sweep + real invocations"
 	@echo "              needs no config file, no credentials, no network; SKIPs tools whose"
 	@echo "              optional dependency is missing and says which"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
@@ -74,7 +74,9 @@ setup:
 test:
 	@rc=0; \
 	$(MAKE) --no-print-directory syntax     || rc=1; \
+	$(MAKE) --no-print-directory undefmods  || rc=1; \
 	$(MAKE) --no-print-directory helpsweep  || rc=1; \
+	$(MAKE) --no-print-directory smoke      || rc=1; \
 	$(MAKE) --no-print-directory selftest   || rc=1; \
 	echo; \
 	if [ $$rc -eq 0 ]; then echo "make test: PASS (offline gate)"; \
@@ -126,91 +128,45 @@ helpsweep:
 	printf 'helpsweep: %s ok, %s skipped, %s failed\n' "$$ok" "$$skip" "$$fail"; \
 	[ $$fail -eq 0 ]
 
-# The config layer is what every tool trusts, so it gets real assertions rather than a
-# two conventions that make this target honest on a developer machine:
-#   * an explicit GSVTK_CONFIG REPLACES the profile chain rather than joining it, so the empty
-#     file below really is zero-config even where profiles exist, and the "no default" assertions
-#     run here rather than only in CI (each still unsets the exported variables it tests);
-#   * the gatk-sv clone location is read from the REAL profile, because asking for it through the
-#     empty config would skip these tests on a machine that has the clone right there.
-# Nothing here prints resolved config: printing someone's laptop profile is not this gate's job.
-#
-# CAUTION when editing: a '#' line indented with a TAB inside this backslash-continued recipe
-# splits it into separate shells, so $py and check() vanish mid-run. Put commentary above the
-# target (a line with no leading TAB ends the recipe) or inside a shell string.
-selftest:
-	@tmp="$$(mktemp -d)"; : > "$$tmp/empty.env"; \
-	py="$(PYTHON)"; \
-	if ! $$py -c 'import firecloud' 2>/dev/null && [ -x .venv/bin/python ]; then \
-	  py=.venv/bin/python; fi; \
-	fail=0; ok=0; skip=0; \
-	check() { \
-	  desc="$$1"; shift; \
-	  out="$$($("$@") 2>&1)"; rc=$$?; \
-	  if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %s\n' "$$desc"; \
-	  else fail=$$((fail+1)); printf '  FAIL  %s (exit %s)\n' "$$desc" "$$rc"; \
-	    printf '%s\n' "$$out" | head -6 | sed 's/^/          /'; fi; \
-	}; \
-	echo "selftest: config layer"; \
-	check "kit/config.sh loads with no config at all" \
-	  env GSVTK_CONFIG="$$tmp/empty.env" bash -c '. kit/config.sh'; \
-	check "gsvtk_default returns the fallback for an unconfigured key" \
-	  env GSVTK_CONFIG="$$tmp/empty.env" bash -c \
-	  '. kit/config.sh; [ "$$(gsvtk_default THIS_KEY_DOES_NOT_EXIST_42 fallback-value)" = "fallback-value" ]'; \
-	check "an exported variable beats every profile file (env > profile)" \
-	  env GSVTK_CONFIG="$$tmp/empty.env" GSVTK_PROJECT=gate-proj \
-	  bash -c '[ "$$($(GSVTK) get PROJECT)" = gate-proj ]'; \
-	check "GSVTK_WORK is honoured and gsvtk_work creates subdirs" \
-	  env GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash -c \
-	  '. kit/config.sh; p="$$(gsvtk_work runs/x)"; [ "$$p" = "$$tmp/work/runs/x" ] && [ -d "$$p" ]'; \
-	if [ ! -f "$$tmp/empty.env" ]; then \
-	  echo "  SKIP  the no-default assertions: could not create an empty profile"; \
-	  skip=$$((skip+3)); \
-	else \
-	  out="$$(GSVTK_CONFIG="$$tmp/empty.env" env -u GSVTK_PROJECT -u GSVTK_TERRA_NAMESPACE $(GSVTK) require PROJECT 2>&1)"; rc=$$?; \
-	  if [ $$rc -eq 4 ] && printf '%s' "$$out" | grep -q GSVTK_PROJECT; then \
-	    ok=$$((ok+1)); printf '  ok    %s\n' "require PROJECT exits 4 and names GSVTK_PROJECT"; \
-	  else fail=$$((fail+1)); printf '  FAIL  require PROJECT (exit %s)\n%s\n' "$$rc" "$$out"; fi; \
-	  out="$$(env -u GSVTK_PROJECT -u GSVTK_TERRA_NAMESPACE GSVTK_CONFIG="$$tmp/empty.env" $(GSVTK) doctor 2>&1)"; rc=$$?; \
-	  if [ $$rc -eq 4 ] && printf '%s' "$$out" | grep -q 'MISS *PROJECT'; then \
-	    ok=$$((ok+1)); printf '  ok    %s\n' "doctor exits 4 and reports MISS for each unset required key"; \
-	  else fail=$$((fail+1)); printf '  FAIL  doctor (exit %s)\n%s\n' "$$rc" "$$out"; fi; \
-	  out="$$(env GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $(GSVTK) require ZONE 2>&1)"; rc=$$?; \
-	  if [ $$rc -eq 0 ] && [ "$$out" = "us-central1-a" ]; then \
-	    ok=$$((ok+1)); printf '  ok    %s\n' "a documented default still resolves with no profile (ZONE)"; \
-	  else fail=$$((fail+1)); printf '  FAIL  default resolution (exit %s): %s\n' "$$rc" "$$out"; fi; \
-	fi; \
-	echo; echo "selftest: checkers and fetchers, against a local gatk-sv clone if present"; \
-	ck="$$($(GSVTK) get GATK_SV_CHECKOUT 2>/dev/null)"; \
-	if [ ! -d "$$ck" ]; then \
-	  echo "  SKIP  the three clone-backed self-tests: GSVTK_GATK_SV_CHECKOUT is unset or not a"; \
-	  echo "        directory. Set it in testkit.env to run them (docs/config.md)."; \
-	  skip=$$((skip+3)); \
-	else \
-	  printf '  (clone: %s)\n' "$$ck"; \
-	  if command -v jq >/dev/null 2>&1; then \
-	    out="$$($$py checks/svshell_jq_plumbing_scan.py --repo "$$ck" --list-keys 2>&1)"; rc=$$?; \
-	    if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %s\n' "svshell_jq_plumbing_scan ran every jq block clean"; \
-	    else ok=$$((ok+1)); printf '  note  svshell_jq_plumbing_scan reported findings (exit %s) — by design\n' "$$rc"; \
-	      printf '%s\n' "$$out" | tail -3 | sed 's/^/          /'; \
-	      printf '        upstream gatk-sv has pre-existing nulls, so gate a change with\n'; \
-	      printf '        --compare-to <ref>; see docs/static-checks.md. Reported, not failed.\n'; fi; \
-	  else \
-	    echo "  SKIP  jq not on PATH: svshell_jq_plumbing_scan cannot execute the jq blocks"; \
-	    skip=$$((skip+1)); \
-	  fi; \
-	  out="$$($$py checks/svshell_contract_check.py --repo "$$ck" 2>&1)"; rc=$$?; \
-	  if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %s\n' "svshell_contract_check exits clean"; \
-	  else ok=$$((ok+1)); printf '  note  svshell_contract_check reported findings (exit %s) — by design\n' "$$rc"; \
-	    printf '%s\n' "$$out" | tail -3 | sed 's/^/          /'; \
-	    printf '        its output is a list to DIFF against a base ref, not a verdict; see\n'; \
-	    printf '        docs/static-checks.md. Reported here, not failed.\n'; fi; \
-	  check "fetch_wdl --list materializes a ref's file list offline (git archive)" \
-	    $$py scripts/fetch_wdl.py --repo "$$ck" --ref HEAD --list; \
-	fi; \
-	echo; \
-	printf 'selftest: %s ok, %s skipped, %s failed\n' "$$ok" "$$skip" "$$fail"; \
+# ------------------------------------------------------------------- undefmods
+# py_compile resolves no names, and a --help sweep exits inside argparse before main() runs.
+# Those two facts used to be enough to ship a comparator that raised
+# "NameError: name 'os' is not defined" on EVERY real invocation, with docs and a published
+# example capture nobody could reproduce. An undefined name is a compile-clean bug, so it needs
+# a compile-time answer: attribute access through a stdlib module name the file never imported.
+# Static, dependency-free, and it covers every file -- including the ones with no selftest.
+undefmods:
+	@$(PYTHON) scripts/undef_module_refs.py
+
+# ----------------------------------------------------------------------- smoke
+# --help proves a CLI parses; it does not prove main() runs. These tools are stdlib-only and
+# produce a real verdict on empty fixtures, so invoke them and require the line a real pass ends
+# with. Exit status is part of the expectation: compare_batch_tables must exit 1 when every
+# column is MISSING, because an empty diff that exits 0 reads like a result.
+smoke:
+	@tmp="$$(mktemp -d)"; mkdir -p "$$tmp/b" "$$tmp/n"; fail=0; \
+	echo "smoke: real invocations (--help cannot reach main())"; \
+	out="$$($(PYTHON) compare/compare_batch_tables.py --baseline-dir "$$tmp/b" --new-dir "$$tmp/n" 2>&1)"; rc=$$?; \
+	if [ $$rc -eq 1 ] && printf '%s' "$$out" | grep -q '== SUMMARY'; then \
+	  echo "  ok    compare_batch_tables runs, finds nothing to compare, exits 1"; \
+	else fail=1; echo "  FAIL  compare_batch_tables (exit $$rc; want 1 with a '== SUMMARY' line)"; \
+	  printf '%s\n' "$$out" | head -5 | sed 's/^/          /'; fi; \
+	out="$$($(PYTHON) scripts/undef_module_refs.py "$$tmp/b" 2>&1)"; rc=$$?; \
+	if [ $$rc -eq 0 ]; then echo "  ok    undef_module_refs runs against a real path"; \
+	else fail=1; echo "  FAIL  undef_module_refs (exit $$rc)"; \
+	  printf '%s\n' "$$out" | head -5 | sed 's/^/          /'; fi; \
+	rm -rf "$$tmp"; \
 	[ $$fail -eq 0 ]
+
+# ------------------------------------------------------------------- selftest
+# Real assertions: config-layer behaviour, the two checkers' own --selftest, and clone-backed
+# positive controls. They live in scripts/selftest.sh, NOT in a recipe, because make expands
+# `$("$@")` inside `$$($("$@") 2>&1)` to nothing -- bash received `out="$( 2>&1)"`, the command
+# never ran, and every assertion reported ok whatever it tested (proved with a two-line Makefile:
+# `check "..." false` printed ok). The script also runs a canary that fails the gate if its own
+# harness ever goes vacuous again; keep new assertions there for that reason.
+selftest:
+	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
 
 lint: syntax
 
@@ -229,6 +185,14 @@ lint: syntax
 #     checkout, where the tracked set is the entire public repo by construction.
 #   * The only file exempted is this Makefile, because the blocklist below IS those
 #     strings. Everything else is fair game, including docs/archive/.
+#
+# Two more rules that close holes an earlier version had:
+#   * no per-line exemptions. The scan used to drop any line containing `/Users/you/`, so one
+#     placeholder path on a line hid every other identifier on it -- `make audit` printed clean
+#     for a file holding four of them. The `/Users/` check keeps its own documented exception
+#     for that placeholder; the identifier patterns keep none.
+#   * binary files are checked too. `grep -I` skips them silently, and a force-added artifact is
+#     exactly how a leftover would reach a public repo; a match there is reported by filename.
 #
 # Add a pattern here whenever you redact something by hand. The pattern is the memory.
 AUDIT_PATTERNS := \
@@ -259,7 +223,9 @@ audit:
 	while IFS= read -r f; do \
 	  [ -f "$$f" ] || continue; \
 	  for pat in $(AUDIT_PATTERNS); do \
-	    m="$$(grep -InE "$$pat" "$$f" 2>/dev/null | grep -v '/Users/you[/"]' | head -4)"; \
+	    m="$$(grep -InE "$$pat" "$$f" 2>/dev/null | head -4)"; \
+	    if [ -z "$$m" ] && ! grep -qI . "$$f" 2>/dev/null && grep -qaE "$$pat" "$$f" 2>/dev/null; then \
+	      m="binary file matches this pattern (content not shown)"; fi; \
 	    if [ -n "$$m" ]; then \
 	      hits=$$((hits+1)); \
 	      printf '  HIT   %-46s pattern: %s\n' "$$f" "$$pat"; \

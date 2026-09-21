@@ -54,3 +54,7 @@ venv/
 # than committed, so they can never go stale against gatk-sv main.
 /wdl/
 vendor/wdl/
+# Stray shell redirects. An empty `foo.stderr` in the repo root is an accident, not an
+# artifact -- and `git add -A` will happily publish it (two turned up during review).
+/*.stderr
+/*.stdout

@@ -133,6 +133,8 @@ def submit() -> None:
     if not CONFIRMED:
         raise SystemExit("submit starts real compute and spends real money.\n"
                          "  re-run with --confirm, and check `show` printed the images you meant.")
+    terra.assert_writable_target(tc.NS, tc.WS, "submit a workflow",
+                                allow="--allow-shared-target" in sys.argv)
     d = terra.submit(tc.NS, tc.WS, tc.NS, CONFIG, ENTITY, ETYPE, None, confirm=True)
     print(json.dumps(d, indent=1)[:600])
     terra.dump(d, str(config.work_dir("metadata") / "rerun_submission.json"))

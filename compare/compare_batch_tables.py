@@ -26,6 +26,8 @@ Example: python3 compare/compare_batch_tables.py --baseline-dir work/staging \
 
 import argparse
 import fnmatch
+import os
+import sys
 from pathlib import Path
 
 EXACT, REL, ABS, STRATEGY, SCALE = "exact", "rel", "abs", "strategy", "scale"
@@ -158,14 +160,38 @@ def compare_cutoffs(side_b, side_n):
 
 
 def load_side(directory, overrides, index):
-    """Discover (or take overridden) files per role; returns (paths, parsed-or-None)."""
-    files = sorted(Path(directory).iterdir(), key=lambda p: (len(p.name), p.name)) if Path(directory).is_dir() else []
-    paths, data = {}, {}
+    """Discover (or take overridden) files per role; returns (paths, parsed-or-None, notes).
+
+    Ambiguity is never resolved by picking one. Two batches can land in one directory (a fetch
+    puts baseline and rerun trees side by side), and the old code took the shortest matching
+    filename per side -- so 'baseline' and 'new' became whichever name happened to be shorter and
+    the two batches got cross-compared, with a confident table and no hint. A role with several
+    candidates is therefore reported as MISSING with the candidates named, and disambiguated
+    explicitly with --baseline-file/--new-file.
+    """
+    files = [p for p in sorted(Path(directory).iterdir()) if p.is_file()] if os.path.isdir(directory) else []
+    paths, data, notes = {}, {}, []
+    side = "baseline" if index == 0 else "new"
     for role, globs in PATTERNS.items():
-        path = overrides.get(role) or next((p for glob in globs[index] for p in files
-                                           if p.is_file() and fnmatch.fnmatch(p.name, glob)), None)
+        if role in overrides:
+            path = overrides[role]
+            if not os.path.isfile(path):
+                sys.exit(f"--{side}-file {role}={path}: no such file")
+        else:
+            cands = []
+            for glob in globs[index]:            # first glob that matches anything wins
+                cands = sorted({p for p in files if fnmatch.fnmatch(p.name, glob)})
+                if cands:
+                    break
+            if len(cands) > 1:
+                notes.append(f"{side} {role}: {len(cands)} files match and none can be chosen -- "
+                             f"add --{side}-file {role}=<path>. Candidates: "
+                             + ", ".join(p.name for p in cands[:8])
+                             + (" ..." if len(cands) > 8 else ""))
+                cands = []
+            path = cands[0] if cands else None
         paths[role], data[role] = path, (parse_table(path, READERS[role][index]) if path else None)
-    return paths, data
+    return paths, data, notes
 
 
 def parse_overrides(pairs, flag):
@@ -201,8 +227,8 @@ def main():
             sys.exit(f"{label} is not a directory: {d}\n"
                      f"  a typo there would report every column MISSING and exit 0, which looks\n"
                      f"  like a result. See docs/comparators.md for what each side should hold.")
-    paths_b, side_b = load_side(a.baseline_dir, parse_overrides(a.baseline_file, "baseline-file"), 0)
-    paths_n, side_n = load_side(a.new_dir, parse_overrides(a.new_file, "new-file"), 1)
+    paths_b, side_b, notes_b = load_side(a.baseline_dir, parse_overrides(a.baseline_file, "baseline-file"), 0)
+    paths_n, side_n, notes_n = load_side(a.new_dir, parse_overrides(a.new_file, "new-file"), 1)
     for role in PATTERNS:
         print("discovered %-14s baseline=%-46s new=%s" % (role, paths_b[role] or "MISSING", paths_n[role] or "MISSING"))
     rows = compare_params("sr_params", "sr_params", SR_SPECS, side_b, side_n)
@@ -213,14 +239,22 @@ def main():
     cutoff_rows, notes = compare_cutoffs(side_b, side_n)
     rows += cutoff_rows
     print_table(rows or [HEADER[:4] + ["-", "-", "MISSING"]], a.max_rows)
-    print("\n== NOTES\n" + "\n".join("  " + n for n in notes))
+    print("\n== NOTES\n" + "\n".join("  " + n for n in (notes_b + notes_n + notes)))
     print("\n== SUMMARY  " + "  ".join("%s=%d" % (v, sum(1 for r in rows if r[6] == v))
                                        for v in ("MATCH", "DELTA", "STRATEGY", "MISSING")))
+    all_missing = bool(rows) and all(r[6] == "MISSING" for r in rows)
+    if all_missing:
+        # Nothing was comparable. Saying so is the difference between a result and an empty table
+        # that exits 0 inside a shell pipeline next to a real run.
+        print("  every column is MISSING: this diff compared nothing. Check the 'discovered' lines "
+              "above\n  and the NOTES (ambiguous roles are reported, not guessed).")
     if a.out_prefix:
         out = a.out_prefix if a.out_prefix.suffix == ".tsv" else Path(str(a.out_prefix) + ".tsv")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\t".join(HEADER) + "\n" + "".join("\t".join(map(str, r)) + "\n" for r in rows))
         print("wrote %d rows -> %s" % (len(rows), out))
+    if all_missing:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

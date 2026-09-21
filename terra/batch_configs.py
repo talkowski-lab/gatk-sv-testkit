@@ -40,12 +40,21 @@ WS = config.get("TERRA_WORKSPACE")
 BRANCH = config.get("BRANCH")
 
 
-def require_target():
-    """Resolve (NS, WS, BRANCH) or exit 4 naming the profile key that is missing."""
+def require_target(writes=False):
+    """Resolve (NS, WS, BRANCH) or exit 4 naming the profile key that is missing.
+
+    `writes=True` also refuses the shared baseline workspace (see
+    terra.assert_writable_target). An unset target used to reach the HTTP layer as an empty path
+    segment -- `POST /api/workspaces//methodconfigs` -- which is a 405 from the edge instead of a
+    clear message from this tool, and which really happened to a reviewer probing this code path.
+    """
     global NS, WS, BRANCH
     NS = NS or config.require("TERRA_NAMESPACE", "where these configs are POSTed")
     WS = WS or config.require("TERRA_WORKSPACE", "where these configs are POSTed")
     BRANCH = BRANCH or config.require("BRANCH", "the gatk-sv branch whose WDL each config runs")
+    if writes:
+        terra.assert_writable_target(NS, WS, "create or overwrite method configs",
+                                    allow="--allow-shared-target" in sys.argv)
     return NS, WS, BRANCH
 
 # Attribute suffixes: baseline inputs in, this chain's outputs out.
@@ -293,6 +302,10 @@ def main():
             "create POSTs (and overwrites) method configs in your workspace: a config with a\n"
             "  wrong binding is worse than no config, because the next submission will use it.\n"
             "  review `show` first, then re-run with --confirm.")
+    if mode in ("create", "validate"):
+        # Identity is resolved here, before any request: an unset workspace must be exit 4 with a
+        # named key, never an empty path segment in a POST to Terra.
+        require_target(writes=(mode == "create"))
     {"show": show, "create": create, "validate": validate}[mode]()
 
 
@@ -302,7 +315,8 @@ def usage(code=0):
   show      print every input/output map (offline, no auth; needs GSVTK_BRANCH
               because the branch is part of every Dockstore URI it prints)
   create    POST the configs into GSVTK_TERRA_NAMESPACE/GSVTK_TERRA_WORKSPACE
-              (requires --confirm: it overwrites configs a submission will read)
+              (requires --confirm: it overwrites configs a submission will read;
+               refuses the shared baseline workspace unless --allow-shared-target)
   validate  ask Terra to typecheck each config against its Dockstore WDL
 
 The branch under test is GSVTK_BRANCH; attribute suffixes are GSVTK_FROZEN_SUFFIX /

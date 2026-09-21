@@ -19,7 +19,23 @@ Real values were replaced by `<angle-bracket>` placeholders:
 - GCP project ids, Terra namespaces/workspace names and workspace ids, workspace `gs://` buckets,
   container registry paths, ephemeral VM bucket names;
 - personal names, e-mail addresses, colleague and branch names;
-- local absolute paths and per-machine interpreter/venv locations.
+- local absolute paths and per-machine interpreter/venv locations;
+- **Cromwell submission ids** of my own runs (`<submission-id-1>` …). They are unusable by anyone
+  without access to that workspace, so they carry no reproducibility value here — they are only a
+  pointer from a private run into a public document.
+
+What is **not** placeholder'd, deliberately: statuses, VM-minutes, job counts, dollar costs, counts of
+variants and the timeline of what failed when. Those are the measurements this archive exists to
+record, and sandblanking them would leave prose with no evidence. Re-derive any of them with
+`terra/batch_cost.py` against your own saved metadata rather than trusting the numbers below.
+
+One real `gs://` path is also left intact, in `replay/single_sample_extra_inputs.json`: the reference
+panel's BAF object, `gs://gatk-sv-ref-panel-1kg-v1-1/submissions/…/cacheCopy/all_samples.baf.txt.gz`.
+It is a **public** bucket, that object exists only at that Cromwell-derived path (verified with
+`gsutil ls`/`gsutil stat`, which is also why the file is a working example rather than a template), and
+the run ids inside it belong to the panel's builder, not to a private workspace. If you use a
+different panel, replace both `ref_panel_baf*` values — and note that object has a `crc32c`, which is
+what `terra/stage_inputs.py` now checks before it adopts a local copy of it.
 
 Placeholder'd sentences are still true — they just aren't about anyone's account. The public `gs://` resource
 buckets (`gs://gatk-sv-resources-public`, `gs://gatk-sv-ref-panel-1kg-v1-1`,

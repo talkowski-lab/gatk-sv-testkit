@@ -8,7 +8,14 @@ and "my registry" mean the same thing everywhere and are decided in exactly one 
 cp testkit.env.example testkit.env
 ./kit/gsvtk-config doctor      # what is set, what is missing, which files were read
 ./kit/gsvtk-config show        # every key, its value and where that value came from
+./kit/gsvtk-config work runs/x # print (and create) a scratch dir under $GSVTK_WORK
 ```
+
+`work` prints **the directory it created, subdirs included** — `OUT="$(gsvtk_work runs/train_full)"`
+has to come back as `<work>/runs/train_full`. It used to create `runs/train_full` and print the work
+root, so two runs' `OUT` variables pointed at the same directory and overwrote each other's outputs
+while every log claimed its own. `kit/config.sh`'s `gsvtk_work` is a wrapper around this command, so
+the shell helpers and the Python tools cannot drift apart.
 
 ## Precedence
 
@@ -30,6 +37,17 @@ Highest first:
 The profile format is plain `KEY=value` so bash can source it and Python can parse it with no
 dependency. `export KEY=value` and `KEY="value"` also work, and a bare `PROJECT=` is accepted
 as well as `GSVTK_PROJECT=`.
+
+**Provenance is per-value and names the file**, because the chain is last-wins: `show` prints
+`[profile:/home/you/.config/gatk-sv-testkit/env]`, not `[profile]`. Two files both setting
+`GSVTK_TERRA_WORKSPACE` is otherwise invisible, and that key decides which workspace a `copy --write`
+or `attrs --write` will modify — you need to see *which file* answered. `doctor` lists the files it
+read (including the ones that do not exist); `show` prints the winner and where it came from.
+
+A shell tool sourcing `kit/config.sh` never hard-fails on a broken resolver — that is what keeps
+`--help` working with zero configuration — but it **warns on stderr and prints the resolver's own
+error** when it produced no exports. Silent fallback to inline defaults is how a tool ends up running
+against the wrong project while looking healthy.
 
 ## Why two keys refuse to have defaults
 
