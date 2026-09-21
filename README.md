@@ -82,7 +82,9 @@ goes under `GSVTK_WORK` and is gitignored. Nothing the tools produce is committe
 
 - **Read-only by default.** Every mutating helper in `terra/` needs `confirm=True`, and the
   ones that start compute additionally refuse without a `--confirm` flag on the command line.
-  Recon, status, cost, fetch, all of `checks/` and all of `compare/` never write.
+  Recon, status, cost, fetch, all of `checks/` and all of `compare/` never write **outside
+  `$GSVTK_WORK` (recon dumps eight JSONs there — that is the point of running it, but they
+  are writes, and `recon/*.json` contains your workspace inventory).
 - **Name a push target that nothing reads.** The image-registry default is derived from your
   project plus a namespace segment. Pointing a test build at a registry path a real pipeline
   reads turns your experiment into that pipeline's image. The tools warn; the guard rail is you.

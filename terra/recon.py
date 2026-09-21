@@ -50,7 +50,14 @@ def main():
 
     p("== identity")
     try:
-        p("   user:", terra.whoami())
+        if "--show-identity" in sys.argv:
+            p("   user:", terra.whoami())
+        else:
+            # recon's output is exactly what you attach to an issue or paste in a chat when a
+            # submission misbehaves, and your e-mail address plus a list of every workspace you can
+            # reach is not something that belongs in either. The identity is still in
+            # work/recon/*.json (your own files) when you truly need it.
+            p("   user: [redacted -- your Terra e-mail; pass --show-identity to print it]")
     except Exception as e:
         p("   whoami failed:", type(e).__name__, e)
 

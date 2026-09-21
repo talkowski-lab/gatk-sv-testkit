@@ -65,7 +65,18 @@ echo "=== creating $NAME ==="
 timeout 400 gcloud compute instances create "$NAME" --project=$PROJECT --zone="$ZONE" \
   --machine-type="$MACHINE" --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
   --boot-disk-size="${DISK_GB}GB" --boot-disk-type=pd-ssd --metadata-from-file startup-script="$STARTUP" \
-  --scopes=storage-rw --labels=purpose=jarflagprobe >/dev/null 2>&1 || { echo "  create failed" >&2; exit 1; }
+  --scopes=storage-ro --boot-disk-auto-delete --labels=purpose=jarflagprobe \
+  || { echo "  create failed (the gcloud error above is the reason)" >&2; exit 1; }
+# The delete used to be a background job with its output thrown away, reached only on the normal
+# path. A Ctrl-C during the ~15-minute wait, or one transient gcloud failure, left an 8-vCPU VM
+# billing to your project and told nobody. Now: registered the moment the VM exists, reached on
+# interrupt too, synchronous, and it prints the exact command to run by hand if cleanup itself fails.
+cleanup() {
+  timeout 300 gcloud compute instances delete "$NAME" --project=$PROJECT --zone="$ZONE" --quiet \
+    || printf '  CLEANUP FAILED -- this VM may still be running. Delete it with:\n    gcloud compute instances delete %s --project=%s --zone=%s --quiet\n' "$NAME" "$PROJECT" "$ZONE" >&2
+}
+trap cleanup EXIT
+trap 'trap - EXIT; cleanup; exit 130' INT TERM
 
 ANSWER=""
 for i in $(seq 1 45); do
@@ -74,9 +85,9 @@ for i in $(seq 1 45); do
   if echo "$S" | grep -q "JAR_FLAG_PROBE=DONE"; then ANSWER="$S"; break; fi
   [ $((i % 5)) -eq 0 ] && echo "  [${i}] waiting ($(echo "$S" | grep -c 'startup-script:') lines)"
 done
-timeout 300 gcloud compute instances delete "$NAME" --project=$PROJECT --zone="$ZONE" --quiet >/dev/null 2>&1 &
-
+# Deletion happens in the EXIT trap (registered at create time), on this path and on the interrupt
+# path alike.
 echo
-if [ -z "$ANSWER" ]; then echo "  no answer captured (VM deleted anyway)"; exit 1; fi
+if [ -z "$ANSWER" ]; then echo "  no answer captured (VM deleted -- see the cleanup note if that failed)"; exit 1; fi
 echo "=== what the shipped jar accepts ==="
 echo "$ANSWER" | sed -n 's/^startup-script: //p' | grep -E "^###" | cut -c1-118 | sed 's/^/  /'

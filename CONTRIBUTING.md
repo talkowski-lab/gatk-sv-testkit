@@ -64,9 +64,12 @@ key nobody will find, and the next person will hardcode the value instead.
 - Mutators (`create`, `copy`, `attrs --write`, `submit`) refuse without confirmation — the
   Terra helpers additionally thread `confirm=True` internally so a caller cannot mutate by
   accident, and `submit` needs `--confirm` on the command line as well.
-- Anything that starts compute names what it will cost. `docker/gatk-sv-build.sh` prints the
-  per-minute price from the compute API before booting, and `--dry-run` / `--check` show the
-  plan and touch nothing.
+- Anything that starts compute names **what it boots** before booting:
+  `docker/gatk-sv-build.sh` prints project, zone, machine type and the timeout ceiling in its
+  preflight, and `--dry-run` / `--check` print the plan and touch nothing. It deliberately does **not**
+  quote a price — there is no rate lookup anywhere in this repo, because your billing account, discounts
+  and spot pricing are not ours to read. Multiply the machine type by your own rate; the timeout ceiling
+  is the only bound this repo can give you, and `checks/image-check/*.sh` name theirs the same way.
 - **No `make` target may boot compute or mutate remote state.** The money paths stay
   human-typed. That is a review objection, not a style note.
 

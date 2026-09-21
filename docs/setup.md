@@ -116,7 +116,13 @@ members and pet service accounts.
 
 ## Verifying the whole picture
 
-```bash
+```
+> `recon.py` is read-only against Terra, but it writes eight JSON dumps under
+> `$GSVTK_WORK/recon/` and its stdout names your Terra e-mail (redacted unless
+> `--show-identity`) and every workspace you can reach. Attach `recon/*.json` to an issue
+> only after you have looked at what they list, and prefer describing the failure over
+> pasting the inventory.
+bash
 make test                                 # offline: syntax, --help, self-tests
 ./kit/gsvtk-config doctor                 # profile completeness
 python terra/recon.py                     # read-only: identity, billing, workspaces, baseline model

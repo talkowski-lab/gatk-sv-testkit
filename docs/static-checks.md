@@ -35,6 +35,11 @@ SVShell                        main@9a34dc12    0      2                0
 SVShell                        main@77c1e0b2    0      3                1
 ```
 
+(Pick refs where **both** sides actually contain the workflow you named: `--strict` now fails with an
+explanation when `--wf SVShell` names something that does not exist at that ref, instead of reporting
+`no hard errors` about a workflow it never looked at. `SVShell` is one of the newer WDLs, so old refs
+are a real risk in a long-running comparison table.)
+
 A rise in `INCOMPLETECALL` means a call site stopped binding something; a rise in
 `STALE-BINDINGS` means one is still passing an input the callee dropped. That delta is the whole
 value: against gatk-sv as it stands there are a few `IncompleteCall` warnings that are deliberate,

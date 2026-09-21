@@ -182,6 +182,19 @@ fi
 say "target"
 echo "  project  $PROJECT   ($ZONE, $MACHINE_TYPE, ${DISK_GB}GB)"
 echo "  clone    $REPO_URL"
+# The registry bucket is shared with production images, so the namespace segment is the only thing
+# separating "my test build" from "the image someone else's run pulls". Warn when the resolved push
+# target has none of it -- and say so BEFORE anything is booted, not after the push.
+_GSVTK_NS="${GSVTK_IMAGE_NAMESPACE:-}"
+if [ -n "$_GSVTK_NS" ]; then
+  case "$DOCKER_REPO" in
+    */"$_GSVTK_NS"|*/"$_GSVTK_NS"/*) : ;;
+    *) echo "  WARNING: push target has no '$_GSVTK_NS' namespace segment:"
+       echo "             $DOCKER_REPO"
+       echo "           A tag here can be a production image path. Set GSVTK_IMAGE_NAMESPACE or pass"
+       echo "           --docker-repo pointing inside your own namespace to silence this." ;;
+  esac
+fi
 echo "  push to  $DOCKER_REPO"
 
 case "$DISK_GB" in ''|*[!0-9]*) die "--disk-size must be an integer (GB)";; esac

@@ -68,13 +68,16 @@ def images_from_config() -> dict:
     out = {}
     for key, ck in (("gatk_docker", "GATK_IMAGE_REPO"), ("sv_pipeline_docker", "IMAGE_REPO")):
         value, source = res.get(ck, ("", ""))
-        if value and source in ("env", "profile"):
+        # An untagged registry path is not a pin: `.../sv-pipeline` floats to whatever is current at
+        # pull time, so the "which code ran" question has no answer afterwards.
+        if value and source in ("env", "profile") and ":" in value.rsplit("/", 1)[-1]:
             out[f"GenotypeBatch.{key}"] = f'"{value}"'
     return out
 
 
 IMAGES: dict[str, str] = {}
 CONFIRMED = False        # set only by an explicit --confirm on the command line
+ALLOW_UNPINNED = False   # set only by an explicit --allow-unpinned-docker
 WDL_VERSION = os.environ.get("GSV_WDL_VERSION") or config.get("BRANCH")
 
 
@@ -98,6 +101,25 @@ def make_body() -> dict:
     b["name"] = CONFIG
     b["methodRepoMethod"] = dstore(WDL_VERSION)
     b["inputs"].update(IMAGES)
+    # docs/terra-head-to-head.md promises every `*_docker` is pinned literally. A `*_docker` still
+    # written as an expression (`workspace.sv_pipeline_docker`) resolves to whatever that attribute
+    # points at TODAY, so the rerun does not reproduce the code that ran -- and nothing in its output
+    # says so. Fail closed rather than publish a config that quietly breaks the one guarantee this
+    # tool exists to provide.
+    unpinned = sorted(k for k, v in b["inputs"].items()
+                      if k.endswith("_docker") and k not in IMAGES)
+    untagged = sorted(k for k, v in IMAGES.items()
+                      if ":" not in str(v).strip('\"').rsplit("/", 1)[-1])
+    if (unpinned or untagged) and not ALLOW_UNPINNED:
+        raise SystemExit(
+            "image inputs are not fully pinned -- a submit with these runs whatever the workspace\n"
+            "  attribute points at today, which is exactly what this tool exists to prevent:\n"
+            + "".join(f"    unpinned:  {k}\n" for k in unpinned)
+            + ("" if not untagged else
+               "  pinned but untagged (a floating reference; today's bytes are not tomorrow's):\n"
+               + "".join(f"    {k} = {str(IMAGES[k]).strip(chr(34))}\n" for k in untagged))
+            + "  pass --image KEY=REF for each one (see --help), or --allow-unpinned-docker if you\n"
+              "  genuinely want the attribute-resolved images for this rerun.")
     return b
 
 
@@ -160,6 +182,8 @@ so the run cannot inherit a stale image from a workspace attribute.
   show              print the config body that would be POSTed (no mutation)
   create / validate POST it, then ask Terra to typecheck it
   submit --confirm  start it (real compute; --confirm is mandatory)
+  --allow-unpinned-docker   let a *_docker input resolve from a workspace attribute (off by
+                            default: it breaks reproducibility, so it has to be asked for)
   status            recent submissions in the configured workspace""",
           file=sys.stderr if code else sys.stdout)
     raise SystemExit(code)
@@ -183,6 +207,8 @@ if __name__ == "__main__":
             specs.append(a.split("=", 1)[1]); i += 1
         elif a == "--confirm":
             confirm = True; i += 1
+        elif a == "--allow-unpinned-docker":
+            globals()["ALLOW_UNPINNED"] = True; i += 1
         elif a.startswith("--"):
             raise SystemExit(f"unknown option {a!r}   (--help for the options)")
         else:
