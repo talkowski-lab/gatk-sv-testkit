@@ -109,6 +109,13 @@ Two non-obvious details that cost real debugging time when wrong:
   resolve to nothing — usually at runtime, after VMs booted.
 - **`GSVTK_BATCH` must name a real `sample_set`.** It defaults to `all_samples`, the entity in
   gatk-sv's reference-panel workspace; rename it and every `this.<attr>` binding silently empties.
+- **A workflow Dockstore does not publish cannot be a method by reference.** `.github/.dockstore.yml`
+  carries ~30 named workflows, and anything only ever called as a sub-workflow is not among them,
+  while a workspace method is a single descriptor file. `terra/wdl_flat.py` bundles a
+  single-workflow closure into one document, and `--check` typechecks the result with miniwdl,
+  refusing to report success without it. It refuses multi-workflow closures on purpose -- including
+  `TinyResolve`, whose import `GetShardInputs.wdl` declares a workflow of its own -- because a
+  document with two workflows has no primary and fails at submission looking like a broken WDL.
 - **A binding is not an expression.** A value Cromwell *evaluates* rather than *reads* can come
   back empty, and the WDL's own default then wins — which is invisible in the create/validate
   path, because both consider the config well-formed. `batch_check_inputs.py` flags bindings that
