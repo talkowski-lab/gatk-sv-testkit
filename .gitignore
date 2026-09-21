@@ -58,3 +58,8 @@ vendor/wdl/
 # artifact -- and `git add -A` will happily publish it (two turned up during review).
 /*.stderr
 /*.stdout
+
+# any testkit.*.env profile is machine-local: it holds real project / workspace
+# coordinates, and the loader picks profiles by exact name, so a stray one is inert but
+# still committable. Only testkit.env.example is tracked.
+testkit.*.env
