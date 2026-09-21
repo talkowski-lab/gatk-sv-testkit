@@ -39,7 +39,6 @@ def hist_file(path: str, fields: list) -> dict:
             want = [(f, idx[f]) for f in fields if f in idx]
             for f, i in want:
                 st = out[f]
-                vals = []
                 for s in cols[9:]:
                     parts = s.split(":")
                     if i >= len(parts):

@@ -364,7 +364,9 @@ def build(verbose: bool = True) -> tuple[dict, dict]:
                 ins.pop(scoped, None)
                 unresolved.append(f'{n}   (MALFORMED URI, not gs://: {s[:60]})')
         paths |= {p for v in arm['tables'].values() for p in gs_paths_of(v)}
-        paths |= {p for v in arm['images'].values() if str(v).startswith('gs://')}
+        # (fixed after the fact: this read `{p for v in ...}`, an undefined name -- the set
+        # comprehension raised NameError the first time any arm pinned an image on gs://)
+        paths |= {v for v in arm['images'].values() if str(v).startswith('gs://')}
         exist = verify_gcs(paths) if paths else {}
         for n, v in sorted(literal.get(arm['repo_ref'], {}).items()):
             missing = [p for p in gs_paths_of(v) if not exist.get(p, True)]

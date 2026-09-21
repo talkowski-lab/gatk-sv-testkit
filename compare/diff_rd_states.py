@@ -25,11 +25,11 @@ import config  # noqa: E402
 
 def _default_baseline() -> str:
     batch = config.get("BATCH", "all_samples")
-    return str(config.work_dir("staging") / f"{batch}.genotyped_depth.vcf.gz")
+    return str(config.work_path("staging") / f"{batch}.genotyped_depth.vcf.gz")
 
 
 BASE = _default_baseline()
-NEW = str(config.work_dir("runs") / "train" / "train.genotyped.vcf.gz")
+NEW = str(config.work_path("runs") / "train" / "train.genotyped.vcf.gz")
 FMT = "[%CHROM\t%POS\t%INFO/END\t%INFO/SVLEN\t%INFO/SVTYPE\t%SAMPLE\t%RD_CN\n]"
 
 
@@ -56,7 +56,6 @@ def parse_args(argv):
 def dump(path):
     states = {}    # (key, sample) -> state string
     samples = set()
-    keycount = Counter()   # key -> records seen (each record line repeats per sample)
     keysamples = {}
     p = subprocess.run(
         ["bcftools", "query", "-f", FMT, path],
@@ -73,11 +72,10 @@ def dump(path):
         samples.add(sample)
         keysamples.setdefault(key, set()).add(sample)
     keys = set(keysamples)
-    # a key is ambiguous if >1 distinct record carried it: detect via line count per key/sample
-    nlines_per_keysample = Counter()
-    for (k, s) in states:
-        nlines_per_keysample[k] += 1
-    # we did not count duplicates explicitly; instead recount raw lines for a lightweight check
+    # A key is ambiguous when more than one record carried it, which makes the per-(key,sample)
+    # state a last-write-wins accident. The states pass above cannot see that (it collapses into the
+    # dict), so count the raw records in a second query -- the cheap, honest way to know how much of
+    # the comparison rests on a collision.
     p2 = subprocess.run(
         ["bcftools", "query", "-f", "%CHROM\t%POS\t%INFO/END\t%INFO/SVLEN\t%INFO/SVTYPE\n", path],
         capture_output=True, text=True, check=True,

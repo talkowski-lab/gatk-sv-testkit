@@ -34,8 +34,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
 import config  # noqa: E402
 
-STAGE = str(config.work_dir("staging"))
-REPORTS = str(config.work_dir("reports"))
+# Paths, not directories: this module is imported to print --help. main() below does the one
+# makedirs it needs (for REPORTS) right before writing.
+STAGE = str(config.work_path("staging"))
+REPORTS = str(config.work_path("reports"))
 
 SR_FILE = os.path.join(STAGE, "all_samples.sr.txt.gz")
 MEDIAN_FILE = os.path.join(STAGE, "all_samples_medianCov.transposed.bed")
@@ -44,11 +46,18 @@ PESR_VCF = os.path.join(STAGE, "all_samples.filtered_pesr_merged.vcf.gz")
 CUTOFFS = os.path.join(STAGE, "all_samples.cutoffs")
 
 
-def sh(cmd, allow_fail=False):
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+def run(argv, allow_fail=False):
+    """Run an external tool by argv, never through a shell.
+
+    Not pedantry about style. `--region` is the operator's own argument, but the `chrom` that
+    reaches side_counts() is read OUT OF the VCF, so a shell here interpolates file contents into a
+    command line -- and one of this script's jobs is to read captures produced elsewhere. argv lists
+    also stop a value that starts with '-' from becoming an option by accident.
+    """
+    r = subprocess.run(list(argv), capture_output=True, text=True, errors="replace")
     if r.returncode != 0 and not allow_fail:
         sys.stderr.write((r.stderr or "")[:600])
-        raise RuntimeError(cmd)
+        raise RuntimeError(" ".join(str(a) for a in argv)[:200])
     return r.stdout
 
 
@@ -106,11 +115,11 @@ def load_median_cov(path):
 
 def load_depth_records(region):
     """Depth genotypes as intervals: (chrom, start, end, svtype, {sample: RD_CN})."""
-    samples = sh(f"bcftools query -l {DEPTH_VCF}").split()
+    samples = run(["bcftools", "query", "-l", DEPTH_VCF]).split()
     fmt = "%CHROM\t%POS\t%INFO/END\t%INFO/SVTYPE\t[%RD_CN\t]\n"
-    cmd = f"bcftools query -f '{fmt}' {DEPTH_VCF} -r {region} 2>/dev/null"
+    cmd = ["bcftools", "query", "-f", fmt, DEPTH_VCF, "-r", region]
     recs = collections.defaultdict(list)
-    for line in sh(cmd, allow_fail=True).splitlines():
+    for line in run(cmd, allow_fail=True).splitlines():
         f = line.split("\t")
         if len(f) < 4 + len(samples):
             continue
@@ -151,9 +160,9 @@ def match_copy_states(recs, chrom, start, end, svtype):
 def sr_sites(region):
     """Sites with SR in INFO/EVIDENCE (v1.1's `pass.srtest.txt`)."""
     fmt = "%CHROM\t%POS\t%ID\t%INFO/SVTYPE\t%INFO/END\t%INFO/EVIDENCE\n"
-    cmd = f"bcftools query -f '{fmt}' {PESR_VCF} -r {region} 2>/dev/null"
+    cmd = ["bcftools", "query", "-f", fmt, PESR_VCF, "-r", region]
     out = []
-    for line in sh(cmd, allow_fail=True).splitlines():
+    for line in run(cmd, allow_fail=True).splitlines():
         f = line.split("\t")
         if len(f) < 6 or "SR" not in f[5]:
             continue
@@ -174,8 +183,8 @@ def side_counts(chrom, start, end, pad):
     SplitReadEvidenceAggregator both decide start- vs end-side support."""
     res = collections.defaultdict(lambda: [0.0, 0.0])
     for idx, pos in enumerate((start, end)):
-        q = f"tabix {SR_FILE} {chrom}:{max(1, pos - pad)}-{pos + pad} 2>/dev/null"
-        for line in sh(q, allow_fail=True).splitlines():
+        q = ["tabix", SR_FILE, f"{chrom}:{max(1, pos - pad)}-{pos + pad}"]
+        for line in run(q, allow_fail=True).splitlines():
             f = line.split("\t")
             if len(f) < 5:
                 continue

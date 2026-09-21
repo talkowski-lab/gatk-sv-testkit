@@ -9,6 +9,7 @@ cp testkit.env.example testkit.env
 ./kit/gsvtk-config doctor      # what is set, what is missing, which files were read
 ./kit/gsvtk-config show        # every key, its value and where that value came from
 ./kit/gsvtk-config work runs/x # print (and create) a scratch dir under $GSVTK_WORK
+./kit/gsvtk-config miniwdl     # the miniwdl the WDL tools will use (empty if there is none)
 ```
 
 `work` prints **the directory it created, subdirs included** — `OUT="$(gsvtk_work runs/train_full)"`
@@ -85,7 +86,7 @@ workspace) or safely derivable.
 | `GSVTK_BRANCH` | *(unset)* | configs, WDL gate, labels | the gatk-sv branch under test |
 | `GSVTK_FROZEN_SUFFIX` | `frz` | freeze, configs, fetch | attribute suffix for frozen baseline inputs |
 | `GSVTK_NEW_SUFFIX` | `new` | configs, fetch | attribute suffix for this chain's outputs |
-| `GSVTK_BATCH` | `all_samples` | freeze, configs, rerun, fetch+compare | the `sample_set` entity holding batch-level attributes. `stage_inputs.py` and `fetch_baseline.py` still assume `all_samples` by default |
+| `GSVTK_BATCH` | `all_samples` | freeze, configs, rerun, fetch+compare, `fetch_baseline.py --entity`, `stage_inputs.py --attrs`, `diff_rd_states.py` | the `sample_set` entity holding batch-level attributes. Every reader now takes it from here; when the configured row is absent from a frozen manifest, `stage_inputs.py` stops and names the rows that exist rather than selecting nothing at exit 0 |
 | `GSVTK_WORK` | `<repo>/work` | everything that writes | scratch: staged inputs, runs, manifests, fetched outputs |
 
 Set the two suffixes once and keep them consistent: `batch_configs.py` writes outputs to
@@ -102,7 +103,7 @@ Things that are per-invocation rather than per-user stay as flags or their own v
 | `JAVA` | `batch_check_inputs.py`, `batch_fetch_compare.sh` | the `java` used for womtool and for the GATK jar |
 | `GSVTK_PYTHON` | `kit/config.sh` | interpreter used to resolve config (>=3.9) |
 | `WOMTOOL_JAR` | `terra/batch_check_inputs.py` | path to a womtool jar; required, and its absence is reported as a missing prerequisite, not a crash |
-| `MINIWDL` | `checks/wdl_gate.sh` | the miniwdl executable |
+| `MINIWDL` | `checks/wdl_gate.sh`, `terra/wdl_flat.py` | the miniwdl executable, and it is optional: without it both resolve `$PATH` → the bin next to the interpreter → `./.venv/bin` (one resolver, `./kit/gsvtk-config miniwdl`, prints the path it chose). `make setup` installs miniwdl into a venv your shell has not activated, so a PATH-only lookup reported the checker missing on machines where it passes |
 | `JAR`, `GATK_JAR` | examples, `batch_fetch_compare.sh` | a locally built GATK jar |
 | `PROFILE_BIN` | `batch_fetch_compare.sh` | an installed `gatk-sv-profile` |
 | `GSV_WDL_VERSION` | `terra/batch_rerun_step.py` | override the Dockstore version, e.g. to pin a SHA-pinned tag |
@@ -119,6 +120,14 @@ Things that are per-invocation rather than per-user stay as flags or their own v
 Point it at a roomy disk. It is gitignored at every depth, and `make clean-work` prints what
 it would delete without deleting anything — hardlinked staging trees make `du` misleading about
 what is actually yours.
+
+Nothing creates these directories as a side effect of printing usage. Python tools build scratch
+paths with `config.work_path()` (a path, no `mkdir`) and the write sites call `work_dir()` when
+bytes are about to land; `gsvtk-config work` / `gsvtk_work` still create, because shell callers
+assign their output directory from what it prints. The Python half is pinned by the
+`help_writes_nothing` probe, because import-time `work_dir()` meant `--help` left
+`manifests/` and `staging/` behind — and a typo in `GSVTK_WORK` was invisible until something was
+written into the wrong tree.
 
 ## Changing a value that is baked into a Terra run
 

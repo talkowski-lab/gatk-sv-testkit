@@ -26,6 +26,7 @@ Usage:
     gsvtk-config env                    # eval-able `export GSVTK_X='...'`
     gsvtk-config show                   # key, value, provenance
     gsvtk-config work [SUBDIR ...]      # absolute work dir, creating subdirs
+    gsvtk-config miniwdl                # path to a usable miniwdl, empty if none (exit 0 either way)
     gsvtk-config doctor                 # what is configured, what is missing
 """
 from __future__ import annotations
@@ -192,7 +193,8 @@ def require(key: str) -> str:
     key = key.removeprefix(PREFIX).upper()
     value, _ = resolve()[key]
     if not value:
-        _help, required = DEFAULTS[key][1], DEFAULTS[key][2]
+        _help = DEFAULTS[key][1]      # DEFAULTS[..][2] (required_for_use) is `doctor`'s business;
+                                      # a caller reaching require() has already declared it required
         sys.stderr.write(
             f"gsvtk-config: {PREFIX}{key} is not set ({_help}).\n"
             f"  set it in the environment, or put `{PREFIX}{key}=...` in one of:\n"
@@ -244,6 +246,43 @@ def cmd_work(a):
     sys.stdout.write(str(target) + "\n")
 
 
+def find_miniwdl() -> str:
+    """A usable `miniwdl` path, or ''.
+
+    Why this exists instead of `command -v miniwdl`: `make setup` installs miniwdl as a console
+    script in .venv/bin, which is NOT on the PATH of a shell that never activated the venv, and the
+    tools are routinely invoked as `.venv/bin/python terra/wdl_flat.py ...` or from make. A
+    PATH-only lookup therefore reported "miniwdl not found" on a machine where `miniwdl check`
+    passes, and the whole WDL loop got written off as unavailable. Precedence:
+
+        $MINIWDL (verbatim, must be executable)  >  PATH  >  sibling of this interpreter
+                                                      >  <repo>/.venv/bin
+
+    `gsvtk-config miniwdl` exits 0 whether or not it finds one, so that
+    `X="$(gsvtk-config miniwdl)"` cannot fail a `set -e` script or a bash 3.2 pipeline; callers test
+    for the empty string and print the install hint themselves.
+    """
+    import shutil
+    env = os.environ.get("MINIWDL")
+    cands = [env, os.path.expanduser(env)] if env else []
+    found = shutil.which(env or "miniwdl")
+    if found:
+        cands.append(found)
+    if sys.executable:
+        cands.append(str(Path(sys.executable).parent / "miniwdl"))
+    cands.append(str(REPO_ROOT / ".venv" / "bin" / "miniwdl"))
+    for cand in cands:
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return ""
+
+
+def cmd_miniwdl(a):
+    found = find_miniwdl()
+    if found:
+        sys.stdout.write(found + "\n")
+
+
 def cmd_doctor(a):
     res = resolve()
     missing = [k for k, (_v, _p) in res.items() if DEFAULTS[k][2] and not _v]
@@ -264,6 +303,10 @@ def cmd_doctor(a):
             value, prov = res[key]
             if value:
                 sys.stdout.write(f"  {key:<20} {value}\n")
+    mini = find_miniwdl()
+    sys.stdout.write(f"\nminiwdl: {mini}\n" if mini else
+                     "\nminiwdl: NOT FOUND -- the WDL gate and wdl_flat --check cannot run "
+                     "(make setup, or export MINIWDL=<path>)\n")
     checkout = res["GATK_SV_CHECKOUT"][0]
     if checkout:
         path = Path(checkout).expanduser()
@@ -288,6 +331,8 @@ def main() -> int:
     p = sub.add_parser("work", help="absolute scratch dir")
     p.add_argument("subdirs", nargs="*")
     p.set_defaults(fn=cmd_work)
+    sub.add_parser("miniwdl", help="path to a usable miniwdl (empty if none)") \
+        .set_defaults(fn=cmd_miniwdl)
     sub.add_parser("doctor", help="what is configured / missing").set_defaults(fn=cmd_doctor)
     a = ap.parse_args()
     try:

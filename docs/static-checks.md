@@ -19,8 +19,15 @@ checks/wdl_gate.sh --wf SVShell HEAD     # one workflow
 checks/wdl_gate.sh --strict HEAD         # nonzero exit if anything is unlaunchable
 ```
 
-Needs `miniwdl` (`pip install miniwdl`) and a local gatk-sv clone (`GSVTK_GATK_SV_CHECKOUT`).
-Both are checked up front and the fix is printed rather than a stack trace appearing.
+Needs `miniwdl` (`python -m pip install -r requirements-dev.txt`, or into `./.venv`) and a local
+gatk-sv clone (`GSVTK_GATK_SV_CHECKOUT`). Both are checked up front and the fix is printed rather
+than a stack trace appearing.
+
+`miniwdl` is resolved by `./kit/gsvtk-config miniwdl` — `MINIWDL`, then `PATH`, then the bin next
+to the interpreter, then `./.venv/bin` — and `terra/wdl_flat.py --check` uses the same resolver.
+That is not convenience: the console script `make setup` installs lives in a venv the invoking
+shell has usually not activated, so `command -v miniwdl` said "not found" on the machine where
+`miniwdl check` passes, and the WDL loop got written off as unavailable.
 
 Each ref is materialized to **its own directory** by `scripts/fetch_wdl.py` (git-archive of one
 ref, with a `.provenance` file recording the exact SHA). That is not tidiness: WDL imports

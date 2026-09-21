@@ -8,6 +8,7 @@ Import this instead of hardcoding a project, workspace, registry or scratch path
     ns = config.require("TERRA_NAMESPACE")     # exits 4 with an instruction if unset
     batch = config.get("BATCH", "all_samples") # never fails
     out = config.work_dir("manifests")         # .../work/manifests, created
+    man = config.work_path("manifests", "baseline_run.json")   # .../work/manifests/..., NOT created
 
 Resolution is delegated to the sibling ``gsvtk-config`` program so that bash and
 Python cannot drift; see ``docs/config.md`` for the precedence rules and
@@ -67,12 +68,38 @@ def resolve() -> dict[str, tuple[str, str]]:
     return _core.resolve()
 
 
+def work_path(*subdirs: str) -> Path:
+    """Absolute scratch path WITHOUT creating anything. Never a source path.
+
+    Use this wherever a module builds a path at IMPORT time -- which is what every tool's
+    `--help` executes. Those lines used to call work_dir(), so printing usage created
+    $GSVTK_WORK/manifests and /staging: a read-only command left directories behind, and a
+    typo in the scratch key was invisible until something wrote into the wrong tree. Write
+    sites keep work_dir() (or mkdir) so the directory appears when bytes appear.
+    """
+    root = Path(require("WORK")).expanduser()
+    return root.joinpath(*subdirs) if subdirs else root
+
+
 def work_dir(*subdirs: str) -> Path:
     """Absolute scratch dir, creating any subdirs. Never a source path."""
-    root = Path(require("WORK")).expanduser()
-    path = root.joinpath(*subdirs) if subdirs else root
+    path = work_path(*subdirs)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def miniwdl() -> str:
+    """Path to a usable `miniwdl`, or '' when there is none.
+
+    Resolution is delegated to `kit/gsvtk-config miniwdl` (see that file for the precedence)
+    because a console script installed by `make setup` lives next to the interpreter, not on a
+    plain shell's PATH -- which is how `checks/wdl_gate.sh` came to report "miniwdl not found"
+    on a machine where `miniwdl check` passes.
+    """
+    import subprocess
+    r = subprocess.run([sys.executable, str(_CONFIG_PATH), "miniwdl"],
+                       capture_output=True, text=True)
+    return (r.stdout or "").strip()
 
 
 def checkout(kind: str = "GATK_SV_CHECKOUT") -> Path:

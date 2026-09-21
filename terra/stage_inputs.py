@@ -26,11 +26,19 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kit"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config  # noqa: E402
-import terra  # noqa: E402
+import terra  # noqa: F401  E402  # no attribute is used from it: importing it is what turns a
+# missing `firecloud` into one sentence about `make setup` instead of a traceback on gsutil.
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAN = str(config.work_dir("manifests") / "baseline_run.json")
-STAGE = str(config.work_dir("staging"))
+# Paths, not directories: building these at import time must not mkdir, because import is what
+# `--help` executes. Everything that writes calls config.work_dir() (or os.makedirs) itself.
+MAN = str(config.work_path("manifests") / "baseline_run.json")
+STAGE = str(config.work_path("staging"))
+# The sample_set row holding the batch-level attributes. Every sibling tool reads this key
+# (batch_freeze.py, batch_rerun_step.py, batch_fetch_compare.sh, diff_rd_states.py); hardcoding
+# one batch name here meant `--attrs` resolved against a row that does not exist for any other
+# batch, selected nothing, and exited 0.
+BATCH = config.get("BATCH", "all_samples")
 
 
 def p(*a):
@@ -99,13 +107,27 @@ def collect(manifest, keys, attrs):
                 if isinstance(val, str) and val.startswith("gs://") and short in keys:
                     want.setdefault(f"{step}__{kind}__{short}", val)
     ents = manifest["entities"].get("sample_set", {})
-    row = ents.get("all_samples", {})
+    row = ents.get(BATCH)
+    if row is None:
+        # A wrong GSVTK_BATCH is a configuration error, not "nothing to do", so it stops the run:
+        # printing a note and returning an empty selection exited 0, which reads like an empty
+        # manifest and lets a wrapper script carry on as though inputs had been staged.
+        print(f"stage_inputs: no sample_set row named {BATCH!r} in {MAN} "
+              f"(rows present: {', '.join(sorted(ents)) or 'none'}).\n"
+              f"  set GSVTK_BATCH to one of those, or re-run\n"
+              f"    python terra/fetch_baseline.py --entity {BATCH}\n"
+              f"  so the manifest actually holds it.", file=sys.stderr)
+        raise SystemExit(2)              # 2 = your configuration, same as a malformed --region
     for a in attrs:
         v = row.get(a)
         if isinstance(v, str) and v.startswith("gs://"):
             want.setdefault(a, v)
         elif v is not None:
             p(f"   note: attribute {a} is not a single gs:// object: {str(v)[:60]}")
+        else:
+            near = [k for k in sorted(row) if any(w in k.lower() for w in a.lower().split("_")) if k != a]
+            p(f"   note: attribute {a} is not on sample_set {BATCH!r}"
+              + (f" (similar keys: {', '.join(near[:5])})" if near else ""))
     return want
 
 
@@ -216,8 +238,13 @@ def adopt_from_local(uri, link_dirs, dest):
     if not os.path.exists(dest):
         try:
             os.link(cand, dest)
-        except OSError:
-            run(["gsutil", "-m", "cp", "-n", cand, dest], check=True)
+        except OSError as e:
+            # Cross-device (--link-dir on another volume) or a filesystem without hardlinks: copy
+            # the local copy instead. run() takes (argv, soft=False) and raises on a nonzero rc --
+            # this call used to pass check=True, so the one path that recovered from a failed
+            # link died with `TypeError: run() got an unexpected keyword argument 'check'`.
+            p(f"   note: cannot hardlink {os.path.basename(cand)} ({e}); copying")
+            run(["gsutil", "-m", "cp", "-n", cand, dest])
     return {"source": "local", "path": cand, "size": size, "verified": verdict}
 
 
@@ -333,7 +360,12 @@ def main():
         except Exception as e:
             log[name] = {"status": "error", "error": str(e)[:300], "uri": uri}
             p(f"      !! {str(e)[:160]}")
-    out = os.path.join(STAGE, "staged.json")
+    if not log:
+        # --dry-run gets here with nothing recorded. Writing staged.json anyway would touch the
+        # provenance file of a run that never happened (and needed the directory to exist).
+        p("nothing staged (--dry-run); staged.json untouched")
+        return
+    out = os.path.join(config.work_dir("staging"), "staged.json")
     prev = {}
     if os.path.exists(out):
         prev = json.load(open(out))

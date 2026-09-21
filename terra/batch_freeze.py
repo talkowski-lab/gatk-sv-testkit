@@ -47,8 +47,10 @@ def require_sandbox():
 DEST_PREFIX = "frozen-baseline"
 BATCH = config.get("BATCH", "all_samples")
 FZ = "_" + config.get("FROZEN_SUFFIX", "frz")
-ENTITIES = str(config.work_dir("recon") / "sample_set_entities.json")
-MANIFEST = str(config.work_dir("manifests") / "baseline_frozen_inputs.json")
+# Paths, not directories: import is what `--help` runs, and it must not create anything. Writers
+# call config.work_dir() themselves.
+ENTITIES = str(config.work_path("recon") / "sample_set_entities.json")
+MANIFEST = str(config.work_path("manifests") / "baseline_frozen_inputs.json")
 
 # sample_set attributes the 06/07 steps read from upstream (frozen from the baseline)
 FROZEN_ATTRS = [
@@ -93,7 +95,6 @@ def load_rows():
         srcs.setdefault(r["src"], set()).add(r["name"])
         names.setdefault(r["name"], set()).add(r["src"])
     bucket = dest_bucket()
-    shared = sorted(n for n, s in names.items() if len(s) == 1 and len(srcs) > 1)
     for r in rows:
         object_name = r["name"] if len(names[r["name"]]) == 1 else f"{r['attr']}__{r['name']}"
         r["dest"] = f"gs://{bucket}/{DEST_PREFIX}/{object_name}"
@@ -205,30 +206,53 @@ def verify(rows):
     doc = {"dest_prefix": f"gs://{dest_bucket()}/{DEST_PREFIX}", "objects": out,
            "total_bytes": total, "verified": not bad,
            "mismatches": [{"attr": a, "crc32c_src": x, "crc32c_dest": y} for a, x, y in bad]}
+    config.work_dir("manifests")          # the path is built without mkdir; this write makes the dir
     json.dump(doc, open(MANIFEST, "w"), indent=1)
     print(f"\nmanifest -> {MANIFEST}  total {total/2**30:.2f} GiB  verified={not bad}")
     if bad:
         raise SystemExit(f"crc32c mismatch on {len(bad)} objects: {bad}")
 
 
+def publish_guard(manifest_path: str, allow_unverified: bool = False) -> None:
+    """Refuse to publish frozen attributes unless a crc32c verify PASSED is on record.
+
+    Three states must all be refused, not just the loud one. This used to test only
+    `verified is False`, so BOTH other ways of having no proof sailed through: no manifest at all
+    (verify never run), and a manifest written before the verdict key existed or by a hand-edited
+    file. `attrs --write` then published gs:// paths into the entity as the frozen inputs of every
+    later comparison, on the strength of nothing -- which is the same silent-wrongness shape as
+    counting a step with no metadata as zero VM-minutes.
+    """
+    if allow_unverified:
+        print("   !! --allow-unverified: publishing frozen paths with no recorded crc32c verify")
+        return
+    try:
+        with open(manifest_path) as fh:
+            man = json.load(fh)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"no frozen-input manifest at {manifest_path}, so nothing has verified these objects.\n"
+            f"  Run `python terra/batch_freeze.py verify` (read-only; it re-crc32cs both sides and\n"
+            f"  writes the verdict) first, or pass --allow-unverified if you proved the copies\n"
+            f"  some other way and can say how.")
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"cannot read {manifest_path} ({e}); refusing to publish frozen paths "
+                         f"without a readable verify verdict. Re-run `verify`.")
+    if man.get("verified") is not True:
+        n = len(man.get("mismatches") or [])
+        raise SystemExit(
+            f"{manifest_path} records no PASSED crc32c verify"
+            + (f" ({n} mismatching object(s))" if n else " (no 'verified' verdict in it)")
+            + ".\n  Re-run `python terra/batch_freeze.py verify` and resolve it before publishing "
+              "attributes --\n  publishing an unverified frozen path means the head-to-head runs on "
+              "inputs nobody confirmed.\n  (--allow-unverified only if you have proof elsewhere.)")
+
+
 def attrs(rows):
     """Write <attr>{FROZEN_SUFFIX} onto the batch sample_set (Terra merges attributes)."""
     lines = ["entity:sample_set_id\t" + "\t".join(f"{r['attr']}{FZ}" for r in rows)]
     lines.append(f"{BATCH}\t" + "\t".join(r["dest"] for r in rows))
-    # Publish only over a verify that PASSED. `attrs --write` used to trust nothing at all: the
-    # verify step was optional, and its failure was invisible afterwards.
-    if os.path.exists(MANIFEST):
-        try:
-            man = json.load(open(MANIFEST))
-        except (OSError, ValueError):
-            man = {}
-        if man.get("verified") is False:
-            raise SystemExit(
-                f"{MANIFEST} records a FAILED crc32c verify "
-                f"({len(man.get('mismatches') or [])} object(s)). Re-run "
-                f"`python terra/batch_freeze.py verify` and resolve it before publishing "
-                f"attributes -- publishing an unverified frozen path means the head-to-head runs "
-                f"on inputs nobody confirmed.")
+    publish_guard(MANIFEST, allow_unverified="--allow-unverified" in sys.argv)
     tsv = "\n".join(lines) + "\n"
     path = str(config.work_dir("staging") / "frozen_baseline_attrs.tsv")
     open(path, "w").write(tsv)
@@ -258,6 +282,9 @@ def usage(code=0):
            (--write: it creates tens of GiB of billable objects that nothing overwrites)
   verify   compare crc32c on both sides; nonzero exit on any mismatch
   attrs    write <attr>{FROZEN_SUFFIX} onto the batch sample_set (--write to upload)
+           Refuses unless `verify` has recorded a PASSED crc32c verdict in the manifest: no
+           manifest, a corrupt one and a failed one are all refused. --allow-unverified overrides
+           it, and prints that it did.
 
 Both mutators refuse GSVTK_BASELINE_NAMESPACE/_WORKSPACE unless --allow-shared-target: that
 workspace is the shared reference run, and Terra merges entity attributes rather than replacing.

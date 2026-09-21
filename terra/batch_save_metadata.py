@@ -174,7 +174,9 @@ def vm_minutes(meta):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--outdir", default=str(config.work_dir("metadata")))
+    # work_path: an argparse default is built before parse_args, and `os.makedirs(a.outdir)` below
+    # is where the directory actually appears -- `--help` must create nothing.
+    ap.add_argument("--outdir", default=str(config.work_path("metadata")))
     ap.add_argument("--target", action="append", metavar="KEY",
                     help="e.g. 10-new / 06-baseline (default: every step found on both sides)")
     ap.add_argument("--step", action="append", choices=sorted(STEPS),

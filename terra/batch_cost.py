@@ -58,7 +58,9 @@ def load(outdir: str) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--outdir", default=str(config.work_dir("metadata")))
+    # work_path, not work_dir: an argparse default is evaluated before parse_args, so `--help`
+    # would otherwise create the scratch directory it is only describing.
+    ap.add_argument("--outdir", default=str(config.work_path("metadata")))
     ap.add_argument("--groups", action="append", default=[],
                     help="also print the top-level call-group roll-up for this target (e.g. 10-baseline)")
     ap.add_argument("--json", action="store_true")

@@ -32,8 +32,9 @@ make setup                          # .venv with the python dependencies
 cp testkit.env.example testkit.env  # then edit it: project + workspace are yours to name
 ./kit/gsvtk-config doctor           # tells you exactly what is still missing
 
-make test                           # the offline gate: syntax, undefined-module refs, `--help` on
-                                    # every CLI, real end-to-end invocations, self-tests + canary
+make test                           # the offline gate: syntax, undefined-module refs, a pyflakes
+                                    # bug sweep, `--help` on every CLI, real end-to-end invocations,
+                                    # self-tests + canary + probes for every confirmed defect
 ```
 
 Then pick a loop. The two most common first runs:
@@ -80,8 +81,9 @@ goes under `GSVTK_WORK` and is gitignored. Nothing the tools produce is committe
 
 ## Things worth knowing before you start
 
-- **Read-only by default.** Every mutating helper in `terra/` needs `confirm=True`, and the
-  ones that start compute additionally refuse without a `--confirm` flag on the command line.
+- **Read-only by default.** Every mutating helper in `terra/` needs `confirm=True`, the ones that
+  start compute additionally refuse without a `--confirm` flag on the command line, and the ones
+  that write to Terra refuse the shared baseline workspace unless you name `--allow-shared-target`.
   Recon, status, cost, fetch, all of `checks/` and all of `compare/` never write **outside
   `$GSVTK_WORK` (recon dumps eight JSONs there — that is the point of running it, but they
   are writes, and `recon/*.json` contains your workspace inventory).

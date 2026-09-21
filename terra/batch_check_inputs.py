@@ -102,8 +102,8 @@ def main() -> int:
             expr.append(f"{key.split('.', 1)[-1]}={text[:60]!r}")
     if expr:
         fails.append(f"expression-shaped bindings: {expr}")
-        print(f"  FAIL expression-shaped bindings (Cromwell evaluates these; a WDL default can "
-              f"win):\n        " + "\n        ".join(expr))
+        print("  FAIL expression-shaped bindings (Cromwell evaluates these; a WDL default can "
+              "win):\n        " + "\n        ".join(expr))
     else:
         print("  PASS every binding is a literal or a plain workspace/attribute reference")
 

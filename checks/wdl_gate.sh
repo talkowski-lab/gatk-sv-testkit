@@ -18,8 +18,11 @@
 #   checks/wdl_gate.sh --wf SVShell --wf ResolveCpxSvGenotyping HEAD
 #   checks/wdl_gate.sh --strict HEAD        # nonzero exit if anything is unlaunchable
 #
-# Needs miniwdl (pip install miniwdl) and a local gatk-sv clone. Both are checked up
-# front, with the fix printed rather than a stack trace.
+# Needs miniwdl (pip install miniwdl, or make setup) and a local gatk-sv clone. Both are
+# checked up front, with the fix printed rather than a stack trace. miniwdl is resolved as
+# $MINIWDL, then PATH, then the bin next to the interpreter, then ./.venv/bin -- because
+# `make setup` installs it into a venv that this script's shell has no reason to have
+# activated, and a PATH-only lookup used to call the whole loop unavailable.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,6 +32,10 @@ ROOT="$(cd "$HERE/.." && pwd -P)"
 REFS=()
 WFS=()
 STRICT=0
+# Resolution lives in gsvtk-config so this script and terra/wdl_flat.py cannot disagree. An
+# explicit --miniwdl below still wins; an explicit MINIWDL that does not resolve is kept as-is
+# so the error names what the user actually asked for.
+MINIWDL="${MINIWDL:-$("$GSVTK_PYTHON" "$ROOT/kit/gsvtk-config" miniwdl 2>/dev/null)}"
 MINIWDL="${MINIWDL:-miniwdl}"
 
 while [ $# -gt 0 ]; do
@@ -36,7 +43,7 @@ while [ $# -gt 0 ]; do
         --wf|--workflow) WFS+=("$2"); shift 2;;
         --strict)        STRICT=1; shift;;
         --miniwdl)       MINIWDL="$2"; shift 2;;
-        -h|--help)       sed -n "2,22p" "$0" | sed "s/^# \{0,1\}//"; exit 0;;
+        -h|--help)       sed -n "2,25p" "$0" | sed "s/^# \{0,1\}//"; exit 0;;
         -*)              echo "unknown flag: $1 (see --help)" >&2; exit 2;;
         *)               REFS+=("$1"); shift;;
     esac
@@ -54,11 +61,12 @@ if [ ${#WFS[@]} -eq 0 ]; then
     WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)
 fi
 
-command -v "$MINIWDL" >/dev/null 2>&1 || {
-    echo "miniwdl not found as '$MINIWDL'. Install it (python -m pip install --user miniwdl)" >&2
-    echo "or point MINIWDL at an existing install." >&2
+if [ ! -x "$MINIWDL" ] && ! command -v "$MINIWDL" >/dev/null 2>&1; then
+    echo "miniwdl not found as '$MINIWDL'. Install it (make setup, or python -m pip" >&2
+    echo "install --user miniwdl), or point MINIWDL at an existing install." >&2
+    echo "  (checked: MINIWDL, PATH, the bin next to $GSVTK_PYTHON, $ROOT/.venv/bin)" >&2
     exit 3
-}
+fi
 [ -n "${GSVTK_GATK_SV_CHECKOUT:-}" ] || { echo "GSVTK_GATK_SV_CHECKOUT is unset: which gatk-sv clone are we gating?" >&2; exit 4; }
 
 OUT="$(gsvtk_work wdl-gate)"

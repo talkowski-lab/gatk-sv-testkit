@@ -21,7 +21,7 @@ Only ever run against my own workspace.
   python svshell-replay/single_sample_arms.py submit --confirm
 """
 from __future__ import annotations
-import json, os, subprocess, sys, uuid
+import json, os, subprocess, sys          # (uuid dropped: never used by this archived driver)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))   # docs/archive/as-run -> repo root

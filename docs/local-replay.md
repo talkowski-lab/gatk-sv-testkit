@@ -48,7 +48,8 @@ frozen baseline, so a local difference is attributable to your code and nothing 
    expects.
 
 3. **Room on disk.** The staged matrices are tens of GB. If you have a previous copy of the
-   same panel, `--link-dir` hardlinks instead of downloading:
+   same panel, `--link-dir` hardlinks instead of downloading (and copies, saying so, when the
+   filesystem will not hardlink — a `--link-dir` on another volume is that case):
 
    ```bash
    python terra/stage_inputs.py --keys rd_file pe_file --link-dir /path/to/panel --dry-run
@@ -71,6 +72,12 @@ frozen baseline, so a local difference is attributable to your code and nothing 
      the 64 MiB hashing budget) the adoption still happens and the log line says
      `unverified: …`. `staged.json` carries the verdict per file in `identity`, so a staged tree
      built on unverified adoptions is visible after the fact.
+
+`--attrs` resolves against the `sample_set` named by `GSVTK_BATCH` (docs/config.md), the same row
+`batch_freeze.py`, `batch_rerun_step.py` and `batch_fetch_compare.sh` use. When that row is not in
+the manifest the run **stops**, naming the batch it looked for and the rows that do exist. It used
+to select zero objects and exit 0, which reads like an empty manifest rather than a wrong batch
+name — and a wrapper script has no way to tell the two apart.
 
 ## Run it
 

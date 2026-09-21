@@ -182,6 +182,35 @@ check "show names the profile file a value came from" \
     env -u GSVTK_PROJECT GSVTK_CONFIG="$TMP/prof.env" \
     bash -c './kit/gsvtk-config show | grep "GSVTK_PROJECT" | grep -q "profile:.*prof.env"'
 
+# probecount DESC WANT CMD... -- runs the reviewed-defect probes and pins HOW MANY ran.
+# The count is the positive control: a probe that is deleted, renamed, or quietly skipped for a
+# missing dependency lowers it, and "8 ok" versus "3 ok, 5 skipped" is the difference between a
+# gate and a rumour. Exit status alone cannot see that (0 failures with 3 probes looks green).
+probecount() {
+    local desc="$1" want="$2"; shift 2
+    local out rc tally run_n skip_n fail_n
+    out="$("$@" 2>&1)"; rc=$?
+    tally="$(printf '%s' "$out" | sed -n 's/^probes: \([0-9]\{1,\}\) ok, \([0-9]\{1,\}\) skipped, \([0-9]\{1,\}\) failed$/\1 \2 \3/p' | tail -1)"
+    if [ -z "$tally" ]; then
+        fail=$((fail + 1)); printf '  FAIL  %s: no "probes: N ok, M skipped, K failed" line (exit %s)\n' "$desc" "$rc"
+        printf '%s\n' "$out" | head -6 | sed 's/^/          /'
+        return
+    fi
+    run_n="${tally%% *}"; local rest="${tally#* }"; skip_n="${rest%% *}"; fail_n="${rest##* }"
+    if [ "$fail_n" != "0" ]; then
+        fail=$((fail + 1)); printf '  FAIL  %s: %s probe(s) FAILED\n' "$desc" "$fail_n"
+        printf '%s\n' "$out" | grep -E '^  (FAIL|SKIP)' | head -6 | sed 's/^/          /'
+    elif [ $((run_n + skip_n)) -lt "$want" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s: accounted for %s of >=%s probes (one vanished or was skipped)\n' \
+               "$desc" "$((run_n + skip_n))" "$want"
+        printf '%s\n' "$out" | grep -E '^  (ok|SKIP|FAIL)' | head -8 | sed 's/^/          /'
+    else
+        ok=$((ok + 1))
+        printf '  ok    %s (%s ok, %s skipped)\n' "$desc" "$run_n" "$skip_n"
+    fi
+}
+
 echo
 echo "selftest: the two sv_shell checkers parse what they claim to parse"
 check "svshell_jq_plumbing_scan finds every block shape and counts its own coverage" \
@@ -213,6 +242,17 @@ else
     check "fetch_wdl --list materializes a ref's file list offline (git archive)" \
         "$PY" scripts/fetch_wdl.py --repo "$CK" --ref HEAD --list
 fi
+
+echo
+echo "selftest: probes for the defects a review confirmed (offline, no network, no creds)"
+# 8 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
+# pins one defect that was reproduced before it was fixed (rerun-step guards, the batch row, the
+# copy-after-failed-hardlink TypeError, the WDL duplicate-definition pass-through, the frozen-publish
+# guard, miniwdl resolution in the venv, --help side effects, the hand-copied Dockstore URI).
+probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 8 \
+    "$PY" scripts/probe_fixes.py
+printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that cannot fire is a\n'
+printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'
 
 echo
 printf 'selftest: %s ok, %s skipped, %s failed\n' "$ok" "$skip" "$fail"

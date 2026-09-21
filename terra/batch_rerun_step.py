@@ -31,7 +31,9 @@ import config  # noqa: E402
 import terra                      # noqa: E402
 from terra import fapi      # noqa: E402  # via terra: one friendly missing-dependency message
 import batch_configs as tc          # noqa: E402  (NS/WS are read THROUGH this module)
-from batch_configs import body, dockstore  # noqa: E402
+from batch_configs import body             # noqa: E402
+# dstore() below deliberately duplicates tc.dockstore() with a version override; scripts/probe_fixes.py
+# asserts the two are byte-identical for the same version, so the duplication cannot drift.
 
 CONFIG = "10-GenotypeBatch-rerun"
 ENTITY, ETYPE = config.get("BATCH", "all_samples"), "sample_set"
@@ -127,6 +129,11 @@ def create() -> None:
     if not CONFIRMED:
         raise SystemExit("create overwrites a method config that submissions read.\n"
                          "  check `show` printed the images you meant, then re-run with --confirm.")
+    # Identity and shared-target refusal BEFORE the first request, exactly as batch_configs.py
+    # does it. This POSTs a config that the next submission reads back, so it is a write on the
+    # same footing as `configs create` -- and an unresolved target used to reach Terra as an
+    # empty workspace path segment (`POST /api/workspaces//methodconfigs`).
+    tc.require_target(writes=True)
     b = make_body()
     r = fapi.create_workspace_config(tc.NS, tc.WS, b)
     if r.status_code == 409:
@@ -137,6 +144,9 @@ def create() -> None:
 
 
 def validate() -> None:
+    # Resolve the workspace first: with no target this used to POST to
+    # /api/workspaces//methodconfigs/.../validate and report whatever the edge said.
+    tc.require_target()
     r = fapi.validate_config(tc.NS, tc.WS, tc.NS, CONFIG)
     d = r.json() if r.status_code == 200 else {"error": r.text[:300]}
     print(json.dumps(d, indent=1))
@@ -155,6 +165,11 @@ def submit() -> None:
     if not CONFIRMED:
         raise SystemExit("submit starts real compute and spends real money.\n"
                          "  re-run with --confirm, and check `show` printed the images you meant.")
+    # Resolve first: assert_writable_target compares two strings, so with an unresolved target it
+    # compared ('','') against the baseline coordinates and passed -- the guard that exists to
+    # stop a submission into the shared reference run was defeated by the very misconfiguration
+    # it should have caught.
+    tc.require_target()
     terra.assert_writable_target(tc.NS, tc.WS, "submit a workflow",
                                 allow="--allow-shared-target" in sys.argv)
     d = terra.submit(tc.NS, tc.WS, tc.NS, CONFIG, ENTITY, ETYPE, None, confirm=True)
@@ -181,6 +196,8 @@ so the run cannot inherit a stale image from a workspace attribute.
                     --image sv_pipeline_docker=us.gcr.io/PROJ/NS/sv-pipeline:TAG
   show              print the config body that would be POSTed (no mutation)
   create / validate POST it, then ask Terra to typecheck it
+                    (create needs --confirm and refuses the shared baseline workspace unless
+                     --allow-shared-target, exactly like batch_configs.py create)
   submit --confirm  start it (real compute; --confirm is mandatory)
   --allow-unpinned-docker   let a *_docker input resolve from a workspace attribute (off by
                             default: it breaks reproducibility, so it has to be asked for)

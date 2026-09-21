@@ -62,10 +62,13 @@ comparison:
 * **Both refuse the shared baseline workspace.** Writing your frozen copies or your attributes onto
   the workspace everyone reads from is a change to other people's baseline; the tools refuse unless
   you pass `--allow-shared-target` on purpose.
-* **`attrs --write` refuses over a failed verify.** `verify` writes `"verified": true|false` (plus
-  the mismatching objects) into the manifest, and `attrs` refuses to publish if the last verify for
-  that prefix failed. Publishing a frozen path nobody confirmed is how a head-to-head ends up running
-  on inputs that are not the baseline.
+* **`attrs --write` refuses unless a PASSED verify is on record.** `verify` writes
+  `"verified": true|false` (plus the mismatching objects) into the manifest, and `attrs` requires that
+  verdict to exist and be true. Absent, unreadable and failed are all refused: the test used to be
+  `verified is False`, so "verify never ran" (and "manifest written before that key existed")
+  published frozen paths with nothing behind them. `--allow-unverified` is the explicit escape, and it
+  prints that it took it. Publishing a frozen path nobody confirmed is how a head-to-head ends up
+  running on inputs that are not the baseline.
 
 Frozen object names are the source basename, **except** when two *different* source objects share a
 basename (this model does — e.g. two batches each holding `merged_pe.out`): those freeze as
@@ -109,13 +112,23 @@ Two non-obvious details that cost real debugging time when wrong:
   resolve to nothing — usually at runtime, after VMs booted.
 - **`GSVTK_BATCH` must name a real `sample_set`.** It defaults to `all_samples`, the entity in
   gatk-sv's reference-panel workspace; rename it and every `this.<attr>` binding silently empties.
+  It is read by every tool on this path — including `fetch_baseline.py --entity` (which writes the
+  manifest) and `stage_inputs.py --attrs` (which reads it back), so a wrong value cannot split the
+  freeze and the staging across two different rows. If the row is missing from the manifest,
+  `stage_inputs.py` stops with exit 2, naming the rows that exist, instead of selecting nothing and
+  exiting 0.
 - **A workflow Dockstore does not publish cannot be a method by reference.** `.github/.dockstore.yml`
   carries ~30 named workflows, and anything only ever called as a sub-workflow is not among them,
   while a workspace method is a single descriptor file. `terra/wdl_flat.py` bundles a
   single-workflow closure into one document, and `--check` typechecks the result with miniwdl,
-  refusing to report success without it. It refuses multi-workflow closures on purpose -- including
-  `TinyResolve`, whose import `GetShardInputs.wdl` declares a workflow of its own -- because a
-  document with two workflows has no primary and fails at submission looking like a broken WDL.
+  refusing to report success without it (miniwdl is resolved through `./kit/gsvtk-config miniwdl`,
+  so the copy `make setup` put in `./.venv/bin` is found without activating anything). It refuses
+  multi-workflow closures on purpose -- including `TinyResolve`, whose import `GetShardInputs.wdl`
+  declares a workflow of its own -- because a document with two workflows has no primary and fails
+  at submission looking like a broken WDL. It likewise refuses a closure where two **different**
+  files declare the same task/struct name (importing one file twice is fine; it is emitted once):
+  one document cannot hold it twice, and picking a winner is a decision about what the pipeline
+  runs, not a bundler detail. gatk-sv main has no such collision in any of its 118 closures.
 - **A binding is not an expression.** A value Cromwell *evaluates* rather than *reads* can come
   back empty, and the WDL's own default then wins — which is invisible in the create/validate
   path, because both consider the config well-formed. `batch_check_inputs.py` flags bindings that
@@ -218,7 +231,11 @@ whose inputs are *superset* on one side has no right to be compared as a mean.
   `cost`, every `checks/` and `compare/` tool.
 - Writes, no compute: `freeze copy`, `freeze attrs --write`, `configs create --confirm`,
   `batch_rerun_step.py create --confirm`. Both `create` paths require `--confirm` because a
-  method config with a wrong binding is worse than no config: the next submission reads it.
+  method config with a wrong binding is worse than no config: the next submission reads it, and
+  both refuse the shared baseline workspace unless `--allow-shared-target`. Every mode of both
+  tools resolves namespace + workspace **before** the first request, so an unset target is exit 4
+  naming the profile key rather than a `POST /api/workspaces//methodconfigs` that the edge answers
+  with a 405.
 - **Spends money:** `submit`. Requires `--confirm`, your `GSVTK_BRANCH` *and* `GSVTK_IMAGE_REPO`,
   and re-reads live outputs first.
 - Terra has no per-workspace budget cap. A whole-chain rerun is a fleet of VMs. Prefer

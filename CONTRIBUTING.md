@@ -7,16 +7,24 @@ make setup            # ./.venv with what the tools import
 make test && make audit
 ```
 
-`make test` is the offline gate and must pass with no credentials, no data and no network. Its five
+`make test` is the offline gate and must pass with no credentials, no data and no network. Its six
 parts each exist because the previous one proved insufficient:
 
 | part | what it proves | why `--help` + `py_compile` were not enough |
 |---|---|---|
 | `syntax` | every `.sh` parses (`bash -n`), every `.py` compiles | — |
 | `undefmods` | no attribute access on a module the file never imports | `os.path.isdir` in a file with no `import os` compiles fine and dies on first real call |
+| `flake` | the pyflakes sweep (`flake8 --select=F`, nothing else): undefined names, imports that are not there, values computed and then dropped | the half of `NameError` that `undefmods` cannot see (bare names, not module attributes), and the "built the diagnostic, never used it" class — a check that silently stops checking still prints `ok` |
 | `helpsweep` | `--help` works on every tool with zero configuration | argument parsers are the only code path `--help` reaches |
 | `smoke` | the tools actually **run** end-to-end on hostile/empty fixtures | `--help` never reaches `main()`; the comparator that was dead on every real invocation passed all of the above |
-| `selftest` | the config layer, both checkers' parsing, and the checkers against a real clone — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared) | "exit code was acceptable" is satisfied by a checker that detects nothing |
+| `selftest` | the config layer, both checkers' parsing, the checkers against a real clone, and `scripts/probe_fixes.py` — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared; the probe tally must account for every probe) | "exit code was acceptable" is satisfied by a checker that detects nothing |
+
+When you fix a defect that was reproduced, add the reproduction to
+`scripts/probe_fixes.py` (one function, one entry in `PROBES`, and raise the pinned count in
+`scripts/selftest.sh`). A fix described only in a commit message regresses the next time the file
+is edited; `selftest`'s probe count is what makes "the guard still fires" a checked claim. Each
+probe also needs its control — the phase proving the guarded path was reachable — because
+"the guard never fired" and "the guard could not fire" otherwise print the same thing.
 
 `selftest` also runs a **canary** (it asserts a known-failing command is reported as failing). That
 exists because the assertions used to live in a Makefile recipe where `$$($("$@") 2>&1)` is expanded
@@ -63,7 +71,13 @@ key nobody will find, and the next person will hardcode the value instead.
   `GSVTK_WORK`, never submit.
 - Mutators (`create`, `copy`, `attrs --write`, `submit`) refuse without confirmation — the
   Terra helpers additionally thread `confirm=True` internally so a caller cannot mutate by
-  accident, and `submit` needs `--confirm` on the command line as well.
+  accident, `submit` needs `--confirm` on the command line as well, every write to Terra refuses
+  the shared baseline workspace unless `--allow-shared-target`, and every Terra mode resolves
+  namespace + workspace before the first request (an unset target is exit 4, not a request with a
+  hole in its URL).
+- A new mutator needs a guard **and a probe**: `scripts/probe_fixes.py` proves the rerun-step and
+  freeze guards fire by counting requests, so "it refuses" stays a checked claim rather than a
+  comment.
 - Anything that starts compute names **what it boots** before booting:
   `docker/gatk-sv-build.sh` prints project, zone, machine type and the timeout ceiling in its
   preflight, and `--dry-run` / `--check` print the plan and touch nothing. It deliberately does **not**

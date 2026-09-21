@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config  # noqa: E402
 import terra  # noqa: E402
 
-OUT = str(config.work_dir("recon"))
+OUT = str(config.work_path("recon"))   # terra.dump() creates it on the first dump; --help must not
 GS = re.compile(r"gs://[^\s\"'\\]+")
 
 

@@ -78,7 +78,8 @@ The cheapest useful objection is a reproduction. Most claims here are checkable 
 ```bash
 checks/svshell_contract_check.py            # the JSON-contract claims
 checks/wdl_gate.sh v1.1.1 origin/main       # the launchability claims
-make test                                   # syntax + --help on every tool + self-tests
+make test                                   # syntax + pyflakes + --help on every tool + smoke runs
+                                              # + self-tests/canary + probes for each fixed defect
 ```
 
 Anything cost-bearing is checkable from saved metadata: `batch_cost.py`'s arithmetic is meant to be

@@ -22,6 +22,10 @@ it. A flatten that resolves imports and typechecks is a flatten that means what 
 Known limit (by design): gatk-sv imports by filename within `wdl/`, with no relative subdirectories,
 and no struct/type references through an import alias. `--check` catches the rest.
 
+Third limit, same origin: two DIFFERENT files in one closure may not declare the same task, struct
+or workflow name. (The same file imported twice is fine -- it is emitted once.) gatk-sv main has no
+such collision in any closure; when one appears it is refused, not guessed at.
+
 Second limit, found against the real tree rather than in theory: the entry's closure must contain
 exactly ONE workflow. `TinyResolve` -- the case that motivated this tool -- imports
 `GetShardInputs.wdl`, which declares a workflow of its own, so it is refused. Stages whose closure
@@ -127,7 +131,6 @@ def resolve(root: str, wf: str):
 def flatten(wf: str) -> str:
     root = wdl_dir()
     order, rewrites, raw = resolve(root, wf)
-    main = f"{wf}.wdl"
 
     # A Terra workspace method is ONE descriptor, and WOMTool picks the root workflow itself: a
     # document holding two workflows has no primary and cannot be submitted at all. gatk-sv hits
@@ -143,19 +146,25 @@ def flatten(wf: str) -> str:
               "  Submit the published parent instead -- .github/.dockstore.yml lists what Dockstore\n"
               "  carries (TinyResolve is not among them; GatherBatchEvidence is).")
 
-    # Deduplicate definitions across the closure: Structs.wdl is imported by both the entrypoint and
-    # Utils.wdl, and a duplicated `struct RuntimeAttr` is a compile error.
-    emitted: set[str] = set()
+    # Definitions are deduplicated by FILE, not by name: Structs.wdl is imported by both the
+    # entrypoint and Utils.wdl, and visiting it twice would emit `struct RuntimeAttr` twice, which is
+    # a compile error. resolve() visits each file once, so every name seen twice HERE is declared by
+    # two different files -- and that is an error rather than something to quietly resolve, because
+    # the two declarations are not known to be interchangeable. Keeping one is this bundler deciding
+    # which definition the pipeline meant, and emitting both (what this used to do for any file that
+    # was not the entrypoint) produces a document that does not compile and looks like a broken WDL.
+    # gatk-sv main has no such collision in any of its 118 entry closures today, so the guard costs
+    # nothing and only ever fires on a future merge.
+    emitted: dict[str, str] = {}
     chunks: list[str] = []
     for name, lines, defs in order:
         for d in defs:
-            if d in emitted and name != main:
-                continue
-            if d in emitted and name == main:
+            if d in emitted:
                 raise SystemExit(
-                    f"{main} defines {d}, already emitted from another file -- this bundler does not "
-                    "guess which definition wins")
-            emitted.add(d)
+                    f"cannot flatten: {d} is declared by both {emitted[d]} and {name}. One document\n"
+                    f"  cannot hold it twice, and choosing which declaration survives is not this\n"
+                    f"  tool's call -- that choice changes what the pipeline runs.")
+            emitted[d] = name
         out = []
         for line in lines:
             for qual, bare in rewrites[name].items():
@@ -177,10 +186,15 @@ def flatten(wf: str) -> str:
 
 
 def check(path: str) -> None:
-    mini = os.environ.get("MINIWDL", "miniwdl")
-    if not shutil.which(mini):
-        raise SystemExit(f"miniwdl not found as {mini!r}: python -m pip install miniwdl, "
-                         "or export MINIWDL=<path>")
+    # Same resolver checks/wdl_gate.sh uses (kit/gsvtk-config miniwdl): `make setup` installs the
+    # console script into ./.venv/bin, which is not on the PATH of a shell that invoked this as
+    # `.venv/bin/python terra/wdl_flat.py`, so a which()-only lookup reported the checker missing
+    # on the exact machine where `miniwdl check` passes.
+    mini = os.environ.get("MINIWDL") or config.miniwdl() or "miniwdl"
+    if not (os.path.isfile(mini) and os.access(mini, os.X_OK)) and not shutil.which(mini):
+        raise SystemExit(f"miniwdl not found as {mini!r}: make setup, or python -m pip install "
+                         "miniwdl, or export MINIWDL=<path> (checked MINIWDL, PATH, the bin next "
+                         "to this interpreter, and <repo>/.venv/bin)")
     r = subprocess.run([mini, "check", path], capture_output=True, text=True)
     sys.stdout.write(r.stdout)
     if r.returncode != 0:

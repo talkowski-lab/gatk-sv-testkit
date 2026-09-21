@@ -11,6 +11,12 @@ miniwdl           # provides both the `miniwdl` CLI used by checks/wdl_gate.sh a
                   # dependency instead of crashing, so the rest of the repo still runs
                   # without it.
 
+flake8           # `make flake` runs ONLY its pyflakes checks (--select=F): undefined names and
+                 # values that are computed then dropped. Not a style checker and never used as
+                 # one -- no line length, no whitespace rules, nothing to reformat.
+                 # `make setup` does not install this, so `make flake` SKIPs with this file named;
+                 # CI installs it, which is where the sweep is actually enforced.
+
 # Not pip-installable, and therefore not listed here either:
 #   womtool.jar  - set WOMTOOL_JAR=/path/to/womtool.jar for terra/batch_check_inputs.py
 #                  (a GitHub release artifact of broadinstitute/womtool, not a package)

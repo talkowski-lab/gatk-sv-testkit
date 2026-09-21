@@ -60,7 +60,9 @@ def require_target(writes=False):
 # Attribute suffixes: baseline inputs in, this chain's outputs out.
 FZ = "_" + config.get("FROZEN_SUFFIX", "frz")
 NW = "_" + config.get("NEW_SUFFIX", "new")
-DUMP = str(config.work_dir("manifests") / "batch_configs.json")
+# A path, not a directory: `show` and `--help` import this module and must create nothing.
+# create() makes the directory when it actually writes.
+DUMP = str(config.work_path("manifests") / "batch_configs.json")
 
 
 def dockstore(workflow: str) -> dict:
@@ -253,6 +255,7 @@ def create():
         ok = r.status_code in (200, 201)
         print(f"{name}: create HTTP {r.status_code}{'' if ok else ' ' + r.text[:300]}")
         out[name] = r.json() if ok else {"error": r.text}
+    config.work_dir("manifests")        # the write makes its own directory
     json.dump(out, open(DUMP, "w"), indent=1)
     print("->", DUMP)
     if not all(v.get("name") for v in out.values()):

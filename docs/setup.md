@@ -23,7 +23,8 @@ Extras you opt into:
 
 | Tool | Needs | Install |
 |---|---|---|
-| `checks/wdl_gate.sh`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install miniwdl` — it is a *package*: `build_inputs.py` needs the interpreter that has it, not that venv's `bin` on `PATH` |
+| `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it — see `./kit/gsvtk-config miniwdl` |
+| `make flake` | `flake8` (used only as a pyflakes runner, `--select=F`) | `python -m pip install -r requirements-dev.txt`. `make test` SKIPs it with this named when it is absent, and CI is where it is enforced |
 | `checks/svshell_jq_plumbing_scan.py` | `jq` on PATH | `brew install jq` / `apt-get install jq` |
 | `terra/batch_check_inputs.py` | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar` |
 | `compare/*` (some) | `bcftools`, `pysam`, `pandas` | `bcftools` via your package manager; the rest in requirements |
@@ -123,7 +124,7 @@ members and pet service accounts.
 > only after you have looked at what they list, and prefer describing the failure over
 > pasting the inventory.
 bash
-make test                                 # offline: syntax, --help, self-tests
+make test                                 # offline: syntax, pyflakes, --help, real runs, selftests
 ./kit/gsvtk-config doctor                 # profile completeness
 python terra/recon.py                     # read-only: identity, billing, workspaces, baseline model
 docker/gatk-sv-build.sh --check <branch>  # read-only preflight against GCP

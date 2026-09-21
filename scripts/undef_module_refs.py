@@ -110,7 +110,7 @@ class Seen(ast.NodeVisitor):
 def scan(path, src):
     try:
         tree = ast.parse(src, filename=path)
-    except SyntaxError as e:                    # `make syntax` owns parse errors
+    except SyntaxError:                         # `make syntax` owns parse errors
         return []
     seen = Seen()
     seen.visit(tree)

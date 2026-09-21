@@ -8,7 +8,7 @@
 SHELL      := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 .DEFAULT_GOAL := help
-.PHONY: help setup test syntax helpsweep undefmods smoke selftest lint audit clean-work
+.PHONY: help setup test syntax helpsweep undefmods flake smoke selftest lint audit clean-work
 
 PYTHON ?= python3
 GSVTK  := ./kit/gsvtk-config
@@ -42,11 +42,12 @@ help:
 	@echo "gatk-sv-testkit — make targets"
 	@echo
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent)"
-	@echo "  test        the offline gate: syntax + undef-mods + --help sweep + real invocations"
+	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
 	@echo "              needs no config file, no credentials, no network; SKIPs tools whose"
 	@echo "              optional dependency is missing and says which"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
-	@echo "  lint        alias of syntax: there is no style checker to install on purpose"
+	@echo "  lint        alias of syntax: no STYLE checker on purpose (no whitespace opinions)"
+	@echo "  flake       pyflakes bug sweep (undefined names, dead values); SKIPs if flake8 absent"
 	@echo "  audit       fail if any file that would go public contains an internal identifier"
 	@echo "  clean-work  show what the work directory holds and what WOULD be deleted"
 	@echo
@@ -69,12 +70,14 @@ setup:
 	echo "    source .venv/bin/activate"
 
 # ---------------------------------------------------------------------- test
-# Three independent phases, each runnable alone, each printing its own tally. All three
-# run even when one fails, then the aggregate exits nonzero.
+# Every phase is runnable alone and prints its own tally. All of them run even when one fails,
+# then the aggregate exits nonzero -- a gate that stops at the first failure hides the other
+# phases' findings, which is exactly the information you need to fix everything in one pass.
 test:
 	@rc=0; \
 	$(MAKE) --no-print-directory syntax     || rc=1; \
 	$(MAKE) --no-print-directory undefmods  || rc=1; \
+	$(MAKE) --no-print-directory flake      || rc=1; \
 	$(MAKE) --no-print-directory helpsweep  || rc=1; \
 	$(MAKE) --no-print-directory smoke      || rc=1; \
 	$(MAKE) --no-print-directory selftest   || rc=1; \
@@ -137,6 +140,41 @@ helpsweep:
 # Static, dependency-free, and it covers every file -- including the ones with no selftest.
 undefmods:
 	@$(PYTHON) scripts/undef_module_refs.py
+
+# --------------------------------------------------------------------- flake
+# A BUG sweep, not a style check: `--select=F` runs only the Pyflakes checks, so no line
+# length, no whitespace, no opinions about quotes. It is the other half of undefmods --
+# that one answers "attribute access on a module this file never imported"; this answers
+# the bare-name and dead-value half: F821 undefined name (a NameError on the first call),
+# F841 a value computed and never used (a check that never checks), F401 an import that is
+# not there, F541 an f-string with nothing to interpolate.
+#
+# What it has already found here: an archived as-run driver whose set comprehension read
+# `{p for v in ...}` -- NameError the first time an arm pinned a gs:// image -- and three
+# "computed the diagnostic, dropped it on the floor" locals.
+#
+# It SKIPS with a named install command when flake8 is absent, and says so on the tally
+# line, because `make setup` installs only runtime requirements. CI installs
+# requirements-dev.txt, so CI is where this is enforced: a SKIP here is not a pass there.
+flake:
+	@py="$(PYTHON)"; \
+	if ! $$py -c 'import flake8' 2>/dev/null; then \
+	  if [ -x .venv/bin/python ] && .venv/bin/python -c 'import flake8' 2>/dev/null; then \
+	    py=.venv/bin/python; \
+	  else \
+	    echo "flake: SKIP — flake8 not importable by $$py (python -m pip install -r requirements-dev.txt)"; \
+	    echo "       CI runs it; a local SKIP is not a pass there."; \
+	    exit 0; \
+	  fi; \
+	fi; \
+	out="$$("$$py" -m flake8 --select=F --max-line-length=200 $(PY_FILES) kit/gsvtk-config 2>&1)"; rc=$$?; \
+	if [ -n "$$out" ]; then \
+	  printf '%s\n' "$$out" | sed 's/^/  HIT   /' | head -30; \
+	  echo "flake: FAIL — pyflakes findings above (each one is a crash or a dead check)"; \
+	  exit 1; \
+	fi; \
+	n=$$(printf '%s\n' $(PY_FILES) kit/gsvtk-config | wc -l | tr -d ' '); \
+	printf 'flake: %s files, 0 pyflakes findings (interpreter: %s)\n' "$$n" "$$py"
 
 # ----------------------------------------------------------------------- smoke
 # --help proves a CLI parses; it does not prove main() runs. These tools are stdlib-only and

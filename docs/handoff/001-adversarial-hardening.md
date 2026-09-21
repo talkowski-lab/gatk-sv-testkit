@@ -171,6 +171,24 @@ python3 checks/svshell_contract_check.py   --repo "$(./kit/gsvtk-config get GATK
 | `make audit` | `audit: clean — no internal identifier in the publishable set` (72 tracked files) | read the HIT pattern; **never** add a file-wide exclusion (that is how it failed open before) |
 | CI on a push | `[ok]`, job `offline-gate` | a fresh clone has no gatk-sv checkout: `3 skipped` is expected, not a failure |
 
+> **Re-measured 2026-09-21T21:37Z** by the follow-up review of that commit (the one that fixed the
+> rerun-step guards, the hardcoded batch row, the adoption `TypeError`, the frozen-publish guard,
+> miniwdl-in-the-venv and the `--help` side effects, and added `make flake` +
+> `scripts/probe_fixes.py` — the presence of that file *is* the marker, no SHA to trust):
+> `syntax` **43** files parsed / 0 failed (two files added since the row above), `undefmods` **26**,
+> `flake` **31 files, 0 pyflakes findings** (a new phase; SKIPs, naming the install command, when
+> flake8 is not importable), `helpsweep` **28 ok, 0 skipped** on a box where the interpreter can
+> import `firecloud`/`numpy`/`pysam`/`WDL` — the 16 skips in the row above are that interpreter
+> *missing* those, so the skip count measures the environment, and **0 failed** is the invariant —
+> `selftest` **18 ok, 0 skipped** locally and **15 ok, 3 skipped** with no gatk-sv clone (the CI
+> shape; the extra assertion in both is the probe tally), `audit` clean over **75** tracked files.
+>
+> The rows above are left as the record of what *that* session measured. Read them as "the number is
+> this order and 0 failed is invariant", not as an equality to assert: file counts move when files
+> arrive, which is exactly why the mismatch column says *not wired into the sweep* rather than
+> *not equal to 41*. The invariants that must never move are `0 failed` everywhere, `15/15 blocks`,
+> `14 of 14 stage calls`, the canary passing, and the probe tally accounting for every probe.
+
 **Cost / time / size:** **not measured, deliberately.** No compute was booted and no Terra submission
 was made in this session, so there is no dollar figure to hand forward. `make test`+`make audit` are
 offline and take well under a minute each (observed, not extrapolated). The only cost figures in this

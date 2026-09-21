@@ -25,8 +25,10 @@ import config  # noqa: E402
 import terra  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RECON = str(config.work_dir("recon"))
-MAN = str(config.work_dir("manifests"))
+# Paths only: import runs for `--help` too, and printing usage must not create scratch dirs.
+# Writes here make their own directories (os.makedirs(MAN) in main, terra.dump mkdirs the parent).
+RECON = str(config.work_path("recon"))
+MAN = str(config.work_path("manifests"))
 
 EXPR = re.compile(r"^(?:this|workspace)\.([A-Za-z0-9_.]+)$")
 GS = re.compile(r"gs://\S+")
@@ -105,7 +107,11 @@ def main():
     ap.add_argument("--ns", default=terra.BASELINE_NS)
     ap.add_argument("--ws", default=terra.BASELINE_WS)
     ap.add_argument("--steps", nargs="*", default=["05", "06", "07", "08", "09", "10"])
-    ap.add_argument("--entity", default="all_samples")
+    # The row stage_inputs.py reads back out of this manifest. Defaulting it to a literal batch
+    # name while the consumer reads GSVTK_BATCH is how a frozen manifest and a staging run silently
+    # disagreed about which sample_set was the batch.
+    ap.add_argument("--entity", default=config.get("BATCH", "all_samples"),
+                    help="sample_set name to resolve (default: GSVTK_BATCH)")
     args = ap.parse_args()
 
     os.makedirs(MAN, exist_ok=True)
