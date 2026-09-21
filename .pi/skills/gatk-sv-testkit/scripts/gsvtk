@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# gsvtk — front door to a gatk-sv-testkit checkout, from any directory.
+#
+# Why this exists rather than "just cd into the repo and run things":
+#   1. The checkout's location is machine-specific. Locating it is the first thing every
+#      session needs and the first thing a fresh agent gets wrong.
+#   2. Every tool here has a read-only mode and a mode that starts compute or writes tens of
+#      GB. From inside a chat session it is far too easy to reach for the second one by
+#      accident, so this wrapper only knows how to dispatch the first kind.
+#   3. `gsvtk-config doctor` prints real project / workspace / registry values. Those belong in
+#      a shell, not in a transcript or a pasted bug report, so `doctor --redact` exists.
+#
+# Deliberately absent: submit, create, copy, attrs --write, push, fetch, profile. Those are
+# either money or bulk transfer. Run them yourself, in the repo, after reading `show`/`plan`.
+#
+# bash 3.2-compatible (macOS default): no arrays-of-hashes, no mapfile, no ${v,,}.
+
+set -uo pipefail
+
+REPO="${GSVTK_HOME:-}"
+VENV=".venv/bin/python"
+VENVBIN=".venv/bin"
+
+# Stamped, because this skill lives outside the repo it drives and an unstamped stale copy is
+# indistinguishable from a current one -- which is how a previous audit ended up quoting code that
+# did not exist. Bump it with the skill's own git tag; `gsvtk version` and `locate` print it.
+VERSION="0.3.0"
+
+die() { printf 'gsvtk: %s\n' "$*" >&2; exit 2; }
+
+# Two independent gates, because they fail for different reasons:
+#   valid()   -- is this a testkit at all?      (structure)
+#   trusted() -- is it the testkit you meant?   (a git checkout whose origin you named)
+# Structure used to be the whole test, on the reasoning that a renamed or vendored copy should
+# still work. That reasoning cost more than it saved: a scratch directory of flattened testkit
+# files -- copied compare/recon/fetch scripts, no .git, and a CHECKPOINT.md full of some earlier
+# session's stale state -- reads to an agent as "the checkout", and work done there runs stale
+# code against whatever coordinates happen to be in the ambient environment, with no profile and
+# no sha to say what ran. A renamed clone still passes; a pile of copied files, and any remote
+# you did not list, does not.
+valid() { [ -n "$1" ] && [ -f "$1/kit/gsvtk-config" ] && [ -d "$1/terra" ] && [ -d "$1/checks" ]; }
+
+# Entries are host/owner/repo, comma-separated, and are matched in both the URL form
+# (github.com/o/r) and the scp form (github.com:o/r), so https, ssh:// and git@ clones all agree.
+TRUSTED_REPOS="${GSVTK_TRUSTED_REPOS:-github.com/talkowski-lab/gatk-sv-testkit}"
+
+trusted() {
+  local r t
+  r="$(git -C "$1" remote get-url origin 2>/dev/null)" || return 1
+  [ -n "$r" ] || return 1
+  for t in $(printf '%s' "$TRUSTED_REPOS" | tr ',' ' '); do
+    case "$r" in
+      *"$t"*) return 0 ;;                      # .../host/owner/repo[.git]
+      *"${t%%/*}:${t#*/}"*) return 0 ;;        # host:owner/repo[.git]
+    esac
+  done
+  return 1
+}
+
+# Why a search failed, so an explicit GSVTK_HOME pointing at the wrong tree says so instead of
+# echoing the generic "clone it" advice back at someone who has eleven checkouts.
+REPO_NOTE=""
+
+find_repo() {
+  if [ -n "$REPO" ]; then                       # explicit GSVTK_HOME: honour it or say why not
+    if ! valid "$REPO"; then
+      REPO_NOTE="GSVTK_HOME=$REPO is not a gatk-sv-testkit checkout (needs kit/gsvtk-config, terra/, checks/)."
+      return 1
+    fi
+    if ! trusted "$REPO"; then
+      REPO_NOTE="GSVTK_HOME=$REPO is structurally a testkit but its origin is not trusted.
+  origin is: $(git -C "$REPO" remote get-url origin 2>/dev/null || printf '(none -- not a git checkout, or no origin)')
+  trusted is: $TRUSTED_REPOS
+  Add it if you mean to: export GSVTK_TRUSTED_REPOS=\"$TRUSTED_REPOS,github.com/<you>/<fork>\""
+      return 1
+    fi
+    REPO="$(cd "$REPO" && pwd -P)"; return 0
+  fi
+  # $PWD first: the common case is being asked about the repo you are already standing in.
+  for c in "$PWD" "$PWD/gatk-sv-testkit" "$PWD/../gatk-sv-testkit"; do
+    valid "$c" && trusted "$c" && { REPO="$(cd "$c" && pwd -P)"; return 0; }
+  done
+  for root in "$HOME/IdeaProjects" "$HOME/Work" "$HOME/src" "$HOME/projects" "$HOME"; do
+    [ -d "$root" ] || continue
+    # -maxdepth 2 covers <root>/<checkout> and <root>/<parent>/<checkout> without a full scan
+    while IFS= read -r c; do
+      # An untrusted candidate is skipped, not fatal: the right checkout may be the next one.
+      valid "$c" && trusted "$c" && { REPO="$(cd "$c" && pwd -P)"; return 0; }
+    done < <(find "$root" -maxdepth 2 -type d -name 'gatk-sv-testkit*' 2>/dev/null)
+  done
+  return 1
+}
+
+need_repo() {
+  find_repo && return 0
+  [ -n "$REPO_NOTE" ] && die "$REPO_NOTE"
+  die "no gatk-sv-testkit checkout found.
+  set GSVTK_HOME=/path/to/gatk-sv-testkit, or clone it:
+    git clone https://github.com/talkowski-lab/gatk-sv-testkit.git && cd gatk-sv-testkit && make setup"
+}
+
+# Every command that reads or runs repo code states which checkout it picked, on stderr, so
+# "which tree produced this" is in the transcript without anyone remembering to ask. stderr, not
+# stdout: `cd "$(scripts/gsvtk repo)"` and friends capture stdout.
+stamp() {
+  need_repo
+  local sha dirty
+  sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)" || sha=''
+  if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then dirty=' +dirty'; else dirty=''; fi
+  printf 'repo  %s @ %s%s\n' "$REPO" "${sha:-no-commit}" "$dirty" >&2
+}
+
+# The right interpreter, not a hardcoded personal path: terra/ needs firecloud, which only
+# exists inside the checkout's venv (or whatever the user activated).
+py_for() {
+  case "$1" in
+    terra)  if [ -n "${GSVTK_TERRA_PY:-}" ] && "$GSVTK_TERRA_PY" -c 'import firecloud' 2>/dev/null; then
+              printf '%s' "$GSVTK_TERRA_PY"     # explicit beat: venvs move, and one per purpose
+            elif [ -x "$REPO/$VENV" ] && "$REPO/$VENV" -c 'import firecloud' 2>/dev/null; then
+              printf '%s' "$REPO/$VENV"
+            elif python3 -c 'import firecloud' 2>/dev/null; then
+              printf 'python3'
+            else
+              return 1
+            fi ;;
+    *)      printf 'python3' ;;
+  esac
+}
+
+# Same blind spot py_for exists to avoid: miniwdl is usually installed in the checkout's venv,
+# which `command -v miniwdl` cannot see unless that venv is activated. Probing only PATH made
+# both `tools` and `locate` report the WDL loop unavailable -- and tell you to pip install
+# something that is already installed. Precedence follows the checker's own, extended to the venv:
+# explicit MINIWDL, then PATH, then <venv>/bin/miniwdl.
+# The checkout owns this decision: `kit/gsvtk-config miniwdl` resolves $MINIWDL -> PATH -> the bin
+# next to the interpreter running it -> <repo>/.venv/bin, and exits 0 with empty output when there
+# is none (so it cannot break a `set -e` caller). Ask it, because two resolvers with different
+# precedence is how one says "found" while the other says "install it". The local fallback below
+# is the same order minus the interpreter sibling, for an older checkout without that subcommand.
+miniwdl_bin() {
+  if [ -f "$REPO/kit/gsvtk-config" ]; then
+    m="$( (cd "$REPO" && ./kit/gsvtk-config miniwdl) 2>/dev/null )"
+    [ -n "$m" ] && { printf '%s' "$m"; return 0; }
+    [ -n "${MINIWDL:-}" ] && return 1        # asked for explicitly and the checkout says unusable
+  fi
+  if [ -n "${MINIWDL:-}" ] && command -v "$MINIWDL" >/dev/null 2>&1; then printf '%s' "$MINIWDL"
+  elif command -v miniwdl >/dev/null 2>&1; then printf 'miniwdl'
+  elif [ -x "$REPO/$VENVBIN/miniwdl" ]; then printf '%s' "$REPO/$VENVBIN/miniwdl"
+  else return 1; fi
+}
+
+cmd_locate() {
+  need_repo
+  printf 'gsvtk     %s\n' "$VERSION"
+  printf 'repo      %s\n' "$REPO"
+  if [ -d "$REPO/.git" ]; then
+    printf 'git       %s @ %s\n' \
+      "$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
+      "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)"
+    [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && \
+      printf '          working tree has uncommitted changes (docs may not match code)\n'
+  fi
+  if [ -x "$REPO/$VENV" ]; then printf 'venv      present (%s)\n' "$VENV"; else
+    printf 'venv      MISSING — run: cd %s && make setup\n' "$REPO"; fi
+  for t in jq gsutil gcloud bcftools; do
+    command -v "$t" >/dev/null 2>&1 && printf 'tool      %s\n' "$t" || printf 'tool      %s absent\n' "$t"
+  done
+  if mw="$(miniwdl_bin)"; then printf 'tool      miniwdl (%s)\n' "$mw"
+  else printf 'tool      miniwdl absent\n'; fi
+}
+
+# Values, or only which ones are set. --redact is the transcript-safe view and the one to use
+# when reporting state; plain doctor prints the real coordinates, because that is what you go to
+# a terminal for.
+cmd_doctor() {
+  need_repo
+  # --redact is the only flag, so anything else is a typo -- and the branch a typo falls into is
+  # the one that prints live project / workspace / registry values. A misspelling must never be
+  # able to choose the leaky path silently; cmd_gate refuses unknown flags for the same reason
+  # and has far less to lose.
+  case "${1:-}" in
+    '')       redact=0 ;;
+    --redact) redact=1 ;;
+    *)        die "doctor: unknown flag '$1' (the only flag is --redact). Refusing to print values." ;;
+  esac
+  # if/fi, not `&&`: a bare `[ ] && cmd` statement returns 1 on the false branch, which is a
+  # silent landmine for whoever adds `set -e` later. (This function is where that lesson came from.)
+  if [ "$#" -gt 1 ]; then die "doctor: unexpected argument '$2' (usage: gsvtk doctor [--redact])"; fi
+  if [ "$redact" != 1 ]; then
+    printf 'doctor: UNREDACTED coordinates follow. To report state, use: gsvtk doctor --redact\n' >&2
+    ( cd "$REPO" && ./kit/gsvtk-config doctor ); return $?
+  fi
+
+  # Redacted view: which files were consulted, what is missing, and for every key whether it is
+  # set and WHERE that value came from -- but not the value itself. Source is the useful part
+  # ("is this my override or the shipped default?"), the coordinates are the part that does not
+  # belong in a transcript, so show -- and mask -- on source: env/profile/derived are yours,
+  # default is public.
+  ( cd "$REPO" && ./kit/gsvtk-config doctor ) 2>&1 | sed -n '/^profiles read:/,/^$/p'
+  ( cd "$REPO" && ./kit/gsvtk-config doctor ) 2>&1 | grep -E '^  MISS ' | \
+    sed 's/^  MISS /  MISSING /'
+  ( cd "$REPO" && ./kit/gsvtk-config show ) 2>&1 | awk '
+    # Columns from gsvtk-config show:  <flag> <KEY> <value...> [<source>]
+    # The source is the interesting part of a redacted report ("mine, or the shipped default"),
+    # so split on the LAST bracket group -- values can contain brackets, the marker cannot.
+    {
+      line = $0
+      flag = substr(line, 1, 1)
+      rest = substr(line, 3)
+      key  = rest; sub(/[ \t].*/, "", key)
+      lb = 0; rb = 0
+      for (i = length(line); i > 1; i--) { c = substr(line, i, 1)
+        if (rb == 0 && c == "]") rb = i
+        if (rb > 0 && c == "[") { lb = i; break } }
+      if (lb == 0) { print; next }
+      src   = substr(line, lb + 1, rb - lb - 1)
+      # Split on the last bracket group; the marker cannot contain brackets, a value can.
+      value = substr(line, length(flag) + 1 + length(key) + 1, lb - (length(key) + length(flag) + 3))
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      mine = (src ~ /^(env|profile|derived)/)
+      printf "  %-4s %-22s %-34s [%s]\n", (flag == "!" ? "MISS" : ""), key,
+             (mine && value != "(unset)" ? "<set, redacted>" : value), src
+    }'
+  printf '\n(values hidden: keys whose value comes from your environment, your profile, or is\n derived from your project. Shipped defaults are shown as-is.)\n'
+}
+
+# Capability probe: which loops are actually usable on this machine right now.
+cmd_tools() {
+  need_repo
+  printf 'checkout  %s\n' "$REPO"
+  ck="$( cd "$REPO" && ./kit/gsvtk-config get GATK_SV_CHECKOUT 2>/dev/null )"
+  if [ -n "$ck" ] && [ -d "$ck" ]; then printf 'gatk-sv   %s @ %s\n' "$ck" "$(git -C "$ck" rev-parse --short HEAD 2>/dev/null)"
+  else printf 'gatk-sv   unset — set GSVTK_GATK_SV_CHECKOUT to run checks/ and fetch_wdl\n'; fi
+  if p="$(py_for terra)"; then printf 'terra     %s\n' "$p"
+  else printf 'terra     unavailable — no firecloud. cd %s && make setup, or export GSVTK_TERRA_PY=<python that has it>\n' "$REPO"; fi
+  # Say WHERE it resolved from: "miniwdl present" is a claim about a venv your shell never
+  # activated, and the last person to be told this installed it a second time.
+  if mw="$(miniwdl_bin)"; then printf 'wdl_gate  ok (%s)\n' "$mw"
+  else printf 'wdl_gate  needs miniwdl — cd %s && make setup, or python -m pip install -r requirements-dev.txt (export MINIWDL=<path> to point at one elsewhere)\n' "$REPO"; fi
+  command -v jq >/dev/null 2>&1 \
+    && printf 'jq scan   ok\n' || printf 'jq scan   needs jq\n'
+  # The two loops this used to report "ok" while still being unable to run: build needs gcloud,
+  # and `terra inputs` shells out to womtool under a JDK. A loop that cannot start is not "ok".
+  command -v gcloud >/dev/null 2>&1 \
+    && printf 'build     gcloud ok\n' || printf 'build     needs gcloud (no VM without it)\n'
+  if ! command -v java >/dev/null 2>&1; then printf 'inputs    needs a JDK (womtool is a jar)\n'
+  elif [ -z "${WOMTOOL_JAR:-}" ] || [ ! -f "${WOMTOOL_JAR:-}" ]; then
+    printf 'inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar\n'
+  else printf 'inputs    ok (%s)\n' "$WOMTOOL_JAR"; fi
+}
+
+# The three static checks, in cost order. Flags are dispatched, not forwarded blindly:
+# --wf/--strict belong to wdl_gate.sh, --repo to the two python checkers, and passing one
+# tool another's flag is an argparse error that looks like a broken checker.
+#   gate [ref] [--wf NAME ...] [--strict] [--repo DIR]
+cmd_gate() {
+  stamp
+  # Pass the resolved checker down: wdl_gate.sh honours MINIWDL, and without this it demands
+  # miniwdl on PATH and exits 3 in a shell where the venv is not active.
+  if [ -z "${MINIWDL:-}" ] && mw="$(miniwdl_bin)"; then MINIWDL="$mw"; export MINIWDL; fi
+  ref=""; wfargs=(); pyargs=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wf)      wfargs+=(--wf "${2:?--wf needs a workflow name}"); shift 2;;
+      --strict)  wfargs+=(--strict); shift;;
+      --repo)    pyargs=(--repo "${2:?--repo needs a directory}"); shift 2;;
+      -*)        die "gate: unknown flag $1 (usage: gate [ref] [--wf NAME] [--strict] [--repo DIR])";;
+      *)         ref="$1"; shift;;
+    esac
+  done
+  cd "$REPO" || die "cd failed"
+  rc=0
+  if [ -n "$ref" ]; then
+    printf '\n=== wdl_gate.sh %s ===\n' "$ref"
+    bash checks/wdl_gate.sh ${wfargs[@]+"${wfargs[@]}"} "$ref" || rc=1
+  else
+    printf '\n(no ref given: skipping wdl_gate, whose whole output is a per-ref count)\n'
+  fi
+  printf '\n=== svshell_contract_check.py ===\n'
+  python3 checks/svshell_contract_check.py ${pyargs[@]+"${pyargs[@]}"} || {
+    printf '  (findings, not a verdict: diff this list against your base ref)\n'; rc=1; }
+  if command -v jq >/dev/null 2>&1; then
+    printf '\n=== svshell_jq_plumbing_scan.py ===\n'
+    if [ -n "$ref" ]; then
+      # --compare-to is the gate form: only nulls this ref introduced fail.
+      python3 checks/svshell_jq_plumbing_scan.py ${pyargs[@]+"${pyargs[@]}"} --compare-to "$ref" || rc=1
+    else
+      python3 checks/svshell_jq_plumbing_scan.py ${pyargs[@]+"${pyargs[@]}"} || {
+        printf '  (absolute scan: red on unmodified gatk-sv by design; pass a ref for --compare-to)\n'; rc=1; }
+    fi
+  else
+    printf '\njq absent: skipping the jq plumbing scan\n'
+  fi
+  return $rc
+}
+
+# The only two build-side modes that cannot create anything.
+cmd_build() {
+  stamp
+  branch="${1:-}"; [ -n "$branch" ] || die "usage: gsvtk build <branch>"
+  cd "$REPO" || die "cd failed"
+  printf '=== --check (read-only preflight) ===\n'
+  bash docker/gatk-sv-build.sh --check "$branch" || die "preflight failed; fix that before anything else"
+  printf '\n=== --dry-run (prints the gcloud command, creates nothing) ===\n'
+  bash docker/gatk-sv-build.sh --dry-run "$branch"
+  printf '\nReal build: run it yourself, in the repo, when you mean it:\n  cd %s && docker/gatk-sv-build.sh %s\n' "$REPO" "$branch"
+}
+
+# Read-only Terra modes, whitelisted by exact subcommand.
+cmd_terra() {
+  stamp
+  what="${1:-}"; shift || true
+  # The whitelist is checked BEFORE the interpreter, so "refused" is never accidentally
+  # reported as "your environment is broken": a refusal must be a refusal on any machine.
+  case "$what" in
+    recon|show|plan|verify|status|cost|inputs|rerun-show) ;;
+    *) die "refusing '${what:-(empty)}'.
+
+  This wrapper only dispatches read-only Terra modes:
+    recon | show | plan | verify | status | cost | inputs | rerun-show
+  The modes that POST or start compute (create, submit, copy, attrs --write) and
+  \`validate\`, which is read-only in spirit but asks Terra to resolve a config, are yours to run
+  in the repo, deliberately, after reading \`show\`/\`plan\` output. Bare \`attrs\` is read-only and
+  still refused as a class -- run it in the repo, do not expect this wrapper to pass it.";;
+  esac
+  p="$(py_for terra)" || die "no interpreter with firecloud: cd $REPO && make setup, or export GSVTK_TERRA_PY=<python with firecloud>"
+  case "$what" in
+    recon)     cd "$REPO" && exec "$p" terra/recon.py "$@";;
+    show)      cd "$REPO" && exec "$p" terra/batch_configs.py show "$@";;
+    plan)      cd "$REPO" && exec "$p" terra/batch_freeze.py plan "$@";;
+    verify)    cd "$REPO" && exec "$p" terra/batch_freeze.py verify "$@";;
+    status)    cd "$REPO" && exec "$p" terra/batch_status.py "$@";;
+    cost)      cd "$REPO" && exec "$p" terra/batch_cost.py "$@";;
+    inputs)    cd "$REPO" && exec "$p" terra/batch_check_inputs.py "$@";;
+    # Mode first, like every other fixed mode: batch_rerun_step.py reads argv[0] to decide whether
+    # an --image is required, so a trailing "show" only worked while no extra arguments were
+    # present. Its "one mode at a time" guard caught the mistake, but the wrapper should not rely on
+    # the callee's guard to make an argument order correct.
+    rerun-show) cd "$REPO" && exec "$p" terra/batch_rerun_step.py show "$@";;
+  esac
+}
+
+case "${1:-help}" in
+  locate)   shift; cmd_locate "$@";;
+  doctor)   shift; cmd_doctor "$@";;
+  tools)    shift; cmd_tools "$@";;
+  gate)     shift; cmd_gate "$@";;
+  build)    shift; cmd_build "$@";;
+  terra)    shift; cmd_terra "$@";;
+  repo)     need_repo; printf '%s\n' "$REPO";;
+  version|-V|--version) printf 'gsvtk %s\n' "$VERSION";;
+  help|-h|--help)
+    cat <<'USAGE'
+gsvtk <command> — read-only front door to the gatk-sv-testkit checkout
+
+  locate              where the checkout is, its git state, which tools are present
+  doctor [--redact]   what is configured / missing (values hidden with --redact)
+  tools               which of the four loops can run on this machine right now
+  gate [ref] [--wf NAME]... [--strict] [--repo DIR]
+                      the three static checks (WDL launch, JSON contract, jq plumbing)
+  build <branch>      --check then --dry-run; prints how to run the real build
+  terra <mode>        recon|show|plan|verify|status|cost|inputs|rerun-show (read-only)
+  repo                print the checkout path only
+  version             this wrapper's own version
+
+Anything that POSTs, spends money, or bulk-downloads is not reachable from here by design.
+Only a git checkout whose origin is in GSVTK_TRUSTED_REPOS is accepted; gate/build/terra print
+the resolved checkout path @ sha on stderr so a transcript records which tree produced them.
+USAGE
+    printf '\ngsvtk %s\n' "$VERSION"
+    ;;
+  *) die "unknown command '${1:-}'. Run: gsvtk help";;
+esac

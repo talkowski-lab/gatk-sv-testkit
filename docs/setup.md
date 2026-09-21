@@ -117,13 +117,13 @@ members and pet service accounts.
 
 ## Verifying the whole picture
 
-```
 > `recon.py` is read-only against Terra, but it writes eight JSON dumps under
 > `$GSVTK_WORK/recon/` and its stdout names your Terra e-mail (redacted unless
 > `--show-identity`) and every workspace you can reach. Attach `recon/*.json` to an issue
 > only after you have looked at what they list, and prefer describing the failure over
 > pasting the inventory.
-bash
+
+```bash
 make test                                 # offline: syntax, pyflakes, --help, real runs, selftests
 ./kit/gsvtk-config doctor                 # profile completeness
 python terra/recon.py                     # read-only: identity, billing, workspaces, baseline model
@@ -133,3 +133,29 @@ docker/gatk-sv-build.sh --check <branch>  # read-only preflight against GCP
 `recon.py` is the right first call on a new account: it dumps who you are, which billing projects
 you can charge, which workspaces you can see, and a bounded sample (a few entities, not whole
 tables) of the baseline workspace's model. It creates nothing.
+
+## The agent skill, if you drive this repo from one
+
+The repo ships the skill that drives it, so the instructions version with the code instead of
+living in someone's home directory:
+
+```
+.pi/skills/gatk-sv-testkit/
+├── SKILL.md                # which loop answers which question, and what is safe unattended
+├── scripts/gsvtk           # read-only front door: locate / doctor / tools / gate / build / terra
+└── references/workflows.md # the four end-to-end sequences + the mutating checklist
+```
+
+[pi](https://github.com/badlogic/pi-mono) loads it from `.pi/skills/` once the project is trusted;
+other harnesses read `.agents/skills/`, so symlink rather than copy if you need both. To use it from
+*other* projects (the usual case — you are usually standing in gatk-sv, not here):
+
+```bash
+ln -sfn "$PWD/.pi/skills/gatk-sv-testkit" ~/.pi/agent/skills/gatk-sv-testkit
+```
+
+The wrapper finds the checkout on its own (`GSVTK_HOME` overrides) and refuses to treat a
+flattened pile of testkit files as a checkout: a directory is accepted only if it is a git clone of
+a remote named in `GSVTK_TRUSTED_REPOS`. `make selftest` runs `scripts/check_skill.py` against it —
+version stamp, frontmatter, and the refusal list *executed* rather than quoted — because a skill
+that quietly drifts from the code is worse than no skill: an agent follows it.

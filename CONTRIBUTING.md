@@ -17,7 +17,7 @@ parts each exist because the previous one proved insufficient:
 | `flake` | the pyflakes sweep (`flake8 --select=F`, nothing else): undefined names, imports that are not there, values computed and then dropped | the half of `NameError` that `undefmods` cannot see (bare names, not module attributes), and the "built the diagnostic, never used it" class — a check that silently stops checking still prints `ok` |
 | `helpsweep` | `--help` works on every tool with zero configuration | argument parsers are the only code path `--help` reaches |
 | `smoke` | the tools actually **run** end-to-end on hostile/empty fixtures | `--help` never reaches `main()`; the comparator that was dead on every real invocation passed all of the above |
-| `selftest` | the config layer, both checkers' parsing, the checkers against a real clone, and `scripts/probe_fixes.py` — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared; the probe tally must account for every probe) | "exit code was acceptable" is satisfied by a checker that detects nothing |
+| `selftest` | the config layer, both checkers' parsing, the checkers against a real clone, `scripts/probe_fixes.py`, the shipped skill (`scripts/check_skill.py`) and the docs' own structure (`scripts/check_docs.py`) — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared; the probe tally must account for every probe; each new checker carries a control that must fail) | "exit code was acceptable" is satisfied by a checker that detects nothing |
 
 When you fix a defect that was reproduced, add the reproduction to
 `scripts/probe_fixes.py` (one function, one entry in `PROBES`, and raise the pinned count in
@@ -106,6 +106,11 @@ with coordinates redacted on purpose.
 - One doc per loop, and it must contain a command you actually ran. **Never document a flag you
   did not run.** `make test` catches `--help` drift, not doc drift; several wrong flags were
   found in these docs by running them, and each was one a reader would have trusted.
+  `scripts/check_docs.py` now closes part of that gap — unbalanced fences, an info string that lost
+  its fence (one doc rendered "do not attach `recon/*.json` to an issue" **as shell code**), and
+  relative links to files that are not there. It checks whether the prose is *structurally* intact
+  and cross-referable. Whether a documented flag exists is still nobody's job but yours, because the
+  only oracle for that is running it.
 - State the failure modes you hit, with the **verbatim** error text, in
   [docs/troubleshooting.md](docs/troubleshooting.md). That file exists so the next person can
   paste their error into a search box. A paraphrased error message is a dead link.

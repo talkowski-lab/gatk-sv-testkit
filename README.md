@@ -60,6 +60,7 @@ scripts/    fetch_wdl.py (WDLs from your checkout, never vendored)
 kit/        the config layer every tool reads (gsvtk-config + config.sh + config.py)
 examples/   worked drivers from a real investigation, kept as recipes
 docs/       how each loop works, and the gotchas with their verbatim error text
+.pi/skills/ the agent skill that drives this repo: SKILL.md + a read-only `gsvtk` wrapper
 ```
 
 Run `make help` for the tool index, or `./kit/gsvtk-config show` to see the resolved configuration.
@@ -81,6 +82,14 @@ goes under `GSVTK_WORK` and is gitignored. Nothing the tools produce is committe
 
 ## Things worth knowing before you start
 
+- **The repo ships the skill that drives it.** `.pi/skills/gatk-sv-testkit/` is a
+  [pi](https://github.com/badlogic/pi-mono) skill (also usable by any harness that reads
+  `.pi/skills/`): how to locate a checkout, which loop answers which question, and what is safe to
+  run unattended. Its wrapper dispatches **only** read-only modes — `submit`, `create`, `copy`,
+  `attrs --write`, `fetch`, `profile` are refused before anything else runs, so an agent working from
+  the skill cannot reach a POST or a VM by accident. `make selftest` runs `scripts/check_skill.py`,
+  which executes those refusals and compares them to the prose, so "submit is refused" stays a
+  checked claim rather than a sentence.
 - **Read-only by default.** Every mutating helper in `terra/` needs `confirm=True`, the ones that
   start compute additionally refuse without a `--confirm` flag on the command line, and the ones
   that write to Terra refuse the shared baseline workspace unless you name `--allow-shared-target`.

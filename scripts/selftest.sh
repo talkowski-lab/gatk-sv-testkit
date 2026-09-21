@@ -244,6 +244,25 @@ else
 fi
 
 echo
+echo "selftest: the pi skill shipped in .pi/skills/ still describes this checkout"
+# The skill is executable documentation: it tells an agent which Terra modes POST and which
+# dependency gates a loop. Nothing else in the repo reads it, so without this phase a claim like
+# "submit is refused" could go false silently -- the same class of drift as a doc quoting code that
+# no longer exists, except an agent acts on the skill. Its own vacuity control (a copy with the
+# version stamps disagreeing must be REPORTED) is what makes "0 problems" mean something.
+check "scripts/check_skill.py verifies the shipped skill against the wrapper (5 claim groups)" \
+    "$PY" scripts/check_skill.py
+printf '        (frontmatter, version stamp, prose-vs-whitelist refusals EXECUTED, no home paths,\n'
+printf '        bash -n -- and a control proving the comparisons are not vacuous)\n'
+
+# CONTRIBUTING admits `make test` catches --help drift, not doc drift. This is the mechanical third
+# of that gap: fences that swallow prose, and cross-references to files that are not there. It found
+# one on its first run -- docs/setup.md rendered "do not attach recon/*.json to an issue" as shell
+# code -- which is the argument for it living in the gate rather than in a review checklist.
+check "scripts/check_docs.py finds broken fences and dead relative links" \
+    "$PY" scripts/check_docs.py
+
+echo
 echo "selftest: probes for the defects a review confirmed (offline, no network, no creds)"
 # 8 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
 # pins one defect that was reproduced before it was fixed (rerun-step guards, the batch row, the
