@@ -28,8 +28,11 @@ exactly ONE workflow. `TinyResolve` -- the case that motivated this tool -- impo
 is single-workflow flatten cleanly (`ResolveCpxSv`: 1 workflow, 23 tasks, 1600 lines); a
 sub-workflow-only stage does not. That is a gap in the motivation above, not a usage error, and it
 is not solved by relaxing the check: a two-workflow document is exactly what this tool exists to
-prevent. If a sub-workflow stage must be submitted alone, the question is whether the method config
-can name a root workflow -- find out before bundling.
+prevent. Cromwell can itself pick a root (`--workflow-root`, cromwell.readthedocs.io CommandLine),
+so a sub-workflow stage may be submittable if a Terra method config can carry that choice -- NOT
+verified against Terra's method-config path, which is the only thing that would settle it, and the
+only proof of that is a POST. Establish it that way rather than by bundling a document this tool
+refused.
 """
 from __future__ import annotations
 
