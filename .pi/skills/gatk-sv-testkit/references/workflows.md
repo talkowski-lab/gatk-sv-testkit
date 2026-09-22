@@ -57,6 +57,8 @@ Sequence and the reason for each step:
 ```bash
 $S terra recon            # who am I, what can I charge, what can I see        (free)
 $S terra show             # every binding my configs would create               (free, offline)
+$S terra check --against <branch>   # do those keys exist in that ref's WDL?     (free, offline,
+                                    # needs GSVTK_GATK_SV_CHECKOUT; no Dockstore, no Terra call)
 $S terra plan             # what freezing the baseline would copy               (free)
 $S terra verify           # are the frozen bytes still the bytes I compared     (free)
 ```
@@ -79,6 +81,14 @@ one and a failed verify are all refused, because "nobody checked these bytes" is
 "these bytes are the baseline". Run `verify` (free, read-only) and resolve any mismatch. If you are
 tempted by `--allow-unverified`, say so out loud — that flag is the deliberate version of publishing
 coordinates nobody confirmed, and it prints that it was taken.
+
+`create` and `validate` pre-check the maps against `GSVTK_BRANCH`'s WDL in your own checkout and
+refuse on an `EXTRA`/`MISSING`/`CANNOT CHECK`; without a checkout or a ref they print `pre-check
+SKIPPED`, which is not a pass. The maps are a snapshot of ONE branch's signature while `GSVTK_BRANCH`
+only picks the Dockstore URL, so a branch-only key against another ref is rejected as an extra input
+**at submission**, after the config was created -- and if that ref was never published you see a 404
+first and spend the time chasing the wrong thing. `--allow-unknown-inputs` exists; it prints that it
+took the override, and so should you.
 
 `batch_configs.py validate` also POSTs -- Terra resolves the Dockstore WDL and reports per-input
 bindings -- so it is deliberately outside the wrapper's whitelist. It is the cheapest real gate

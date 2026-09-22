@@ -14,15 +14,27 @@ Steps 06->10 are the batch half of the joint-calling chain (GenerateBatchMetrics
 FilterBatchSites, FilterBatchSamples, MergeBatchSites, GenotypeBatch). Extend CONFIGS
 to cover other steps; the shape of every entry is the same.
 
-    python terra/batch_configs.py show       # print the maps (offline, no auth)
-    python terra/batch_configs.py create     # POST the configs (mutation)
-    python terra/batch_configs.py validate   # Terra-side WDL validation
+    python terra/batch_configs.py show                  # print the maps (offline, no auth)
+    python terra/batch_configs.py check --against main  # keys vs that ref's WDL (offline)
+    python terra/batch_configs.py create                # POST the configs (mutation)
+    python terra/batch_configs.py validate              # Terra-side WDL validation
+
+The input maps are a SNAPSHOT of one branch's WDL signature, while GSVTK_BRANCH only chooses the
+Dockstore URL. Point the URL at a ref the maps were not written against and they carry keys that ref
+never declared -- which Rawls rejects as an extra input at submission. That and a `Cannot get
+dockstore://... from method repo` 404 are the same defect seen twice: one map, two refs. `check` is
+the offline form of `validate` (it reads your own checkout with miniwdl, so it does not need the ref
+published on Dockstore), and `create`/`validate` run it before doing anything else.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
@@ -63,6 +75,23 @@ NW = "_" + config.get("NEW_SUFFIX", "new")
 # A path, not a directory: `show` and `--help` import this module and must create nothing.
 # create() makes the directory when it actually writes.
 DUMP = str(config.work_path("manifests") / "batch_configs.json")
+
+
+# Inputs that exist only on the branch under test. Data, not prose, so `check` can distinguish
+# "known branch-only input" from "this key is news to us", and so the fix is written next to the key:
+#
+#   GenotypeBatch.training_vcf   from "Train PE/SR genotyping on a separate batch-level VCF". main's
+#                                GenotypeBatch declares 21 inputs (18 + 3 dockers) and trains PE/SR
+#                                from `vcf` itself; the branch declares 26, adding training_vcf,
+#                                genotype_args, training_args, n_RD_genotype_bins and
+#                                fail_on_degenerate_sr_cutoffs. This map binds only training_vcf --
+#                                the other four have WDL defaults -- so it is the single key a
+#                                main-shaped run has to drop. It was posted against a main-derived
+#                                ref and rejected as an extra input; that is what happened, and this
+#                                table is why `check` can name it instead of just failing.
+BRANCH_ONLY_INPUTS: dict[str, set[str]] = {
+    "10-GenotypeBatch": {"GenotypeBatch.training_vcf"},
+}
 
 
 def dockstore(workflow: str) -> dict:
@@ -245,7 +274,162 @@ def show():
             print(f"   out {k:52s} -> {v}")
 
 
+# ------------------------------------------------------------------ WDL-vs-map check
+def _flag_value(flag: str) -> str | None:
+    a = sys.argv
+    i = a.index(flag) if flag in a else -1
+    return a[i + 1] if i >= 0 and len(a) > i + 1 else None
+
+
+def _wdl_dir_from_ref(ref: str) -> str:
+    """Materialize <checkout>/wdl at <ref> into a temp dir. Read-only by construction.
+
+    `git archive` only: it cannot touch the checkout's working tree, index or HEAD -- the same
+    discipline scripts/fetch_wdl.py keeps, for the same reason (docs/static-checks.md).
+    """
+    ck = config.get("GATK_SV_CHECKOUT")
+    if not ck or not os.path.isdir(ck):
+        raise SystemExit("check needs a gatk-sv checkout to read the WDL from:\n"
+                         "  export GSVTK_GATK_SV_CHECKOUT=/path/to/gatk-sv    (or pass --wdl-dir)\n"
+                         f"  ref asked for: {ref}")
+    tmp = tempfile.mkdtemp(prefix="gsvtk-wdl-")
+    atexit.register(shutil.rmtree, tmp, True)
+    r = subprocess.run(["git", "-C", ck, "archive", ref, "wdl"], capture_output=True)
+    if r.returncode:
+        why = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise SystemExit(f"git -C {ck} archive {ref} wdl failed: {(why or ['?'])[:1][0]}")
+    if subprocess.run(["tar", "-x", "-C", tmp], input=r.stdout).returncode:
+        raise SystemExit("failed to unpack the WDL tree from git archive")
+    return os.path.join(tmp, "wdl")
+
+
+class CannotCheck(Exception):
+    """This one config could not be compared. Reported as a finding, never as a pass -- a checker
+    that skips a workflow and still says 'clean' is the failure mode this repo keeps meeting."""
+
+
+def _declared_inputs(wdl_dir: str, workflow: str):
+    """(declared, required) input names for one workflow, from miniwdl -- not from a regex.
+
+    Regex is how you get a confident wrong answer here: a first attempt at this check reported 13
+    unknown bindings against main because its regex missed whole `input {}` blocks, and main really
+    has exactly one. miniwdl also resolves imports, so an input sourced from another file is read
+    as declared rather than flagged as extra.
+    """
+    try:
+        import WDL                                   # the miniwdl *package*, not the CLI
+    except ImportError:
+        raise SystemExit(
+            f"check needs the miniwdl package in the interpreter running this tool (it is "
+            f"{sys.executable}):\n"
+            "    ./.venv/bin/python terra/batch_configs.py check --against <ref>\n"
+            "  or: python -m pip install -r requirements-dev.txt") from None
+    f = next((os.path.join(wdl_dir, sub, f"{workflow}.wdl")
+              for sub in ("", "wdl") if os.path.isfile(os.path.join(wdl_dir, sub, f"{workflow}.wdl"))),
+             None)
+    if not f:
+        raise CannotCheck(f"wdl/{workflow}.wdl is not in this tree")
+    try:
+        doc = WDL.load(f, path=[os.path.dirname(f)])
+    except Exception as e:                           # a WDL that will not load is the finding
+        raise CannotCheck(f"miniwdl could not load it: {type(e).__name__}: {str(e)[:160]}") from None
+    wf = getattr(doc, "workflow", None) or getattr(doc, "wf", None)
+    if wf is None or wf.name != workflow:
+        raise CannotCheck(f"{f} declares no workflow named {workflow}")
+    # `type.optional` is the flag (miniwdl's Decl has no `.optional`); `expr is None` means no
+    # default, so required = declared without `?` and without `= ...`.
+    declared = {str(d.name) for d in wf.inputs}
+    required = {str(d.name) for d in wf.inputs if not d.type.optional and d.expr is None}
+    return declared, required
+
+
+def check_maps(wdl_dir: str, only: str | None = None) -> int:
+    """Every bound key vs what that ref declares, and every required input vs what is bound."""
+    bad = 0
+    for name, spec in CONFIGS.items():
+        if only and name != only:
+            continue
+        try:
+            declared, required = _declared_inputs(wdl_dir, spec["workflow"])
+        except CannotCheck as e:
+            bad += 1
+            print(f"  BAD {name:<24} CANNOT CHECK: {e}")
+            print("        unverified is not verified: this config's bindings were not compared to "
+                  "anything.")
+            continue
+        bound, nested = {}, []
+        for k in spec["inputs"]:
+            parts = k.split(".")
+            (nested if len(parts) > 2 else bound).update({parts[-1]: k})
+        unknown = [k for k in sorted(bound) if k not in declared]
+        unbound = sorted(k for k in required if k not in bound)
+        print(f"  {'BAD' if unknown or unbound else 'ok '} {name:<24} "
+              f"{len(bound)} bound vs {len(declared)} declared"
+              + (f", {len(nested)} nested-call binding(s) not checked" if nested else ""))
+        for k in unknown:
+            bad += 1
+            key = bound[k]
+            # Matched on the FULL key ("GenotypeBatch.training_vcf"), which is how the table is
+            # written. Matching the bare name meant the known-branch-only branch never fired and
+            # every explanation below read as "we have never seen this input".
+            known = key in BRANCH_ONLY_INPUTS.get(name, set())
+            print(f"      EXTRA  {key}")
+            if known:
+                print("        a KNOWN branch-only input: declared on the branch under test, absent "
+                      "from the ref\n        you checked. This is not a surprise, it is a mismatch "
+                      "between the map's snapshot and the ref.")
+            print("        Rawls rejects the whole config as an extra input at SUBMISSION, so it "
+                  "would sit in\n        the workspace looking created until someone submitted it. "
+                  "Point GSVTK_BRANCH at\n        a ref that declares it, or drop the key from "
+                  f"CONFIGS[{name!r}]['inputs'].")
+        for k in unbound:
+            bad += 1
+            print(f"      MISSING {spec['workflow']}.{k} -- required by the WDL, bound by nothing, "
+                  f"no default to fall back on")
+    if bad:
+        print(f"check: {bad} problem(s). Either the ref is not the one these maps were written "
+              f"against\nor the maps are stale. `validate` asks Terra the same question but needs "
+              f"the ref published on\nDockstore; this needs only your checkout.")
+        return 1
+    print("check: clean -- every bound key is declared, and nothing the WDL requires is unbound.")
+    return 0
+
+
+def cmd_check() -> int:
+    ref = _flag_value("--against") or BRANCH
+    wd = _flag_value("--wdl-dir")
+    if not wd:
+        if not ref:
+            raise SystemExit("check needs a ref: --against <ref|branch|sha>, or GSVTK_BRANCH.\n"
+                             "  --wdl-dir <dir>/wdl also works, and is the way to check a dirty tree.")
+        wd = _wdl_dir_from_ref(ref)
+        print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
+    return check_maps(wd, only=_flag_value("--config"))
+
+
+def preflight(tag: str) -> None:
+    """The same comparison, before anything that POSTs or burns a validation round-trip."""
+    if "--allow-unknown-inputs" in sys.argv:
+        print(f"{tag}: OVERRIDE --allow-unknown-inputs taken: bindings are NOT compared to the WDL. "
+              f"A config\n      Terra rejects as an extra input will still be created, and will fail "
+              f"at submission.")
+        return
+    ref = _flag_value("--against") or BRANCH
+    ck = config.get("GATK_SV_CHECKOUT")
+    if not ref or not ck or not os.path.isdir(ck):
+        # Stated, never silent: this is the reason a wrong map used to reach submission at all.
+        print(f"{tag}: pre-check SKIPPED -- need a ref ({ref or 'unset'}) and a checkout "
+              f"({ck or 'unset'}).\n      Not a pass:  python terra/batch_configs.py check "
+              f"--against <ref>")
+        return
+    print(f"{tag}: comparing every binding against the gatk-sv WDL at {ref}")
+    if check_maps(_wdl_dir_from_ref(ref)):
+        raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
+                         f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
+
+
 def create():
+    preflight("create")                    # offline: a config Terra will reject must not be POSTed
     out = {}
     for name in CONFIGS:
         b = body(name)
@@ -266,6 +450,7 @@ def validate():
     """Terra resolves the Dockstore WDL and reports per-input binding: the cheapest real gate
     before spending money. Response shape is extraInputs / invalidInputs / invalidOutputs /
     missingInputs / validInputs - there is no boolean 'valid' key."""
+    preflight("validate")                  # free + offline first; this step costs a round-trip each
     bad = 0
     for name in CONFIGS:
         r = fapi.validate_config(NS, WS, NS, name)
@@ -291,15 +476,40 @@ def validate():
         raise SystemExit(f"{bad} configs failed validation")
 
 
+# Flags that CONSUME the next token. `show` used to be found by "every argument that does not start
+# with -", which meant `check --against main` was reported as two modes -- and the fix for that must
+# not be to accept any stray positional, because `create foo` should still be a usage error.
+VALUE_FLAGS = ("--against", "--wdl-dir", "--config")
+
+
+def positional(argv: list[str]) -> list[str]:
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in VALUE_FLAGS:
+            skip = True
+            continue
+        if a.startswith("-"):
+            continue
+        out.append(a)
+    return out
+
+
 def main():
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         usage()
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    args = positional(sys.argv[1:])
     if len(args) > 1:
         raise SystemExit(f"one mode at a time; got {' '.join(args)!r}   (--help)")
     mode = args[0] if args else "show"
-    if mode not in ("show", "create", "validate"):
+    if mode not in ("show", "check", "create", "validate"):
         usage(2)                      # a typo must be a usage error, not a traceback
+    if mode == "check":
+        # Deliberately BEFORE require_target: check is offline, needs no workspace and no auth, and
+        # is the tool you run precisely while the target is still undecided.
+        raise SystemExit(cmd_check())
     if mode == "create" and "--confirm" not in sys.argv:
         raise SystemExit(
             "create POSTs (and overwrites) method configs in your workspace: a config with a\n"
@@ -313,10 +523,15 @@ def main():
 
 
 def usage(code=0):
-    print("""usage: batch_configs.py [show|create|validate]
+    print("""usage: batch_configs.py [show|check|create|validate]
 
   show      print every input/output map (offline, no auth; needs GSVTK_BRANCH
               because the branch is part of every Dockstore URI it prints)
+  check     compare every bound key against the WDL at a ref, offline, from your own
+              checkout (miniwdl). --against <ref|branch|sha> (default GSVTK_BRANCH),
+              --wdl-dir <dir> for a dirty tree, --config <name> for one config.
+              `create` and `validate` run this first; --allow-unknown-inputs says you
+              mean to post a map that does not fit the ref (it prints that it did).
   create    POST the configs into GSVTK_TERRA_NAMESPACE/GSVTK_TERRA_WORKSPACE
               (requires --confirm: it overwrites configs a submission will read;
                refuses the shared baseline workspace unless --allow-shared-target)

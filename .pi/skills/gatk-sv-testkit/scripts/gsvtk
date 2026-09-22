@@ -24,7 +24,7 @@ VENVBIN=".venv/bin"
 # Stamped, because this skill lives outside the repo it drives and an unstamped stale copy is
 # indistinguishable from a current one -- which is how a previous audit ended up quoting code that
 # did not exist. Bump it with the skill's own git tag; `gsvtk version` and `locate` print it.
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 die() { printf 'gsvtk: %s\n' "$*" >&2; exit 2; }
 
@@ -313,11 +313,11 @@ cmd_terra() {
   # The whitelist is checked BEFORE the interpreter, so "refused" is never accidentally
   # reported as "your environment is broken": a refusal must be a refusal on any machine.
   case "$what" in
-    recon|show|plan|verify|status|cost|inputs|rerun-show) ;;
+    recon|show|check|plan|verify|status|cost|inputs|rerun-show) ;;
     *) die "refusing '${what:-(empty)}'.
 
   This wrapper only dispatches read-only Terra modes:
-    recon | show | plan | verify | status | cost | inputs | rerun-show
+    recon | show | check | plan | verify | status | cost | inputs | rerun-show
   The modes that POST or start compute (create, submit, copy, attrs --write) and
   \`validate\`, which is read-only in spirit but asks Terra to resolve a config, are yours to run
   in the repo, deliberately, after reading \`show\`/\`plan\` output. Bare \`attrs\` is read-only and
@@ -327,6 +327,10 @@ cmd_terra() {
   case "$what" in
     recon)     cd "$REPO" && exec "$p" terra/recon.py "$@";;
     show)      cd "$REPO" && exec "$p" terra/batch_configs.py show "$@";;
+    # Offline and needs no workspace: the binding keys vs the WDL at a ref. Deliberately in the
+    # read-only set, because it is the question you ask BEFORE you decide the target, and the one
+    # that used to be answerable only by `validate` (Terra-side, Dockstore-published ref).
+    check)     cd "$REPO" && exec "$p" terra/batch_configs.py check "$@";;
     plan)      cd "$REPO" && exec "$p" terra/batch_freeze.py plan "$@";;
     verify)    cd "$REPO" && exec "$p" terra/batch_freeze.py verify "$@";;
     status)    cd "$REPO" && exec "$p" terra/batch_status.py "$@";;
@@ -359,7 +363,7 @@ gsvtk <command> — read-only front door to the gatk-sv-testkit checkout
   gate [ref] [--wf NAME]... [--strict] [--repo DIR]
                       the three static checks (WDL launch, JSON contract, jq plumbing)
   build <branch>      --check then --dry-run; prints how to run the real build
-  terra <mode>        recon|show|plan|verify|status|cost|inputs|rerun-show (read-only)
+  terra <mode>        recon|show|check|plan|verify|status|cost|inputs|rerun-show (read-only)
   repo                print the checkout path only
   version             this wrapper's own version
 

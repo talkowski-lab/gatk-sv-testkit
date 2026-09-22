@@ -78,7 +78,7 @@ workspace) or safely derivable.
 | `GSVTK_GATK_IMAGE_REPO` | derived | docker (`--gatk`), `batch_rerun_step.py` | | where *your* GATK java image goes |
 | `GSVTK_GATK_SV_REPO_URL` | `https://github.com/broadinstitute/gatk-sv` | docker | what the VM clones |
 | `GSVTK_GATK_REPO_URL` | `https://github.com/broadinstitute/gatk` | docker (`--gatk`) | |
-| `GSVTK_GATK_SV_CHECKOUT` | *(unset)* | checks, fetch_wdl, batch input gate | the clone whose bytes you are testing |
+| `GSVTK_GATK_SV_CHECKOUT` | *(unset)* | checks, fetch_wdl, batch input gate, `batch_configs.py check` | the clone whose bytes you are testing. Without it, `create`/`validate` print `pre-check SKIPPED` — the binding-vs-WDL comparison did not run, which is not a pass |
 | `GSVTK_GATK_CHECKOUT` | *(unset)* | local replay | used to discover a locally built jar |
 | `GSVTK_TERRA_API_ROOT` | `https://api.firecloud.org/api/` | terra | `api.terra.bio` does not resolve on every network; this alias does |
 | `GSVTK_TERRA_NAMESPACE` / `_WORKSPACE` | *(required)* | terra | your sandbox: where configs are POSTed and outputs written |

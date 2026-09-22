@@ -93,14 +93,40 @@ or the bundle contents ever drift.
 ## 3. Method configs
 
 ```bash
-python terra/batch_configs.py show          # print every resolved input binding, no POST
-python terra/batch_configs.py create        # POST/overwrite the configs in YOUR workspace
-python terra/batch_configs.py validate
+python terra/batch_configs.py show                    # print every resolved input binding, no POST
+python terra/batch_configs.py check --against main    # those keys vs that ref's WDL, offline
+python terra/batch_configs.py create                  # POST/overwrite the configs in YOUR workspace
+python terra/batch_configs.py validate                # Terra-side typecheck of the Dockstore WDL
 ```
 
 The configs are generated from one table, so a binding cannot drift between steps. Each config
 binds the frozen inputs plus **the image you built** plus the Dockstore tag for the rest of the
 chain.
+
+**The input maps are a snapshot of one branch's WDL signature; `GSVTK_BRANCH` only chooses the
+Dockstore URL.** Point the URL at a ref the maps were not written against and they carry keys that
+ref never declared, which Rawls rejects as an **extra input at submission** — after `create`
+succeeded, so the workspace holds a config that looks fine until someone submits it. A ref that
+Dockstore never published fails earlier with `Cannot get dockstore://... from method repo`: one
+mismatch, two symptoms, and the 404 tends to arrive first and absorb the attention.
+
+`check` is the offline form of `validate`: it reads `wdl/` out of your own checkout with `git
+archive` and parses the workflow with miniwdl, so it needs neither the ref to be published nor a
+Terra target — which is why `create` and `validate` run it before doing anything else and refuse on
+findings. What it reports:
+
+| Finding | Means |
+|---|---|
+| `EXTRA <WF>.<input>` | the map binds a key this ref does not declare. Known branch-only keys are labelled as such (the table beside `CONFIGS`), because "exists on the branch under test" and "never seen" need different fixes |
+| `MISSING <WF>.<input>` | the ref **requires** it and nothing binds it: no default to fall back on, fails as a missing input |
+| `CANNOT CHECK` | the workflow file is not in that tree or miniwdl could not load it. Counted as a finding — a skipped comparison is not a pass |
+| pre-check `SKIPPED` from `create` | no ref or no checkout, so the comparison never ran. Printed, never silent |
+
+`--allow-unknown-inputs` posts anyway and prints that it was taken. Measured against this repo's
+maps (redacted per this repo's own audit rule, which treats a person-named branch as an internal
+identifier — see [config.md](config.md)): `<branch-under-test>` 0 of 64 rejected, `origin/main` 1
+(`10-GenotypeBatch.training_vcf`, a branch-only input), `v1.1.1` 56 findings — those maps were never
+a `v1.1.1` shape. Run `check` yourself to reproduce all three; the numbers are three commands.
 
 Two non-obvious details that cost real debugging time when wrong:
 

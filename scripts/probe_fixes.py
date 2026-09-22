@@ -26,6 +26,8 @@ Probes (each names the defect it pins):
     miniwdl_resolver     the checker was reported absent while installed in the project venv
     help_writes_nothing  printing --help created scratch directories
     dstore_drift         the rerun config duplicates batch_configs' Dockstore URI by hand
+    map_vs_wdl           method-config keys were never compared to the target ref's WDL offline, so
+                         a branch-only input reached Rawls and was rejected as an extra input
 """
 from __future__ import annotations
 
@@ -476,6 +478,131 @@ def probe_dstore_drift() -> str:
     return f"identical for one version, {a['methodUri'].count('%2F')} %2F encodings, differs on another"
 
 
+
+def _fixture_wdl(dirpath: Path, drop, add_required: bool) -> None:
+    """A one-workflow WDL tree declaring exactly what the config under test binds (or does not).
+
+    `drop` removes one declared input so the config's binding for it becomes an EXTRA; `add_required`
+    adds a File with no default the config cannot bind -- the other half of the check, because a
+    checker that only looks one way reports that tree as clean.
+    """
+    bc = sys.modules["batch_configs"]
+    declared = sorted(k.split(".")[-1] for k in bc.CONFIGS["10-GenotypeBatch"]["inputs"]
+                      if k.startswith("GenotypeBatch."))
+    declared = [d for d in declared if d != drop]
+    body = "\n".join(f"    File {d}" if d != "batch" else "    String batch" for d in declared)
+    if add_required:
+        body += "\n    File probe_required_unbound"
+    (dirpath / "wdl").mkdir(parents=True, exist_ok=True)
+    (dirpath / "wdl" / "GenotypeBatch.wdl").write_text(
+        "version 1.1\n"
+        "workflow GenotypeBatch {\n"
+        "  input {" + "\n" + body + "\n  }\n"
+        "  call probe_task\n"
+        '  output { File o = probe_task.out }\n'
+        "}\n"
+        'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
+        '  runtime { docker: "x" }\n}\n')
+
+
+def probe_map_vs_wdl() -> str:
+    """batch_configs must refuse to POST keys the target ref's WDL does not declare.
+
+    The defect: CONFIGS is a snapshot of ONE branch's WDL signature while GSVTK_BRANCH only picks the
+    Dockstore URL, and nothing compared the two offline. `GenotypeBatch.training_vcf` is declared on
+    the branch under test and not on main (26 declared inputs there vs main's 21), so a
+    main-pointing config was rejected by Rawls as an extra input AT SUBMISSION -- after the config had
+    been created and looked fine. `validate` would have said so, but it asks Terra to fetch the
+    Dockstore URI, and the unpublished ref answered 404 first. Same map, two symptoms.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch"},
+          "terra", "batch_configs")
+    install_recorder(sys.modules["terra"])
+    out = io.StringIO()
+
+    # CONTROL FIRST: a tree declaring everything the config binds must read CLEAN. Without this phase
+    # "1 problem" and "the comparison never runs" print the same thing.
+    ok = TMP / "wdl-ok"
+    _fixture_wdl(ok, None, False)
+    with contextlib.redirect_stdout(out):
+        rc_ok = sys.modules["batch_configs"].check_maps(str(ok), only="10-GenotypeBatch")
+    if rc_ok != 0:
+        raise AssertionError(f"the check rejected a WDL declaring every bound key: "
+                             f"{out.getvalue()[-400:]}")
+
+    # Now become main: drop training_vcf from the declarations, add a required input nobody binds.
+    bad = TMP / "wdl-bad"
+    _fixture_wdl(bad, "training_vcf", True)
+    out.truncate(0)
+    out.seek(0)
+    with contextlib.redirect_stdout(out):
+        rc_bad = sys.modules["batch_configs"].check_maps(str(bad), only="10-GenotypeBatch")
+    txt = out.getvalue()
+    if rc_bad == 0:
+        raise AssertionError("a config key the WDL does not declare was accepted")
+    if "EXTRA  GenotypeBatch.training_vcf" not in txt:
+        raise AssertionError(f"the extra input was not named: {txt[-300:]}")
+    if "KNOWN branch-only" not in txt:
+        raise AssertionError("a known branch-only input was reported as unknown -- the table beside "
+                             "CONFIGS is what tells the two apart")
+    if "MISSING GenotypeBatch.probe_required_unbound" not in txt:
+        raise AssertionError("the required-but-unbound half of the check did not fire")
+
+    # The gate itself: create() must refuse BEFORE any request leaves the machine. The override phase
+    # proves the recorder records and that create() would otherwise have POSTed.
+    repo = TMP / "fakerepo"
+    _fixture_wdl(repo, "training_vcf", False)
+    env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
+               GIT_COMMITTER_EMAIL="p@p")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "fixture"]):
+        subprocess.run(cmd, cwd=str(repo), env=env, check=True, capture_output=True)
+    # Not "master": the default branch name is a git config on the machine, and a probe that
+    # hardcodes it fails on boxes configured differently from the author's.
+    ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=str(repo),
+                         capture_output=True, text=True, check=True).stdout.strip()
+    argv_save, env_save = sys.argv, os.environ.get("GSVTK_GATK_SV_CHECKOUT")
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    bc = sys.modules["batch_configs"]
+    try:
+        REQUESTS.clear()
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", ref]
+        refused = None
+        with contextlib.redirect_stdout(out):
+            try:
+                bc.create()
+            except SystemExit as e:
+                refused = str(e)
+        if refused is None or "do not fit the WDL" not in refused:
+            raise AssertionError(f"create() posted anyway: {refused!r} / {out.getvalue()[-300:]}")
+        if REQUESTS:
+            raise AssertionError(f"create() reached Terra before refusing: {REQUESTS}")
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", ref,
+                    "--allow-unknown-inputs"]
+        REQUESTS.clear()
+        with contextlib.redirect_stdout(out):
+            try:
+                bc.create()
+            except Exception:                     # the recorder answers 201; other noise is beside it
+                pass
+        sent = len(REQUESTS)
+        if not sent:
+            raise AssertionError("control: with the override taken create() still sent nothing, so "
+                                 "the refusal above proves nothing about the guard")
+        said = "override" in out.getvalue().lower()
+    finally:
+        sys.argv = argv_save
+        if env_save is None:
+            os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+        else:
+            os.environ["GSVTK_GATK_SV_CHECKOUT"] = env_save
+    return (f"declared-everything -> clean; main-shaped tree -> extra named + labelled branch-only "
+            f"+ unbound required caught; create refused with 0 requests (override sent {sent}, "
+            f"said so: {said})")
+
+
 PROBES = [
     ("rerun_guards", probe_rerun_guards),
     ("stage_batch_row", probe_stage_batch_row),
@@ -485,6 +612,7 @@ PROBES = [
     ("miniwdl_resolver", probe_miniwdl_resolver),
     ("help_writes_nothing", probe_help_writes_nothing),
     ("dstore_drift", probe_dstore_drift),
+    ("map_vs_wdl", probe_map_vs_wdl),
 ]
 
 

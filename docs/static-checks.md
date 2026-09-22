@@ -9,6 +9,13 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 | A call site passing an input the callee never declared | typechecking does not compare call sites across files | `wdl_gate.sh` |
 | A renamed `sv_shell` JSON key with a reader left behind | `jq -r '.missing'` yields the string `null`, forwarded as `--flag null`, failing stages later | `svshell_contract_check.py`, `svshell_jq_plumbing_scan.py` |
 | A shipped image whose jar predates the flags its WDL passes | the image is built from a pinned commit, not your branch | `image-check/` |
+| A Terra method config binding an input the WDL at that ref does not declare | `wdl_gate.sh` compares call sites **inside** a WDL tree; nothing there knows about method configs, and `validate` asks Terra — which needs the ref published on Dockstore | `terra/batch_configs.py check --against <ref>` (below, and it is the pre-check of `create`/`validate`) |
+
+The fifth checker lives in `terra/` rather than `checks/` because it checks this repo's own config
+table against a WDL ref, not gatk-sv's source. It is still offline: `git archive` of `wdl/` from
+`GSVTK_GATK_SV_CHECKOUT`, parsed by miniwdl, no Terra call and no published ref. [comparing a
+head-to-head's configs to their ref](terra-head-to-head.md) has the findings it produces and the one
+branch-only key it currently reports against `main`.
 
 ## `wdl_gate.sh` — is it launchable, not just valid
 
