@@ -19,7 +19,7 @@ metadata:
   author: talkowski-lab     # the org that owns the repo this skill drives; the skill now lives
                             # in that repo (.pi/skills/), so a personal handle would be published
   repo: https://github.com/talkowski-lab/gatk-sv-testkit
-  version: 0.4.0            # must equal VERSION in scripts/gsvtk; an unstamped skill cannot be
+  version: 0.5.0            # must equal VERSION in scripts/gsvtk; an unstamped skill cannot be
                             # told apart from a stale one -- scripts/selftest.sh checks it
 ---
 
@@ -65,7 +65,7 @@ that line is absent from your transcript, you did not run them.
 | "What would my configs bind?" | `scripts/gsvtk terra show` | free, offline |
 | "Do those keys even exist in the WDL I am pointing at?" | `scripts/gsvtk terra check --against <ref>` | free, offline, needs a gatk-sv clone |
 | "Are the baseline inputs still the bytes I compared?" | `scripts/gsvtk terra verify` | free, re-crc32cs |
-| "Did my change alter the output?" | [references/workflows.md](references/workflows.md) §3 — **no `gsvtk compare` exists**: the differ is repo-side (`compare/`, `terra/batch_fetch_compare.sh table`) | one step's VMs |
+| "Did my change alter the output?" | [references/workflows.md](references/workflows.md) §3 — **no `gsvtk compare` exists**: the differ is repo-side (`compare/`, `terra/batch_fetch_compare.sh table`). Leave one variable: same WDL ref, same inputs, one image differing | one step's VMs |
 | "Run this trainer on the real inputs, locally" | `examples/run_train_chr20.sh` in the checkout | free, needs a JDK 17 jar |
 | "Is my submission done / what did it cost?" | the `terra-monitor` skill; then `scripts/gsvtk terra status --costs` | free |
 

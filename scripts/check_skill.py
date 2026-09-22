@@ -52,6 +52,72 @@ REPO = Path(__file__).resolve().parent.parent
 # must name every mode in this set, and every mode it names must really be refused.
 EXPECTED_REFUSED = {"create", "submit", "copy", "attrs", "fetch", "profile", "validate"}
 
+# Flags the skill's MUTATING prose tells an agent to reach for, restated with the file that must
+# implement each one. A general "every `--flag` in the prose must exist somewhere" rule was tried on
+# the way here and rejected: the prose legitimately names other tools' flags (`gcloud
+# --impersonate-service-account`, the `--flag null` that a renamed sv_shell key produces several
+# stages later), so it reported real sentences as defects -- and a check that cries wolf gets
+# ignored, which is worse than not having it. These six are the ones where the skill is the
+# *instruction*: if the flag is renamed in the code, the advice silently becomes wrong, which is the
+# class of drift this whole file exists to catch (a doc line said "drop the key from CONFIGS" while
+# nothing in the code pruned anything). Key = flag, value = (file, the line shape that IS the
+# implementation).
+#
+# The pattern is restated per flag rather than inferred, because "the string appears in the file" and
+# "the file implements it" are different claims and the first one is unfalsifiable: every one of these
+# flags is also named inside its own refusal messages, so a full rename that left any message behind
+# still "found" the old flag. Mutation-tested: renaming the real `DROP_FLAG` assignment, and renaming
+# `--allow-unknown-inputs` everywhere except the comments, are both findings here.
+SAFETY_FLAGS = {
+    "--allow-unknown-inputs": ("terra/batch_configs.py",
+                               r'"--allow-unknown-inputs" in sys\.argv'),
+    "--drop-branch-only-inputs": ("terra/batch_configs.py",
+                                  r'DROP_FLAG = "--drop-branch-only-inputs"'),
+    "--against": ("terra/batch_configs.py", r'_flag_value\("--against"\)'),
+    "--allow-unverified": ("terra/batch_freeze.py", r'"--allow-unverified" in sys\.argv'),
+    "--allow-shared-target": ("terra/batch_rerun_step.py", r'"--allow-shared-target" in sys\.argv'),
+    "--allow-unpinned-docker": ("terra/batch_rerun_step.py",
+                                r'a == "--allow-unpinned-docker"'),
+}
+
+
+def code_lines(text: str) -> str:
+    """The file with comment-only lines removed -- comments are the skill's neighbour, not its code.
+
+    This is the difference between a check and a decoration. The first version asked whether the flag
+    appeared anywhere in the file, and a mutation that renamed the real `DROP_FLAG = "--drop-..."`
+    assignment passed: the old name survives in the explanation comment above it and in the refusal
+    messages, so "the string is present" was measuring the prose, not the implementation.
+    """
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+def check_safety_flags(repo: Path, skill_files: list[Path]) -> list[str]:
+    """Every override flag the skill names must still be implemented where the skill says it is."""
+    named = set()
+    for p in skill_files:
+        named.update(re.findall(r"`(--[a-z][a-z0-9-]+)`", read(p)))
+    bad = []
+    for flag, (src, shape) in sorted(SAFETY_FLAGS.items()):
+        f = repo / src
+        if not f.is_file():
+            bad.append(f"{src}: named as the implementer of {flag}, but the file is gone")
+            continue
+        body = code_lines(read(f))
+        if not re.search(shape, body):
+            bad.append(f"{flag} is no longer implemented where the skill says it is: no line matching "
+                       f"{shape!r} in {src}. The skill tells agents to reach for that override -- "
+                       f"rename it in the prose and here together, or remove it from both")
+    # The other direction, scoped to the naming convention the repo uses for overrides: anything
+    # backticked as `--allow-*` in the prose is a permission the skill grants an agent, so it must be
+    # pinned to an implementation. Wider than that (every flag in every sentence) is the over-capture
+    # the comment above refuses to import.
+    for flag in sorted(named):
+        if flag.startswith("--allow-") and flag not in SAFETY_FLAGS:
+            bad.append(f"{flag} is named in the skill prose as an override but pinned to no "
+                       f"implementation in SAFETY_FLAGS -- add the file that implements it")
+    return bad
+
 
 def read(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
@@ -282,7 +348,9 @@ def main(argv: list[str]) -> int:
               f"in-repo now")
         return 1
 
-    problems = check_tree(skill) + live_refusals(skill) + control(skill)
+    skill_md = [skill / "SKILL.md"] + sorted((skill / "references").glob("*.md"))
+    problems = (check_tree(skill) + live_refusals(skill) + control(skill)
+                + check_safety_flags(REPO, [p for p in skill_md if p.is_file()]))
     here = skill.relative_to(REPO) if skill.is_relative_to(REPO) else skill
     for p in problems:
         print(f"  PROBLEM  {p}")
@@ -291,9 +359,9 @@ def main(argv: list[str]) -> int:
         return 1
     # "5 claim groups" is not a boast about coverage, it is the count the assertions above actually
     # run; if a group ever parses to nothing it reports a problem instead of vanishing.
-    print(f"check_skill: 5 claim groups verified in {here} "
-          f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, no home paths, "
-          f"bash -n) + the vacuity control")
+    print(f"check_skill: 6 claim groups verified in {here} "
+          f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, override flags still "
+          f"implemented, no home paths, bash -n) + the vacuity control")
     return 0
 
 

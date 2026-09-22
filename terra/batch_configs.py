@@ -251,15 +251,66 @@ CONFIGS = {
 }
 
 
+# `--drop-branch-only-inputs`: build a ref-shaped config by removing bindings the ref does not
+# declare, INSTEAD of failing. Deliberately opt-in, and deliberate about being loud:
+#
+#   Dropping `GenotypeBatch.training_vcf` is not cosmetic. On the branch, GenotypeBatch is handed
+#   this batch's own filtered PESR VCF as its PE/SR training sites; on main it trains from `vcf`
+#   itself. Both are coherent pipelines -- they are different pipelines. A tool that quietly picked
+#   one would produce a green run of the other one, which is the failure this repo names in
+#   batch_rerun_step's own docstring.
+#
+#   So the flag is only honoured when the ref can actually be READ (a checkout + a ref that resolves
+#   + miniwdl). Unverifiable means we do not drop, because "I could not check" is not evidence that
+#   the key is absent. And it prints to stderr, so `batch_rerun_step.py show | jq` stays valid JSON.
+DROP_FLAG = "--drop-branch-only-inputs"
+
+
+def _adapt_inputs(name: str, spec: dict, inputs: dict) -> dict:
+    """Remove known-branch-only bindings the target ref does not declare. Prints what it dropped."""
+    known = BRANCH_ONLY_INPUTS.get(name, set())
+    candidates = {k: v for k, v in inputs.items() if k in known}
+    if not candidates or DROP_FLAG not in sys.argv:
+        return inputs
+    got = declared_for_config(name)
+    if got is None:
+        print(f"{DROP_FLAG} ignored for {name}: cannot read the WDL at "
+              f"{_verify_ref() or 'GSVTK_BRANCH (unset)'}, and an unverified ref is not evidence that a "
+              f"binding is absent.\n  Set GSVTK_GATK_SV_CHECKOUT and a resolvable GSVTK_BRANCH, or "
+              f"post it as-is and accept the rejection.", file=sys.stderr)
+        return inputs
+    declared = got[0]
+    dropped = [k for k in sorted(candidates) if k.split(".")[-1] not in declared]
+    for k in dropped:
+        del inputs[k]
+    if dropped:
+        print(f"{DROP_FLAG}: dropped {len(dropped)} binding(s) from {name} that "
+              f"{_verify_ref()} does not declare:", file=sys.stderr)
+        for k in dropped:
+            print(f"  - {k}", file=sys.stderr)
+        print("  This is a SEMANTIC change, not a fix: main's GenotypeBatch trains PE/SR from `vcf`, "
+              f"the\n  branch from a separate training VCF. You asked for {_verify_ref()}, which is "
+              f"NOT the "
+              f"ref these maps\n  were written against -- if you meant to run your own branch, unset "
+              f"GSVTK_BRANCH instead of\n  using this flag. What you see in `show` is what gets "
+              f"POSTed.", file=sys.stderr)
+    return inputs
+
+
 def body(name: str) -> dict:
     spec = CONFIGS[name]
+    # dict(): spec["inputs"] IS the module-level table. Pruning without copying would delete the key
+    # from CONFIGS for the rest of the process -- so `show` after one adapted `create` would report a
+    # 16-input map even when run without the flag, and the branch-only table would no longer match
+    # the map it sits beside.
+    inputs = _adapt_inputs(name, spec, dict(spec["inputs"]))
     return {"namespace": NS, "name": name, "rootEntityType": spec["rootEntityType"],
             "methodRepoMethod": dockstore(spec["workflow"]),
             # Rawls rejects the body without it (400 "missing required member
             # 'methodConfigVersion'"); the server bumps it on every overwrite.
             "methodConfigVersion": 1,
             "deleted": False,  # also required by Rawls (400 "missing required member 'deleted'")
-            "inputs": spec["inputs"], "outputs": spec["outputs"],
+            "inputs": inputs, "outputs": spec["outputs"],
             "prerequisites": {}, "deleteIntermediateOutputFiles": False,
             "useCallCache": True, "maxMessageSize": None}
 
@@ -281,31 +332,65 @@ def _flag_value(flag: str) -> str | None:
     return a[i + 1] if i >= 0 and len(a) > i + 1 else None
 
 
+_WDLCACHE: dict[str, str] = {}
+
+
 def _wdl_dir_from_ref(ref: str) -> str:
     """Materialize <checkout>/wdl at <ref> into a temp dir. Read-only by construction.
 
     `git archive` only: it cannot touch the checkout's working tree, index or HEAD -- the same
     discipline scripts/fetch_wdl.py keeps, for the same reason (docs/static-checks.md).
+
+    Raises CannotCheck (not SystemExit) because body() consults it while building one config, and a
+    ref that cannot be read must make THAT config unverifiable rather than kill the whole run. Cached
+    per ref: `create` asks for five configs and would otherwise run five `git archive`s.
     """
+    if ref in _WDLCACHE:
+        return _WDLCACHE[ref]
     ck = config.get("GATK_SV_CHECKOUT")
     if not ck or not os.path.isdir(ck):
-        raise SystemExit("check needs a gatk-sv checkout to read the WDL from:\n"
-                         "  export GSVTK_GATK_SV_CHECKOUT=/path/to/gatk-sv    (or pass --wdl-dir)\n"
-                         f"  ref asked for: {ref}")
+        raise CannotCheck("no GSVTK_GATK_SV_CHECKOUT checkout to read the WDL from")
     tmp = tempfile.mkdtemp(prefix="gsvtk-wdl-")
     atexit.register(shutil.rmtree, tmp, True)
     r = subprocess.run(["git", "-C", ck, "archive", ref, "wdl"], capture_output=True)
     if r.returncode:
         why = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        raise SystemExit(f"git -C {ck} archive {ref} wdl failed: {(why or ['?'])[:1][0]}")
+        raise CannotCheck(f"git -C {ck} archive {ref} wdl: {(why or ['?'])[:1][0]}")
     if subprocess.run(["tar", "-x", "-C", tmp], input=r.stdout).returncode:
-        raise SystemExit("failed to unpack the WDL tree from git archive")
-    return os.path.join(tmp, "wdl")
+        raise CannotCheck("failed to unpack the WDL tree from git archive")
+    _WDLCACHE[ref] = os.path.join(tmp, "wdl")
+    return _WDLCACHE[ref]
 
 
 class CannotCheck(Exception):
     """This one config could not be compared. Reported as a finding, never as a pass -- a checker
     that skips a workflow and still says 'clean' is the failure mode this repo keeps meeting."""
+
+
+# Which ref a config's bindings should be compared to. Empty means GSVTK_BRANCH. Set it when the
+# config points somewhere else: batch_rerun_step.py honours GSV_WDL_VERSION, so its Dockstore pin can
+# legitimately differ from GSVTK_BRANCH -- checking BRANCH there would be a guard pointed at a ref
+# nothing is about to run, i.e. a confident pass about the wrong document.
+VERIFY_REF = ""
+
+
+def _verify_ref() -> str:
+    return VERIFY_REF or BRANCH
+
+
+def declared_for_config(name: str, ref: str | None = None):
+    """(declared, required) for one config's workflow at `ref` (default: what it will run).
+
+    None when it cannot be established. Callers must treat None as 'unknown', which is NOT 'fits':
+    dropping a binding you never verified is how a main-shaped run happens by accident.
+    """
+    ref = ref or _verify_ref()
+    if not ref:
+        return None
+    try:
+        return _declared_inputs(_wdl_dir_from_ref(ref), CONFIGS[name]["workflow"])
+    except CannotCheck:
+        return None
 
 
 def _declared_inputs(wdl_dir: str, workflow: str):
@@ -402,7 +487,11 @@ def cmd_check() -> int:
         if not ref:
             raise SystemExit("check needs a ref: --against <ref|branch|sha>, or GSVTK_BRANCH.\n"
                              "  --wdl-dir <dir>/wdl also works, and is the way to check a dirty tree.")
-        wd = _wdl_dir_from_ref(ref)
+        try:
+            wd = _wdl_dir_from_ref(ref)
+        except CannotCheck as e:
+            # A ref you cannot read is not a ref that fits: say what failed, and do not exit 0.
+            raise SystemExit(f"cannot read the WDL at {ref}: {e}") from None
         print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
     return check_maps(wd, only=_flag_value("--config"))
 
@@ -414,7 +503,7 @@ def preflight(tag: str) -> None:
               f"A config\n      Terra rejects as an extra input will still be created, and will fail "
               f"at submission.")
         return
-    ref = _flag_value("--against") or BRANCH
+    ref = _flag_value("--against") or _verify_ref()
     ck = config.get("GATK_SV_CHECKOUT")
     if not ref or not ck or not os.path.isdir(ck):
         # Stated, never silent: this is the reason a wrong map used to reach submission at all.
@@ -422,8 +511,17 @@ def preflight(tag: str) -> None:
               f"({ck or 'unset'}).\n      Not a pass:  python terra/batch_configs.py check "
               f"--against <ref>")
         return
-    print(f"{tag}: comparing every binding against the gatk-sv WDL at {ref}")
-    if check_maps(_wdl_dir_from_ref(ref)):
+    # Name the ref that was compared, because for a rerun it is the Dockstore pin (GSV_WDL_VERSION),
+    # not necessarily GSVTK_BRANCH -- a pass against the wrong ref is worse than no check.
+    extra = "" if ref == BRANCH else f" (GSVTK_BRANCH is {BRANCH or 'unset'})"
+    print(f"{tag}: comparing every binding against the gatk-sv WDL at {ref}{extra}")
+    try:
+        wd = _wdl_dir_from_ref(ref)
+    except CannotCheck as e:
+        raise SystemExit(f"{tag}: refusing to continue -- cannot read the WDL at {ref}: {e}.\n"
+                         f"  Unverified is not verified. Fix the ref/checkout, or say you mean it "
+                         f"with --allow-unknown-inputs.") from None
+    if check_maps(wd):
         raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
                          f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
 

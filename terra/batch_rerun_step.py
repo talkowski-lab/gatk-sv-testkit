@@ -81,6 +81,10 @@ IMAGES: dict[str, str] = {}
 CONFIRMED = False        # set only by an explicit --confirm on the command line
 ALLOW_UNPINNED = False   # set only by an explicit --allow-unpinned-docker
 WDL_VERSION = os.environ.get("GSV_WDL_VERSION") or config.get("BRANCH")
+# This config's Dockstore pin is WDL_VERSION, which GSV_WDL_VERSION can move off GSVTK_BRANCH. Tell
+# batch_configs which ref to compare bindings against, or its pre-check would grade BRANCH while this
+# body points elsewhere -- a pass about a document nobody is about to run.
+tc.VERIFY_REF = WDL_VERSION
 
 
 def dstore(version: str) -> dict:
@@ -134,6 +138,11 @@ def create() -> None:
     # same footing as `configs create` -- and an unresolved target used to reach Terra as an
     # empty workspace path segment (`POST /api/workspaces//methodconfigs`).
     tc.require_target(writes=True)
+    # The other half of the guard: batch_configs gained a pre-check, but this path imports only
+    # `body()` from it, so without this call the ONE path that actually submits was the unguarded
+    # one. A main-shaped rerun reached Rawls and died at submission with an extra input, exactly like
+    # the config path did before its own pre-check.
+    tc.preflight("rerun create")
     b = make_body()
     r = fapi.create_workspace_config(tc.NS, tc.WS, b)
     if r.status_code == 409:
@@ -147,6 +156,7 @@ def validate() -> None:
     # Resolve the workspace first: with no target this used to POST to
     # /api/workspaces//methodconfigs/.../validate and report whatever the edge said.
     tc.require_target()
+    tc.preflight("rerun validate")     # free and offline; validate costs a round-trip either way
     r = fapi.validate_config(tc.NS, tc.WS, tc.NS, CONFIG)
     d = r.json() if r.status_code == 200 else {"error": r.text[:300]}
     print(json.dumps(d, indent=1))
@@ -172,6 +182,10 @@ def submit() -> None:
     tc.require_target()
     terra.assert_writable_target(tc.NS, tc.WS, "submit a workflow",
                                 allow="--allow-shared-target" in sys.argv)
+    # Last offline moment before VMs boot. The config in the workspace may have been created from an
+    # older map or a different ref than this invocation's, and the map this tool builds is the one it
+    # assumes is there -- so compare that map to the WDL it will actually run before the fleet does.
+    tc.preflight("rerun submit")
     d = terra.submit(tc.NS, tc.WS, tc.NS, CONFIG, ENTITY, ETYPE, None, confirm=True)
     print(json.dumps(d, indent=1)[:600])
     terra.dump(d, str(config.work_dir("metadata") / "rerun_submission.json"))
@@ -201,6 +215,9 @@ so the run cannot inherit a stale image from a workspace attribute.
   submit --confirm  start it (real compute; --confirm is mandatory)
   --allow-unpinned-docker   let a *_docker input resolve from a workspace attribute (off by
                             default: it breaks reproducibility, so it has to be asked for)
+  --drop-branch-only-inputs  build the config for a ref that does NOT declare this branch's extra
+                            inputs (e.g. GSV_WDL_VERSION=main) by dropping them. A SEMANTIC change:
+                            it prints what it dropped and which ref it compared.
   status            recent submissions in the configured workspace""",
           file=sys.stderr if code else sys.stdout)
     raise SystemExit(code)
@@ -226,6 +243,12 @@ if __name__ == "__main__":
             confirm = True; i += 1
         elif a == "--allow-unpinned-docker":
             globals()["ALLOW_UNPINNED"] = True; i += 1
+        elif a == "--drop-branch-only-inputs":
+            # Accepted, and deliberately not stored here: batch_configs.body() reads it from sys.argv
+            # while building the map. Listed in usage() because a flag that changes what runs must be
+            # discoverable, and because this parser's job is to make typos a usage error -- an option
+            # the guard needs but the parser rejects would be an option that cannot be used here.
+            i += 1
         elif a.startswith("--"):
             raise SystemExit(f"unknown option {a!r}   (--help for the options)")
         else:

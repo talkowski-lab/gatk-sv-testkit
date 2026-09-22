@@ -106,7 +106,7 @@ Things that are per-invocation rather than per-user stay as flags or their own v
 | `MINIWDL` | `checks/wdl_gate.sh`, `terra/wdl_flat.py` | the miniwdl executable, and it is optional: without it both resolve `$PATH` → the bin next to the interpreter → `./.venv/bin` (one resolver, `./kit/gsvtk-config miniwdl`, prints the path it chose). `make setup` installs miniwdl into a venv your shell has not activated, so a PATH-only lookup reported the checker missing on machines where it passes |
 | `JAR`, `GATK_JAR` | examples, `batch_fetch_compare.sh` | a locally built GATK jar |
 | `PROFILE_BIN` | `batch_fetch_compare.sh` | an installed `gatk-sv-profile` |
-| `GSV_WDL_VERSION` | `terra/batch_rerun_step.py` | override the Dockstore version, e.g. to pin a SHA-pinned tag |
+| `GSV_WDL_VERSION` | `terra/batch_rerun_step.py` | override the Dockstore version, e.g. to pin a SHA-pinned tag. It is also the ref the rerun pre-check compares bindings against — not `GSVTK_BRANCH`, which may name something else entirely, and grading the wrong ref is a pass about a document nothing runs |
 | `CAPTURED`, `IMAGES` | `examples/replay_reference_run.sh` | local copy of that task's Cromwell `script`, and the per-arm image map |
 | `RESULTS` | `batch_fetch_compare.sh` | scratch root; `OUTPUTS`/`STAGING` and its other knobs (`TERRA_PY`, `GSUTIL`, `GATK_BIN`, `XMX`, `NUM_WORKERS`, `LABEL_A`, `LABEL_B`, `REF_DICT`, `CONTIG_LIST`, `BASELINE_PESR_VCF`, `NS`, `WS`, `ENTITY`) derive from it or are named in that script's own header |
 

@@ -97,6 +97,9 @@ python terra/batch_configs.py show                    # print every resolved inp
 python terra/batch_configs.py check --against main    # those keys vs that ref's WDL, offline
 python terra/batch_configs.py create                  # POST/overwrite the configs in YOUR workspace
 python terra/batch_configs.py validate                # Terra-side typecheck of the Dockstore WDL
+# and, for the rerun path, the same two things with the same guard:
+python terra/batch_rerun_step.py show
+python terra/batch_rerun_step.py create --confirm [--drop-branch-only-inputs]
 ```
 
 The configs are generated from one table, so a binding cannot drift between steps. Each config
@@ -127,6 +130,23 @@ maps (redacted per this repo's own audit rule, which treats a person-named branc
 identifier — see [config.md](config.md)): `<branch-under-test>` 0 of 64 rejected, `origin/main` 1
 (`10-GenotypeBatch.training_vcf`, a branch-only input), `v1.1.1` 56 findings — those maps were never
 a `v1.1.1` shape. Run `check` yourself to reproduce all three; the numbers are three commands.
+
+**The guard is on the rerun path too, and that mattered more than it looks.**
+`terra/batch_rerun_step.py` builds its config with `from batch_configs import body` — the builder,
+not the guard — so when the pre-check landed only in `batch_configs.create`/`validate`, the one path
+that actually submits stayed open: create returned 200, submit returned 400, and Terra's own
+typecheck was the thing that named the key. `create`, `validate` and `submit` each call it now. Since
+rerun's Dockstore pin is `GSV_WDL_VERSION`, which can differ from `GSVTK_BRANCH`, what it grades is
+the pin — the ref that config will really run — and it prints which ref it compared.
+
+**Want the other ref's shape? Ask for it by name.** `--drop-branch-only-inputs` removes
+known-branch-only bindings the target ref does not declare, so the map fits the ref you pointed at.
+It is deliberately not automatic, because pruning a binding is not a fix, it selects a different
+pipeline: main's `GenotypeBatch` trains PE/SR from `vcf`, the branch from a separate training VCF.
+So it drops nothing against a ref it cannot read (unverified is not evidence of absence), it prints
+each dropped key to **stderr** so `show | jq` stays valid JSON, and it prints the semantic
+consequence plus the ref it compared. If you meant to run your own branch, unset `GSVTK_BRANCH`
+instead of reaching for this flag.
 
 Two non-obvious details that cost real debugging time when wrong:
 
@@ -194,6 +214,32 @@ What `batch_rerun_step.py` guarantees is about *images*: every `*_docker` input 
 into the config it POSTs, so a rerun cannot inherit whatever the workspace attribute happened to
 point at. It does **not** re-read live workflow outputs — `batch_check_inputs.py --step 10` is the
 tool that checks bindings against the last submission's actual `inputResolutions`.
+
+### Two arms, one variable
+
+A rerun that changes the WDL ref, *and* the image, *and* reads attributes written by some earlier
+branch-era chain answers no question in particular: the changes are confounded and a diff cannot
+separate them. If the chain you froze came from a branch that also rewrote a workflow feeding this
+step, then the inputs themselves are branch-era artifacts, and running a main-shaped step over them
+and comparing to a production baseline mixes three variables at once.
+
+To ask "did my code change the output", leave one variable: same WDL ref on both arms, same frozen
+inputs, `sv_pipeline_docker` = the shipped image on one arm and your commit-pinned build on the
+other. That is two submissions of one step, and the config machinery above is what makes them
+identical apart from one line. Price it after the fact with `batch_cost.py --costs` rather than
+guessing beforehand.
+
+Two ways that design degenerates silently, both cheap to avoid:
+
+- **Both arms write the same entity attributes.** Outputs land in `*<GSVTK_NEW_SUFFIX>` (default
+  `_new`), so the second arm overwrites the first and the comparison ends up reading one run against
+  itself. Give each arm its own suffix and pass the matching `GSVTK_FROZEN_SUFFIX` to whatever reads
+  that arm back — the empty-diff failure mode in [troubleshooting.md](troubleshooting.md) is this
+  disagreement between two tools.
+- **`useCallCache: true`.** Cromwell reuses call outputs when command and inputs match, which is what
+  you want across retries and not what you want between arms if a tag is mutable. Pin both images by
+  digest or commit-SHA tag — which is what the pinning guard in this tool already refuses to let you
+  skip for `*_docker`.
 
 ```bash
 python terra/batch_save_metadata.py --outdir "$GSVTK_WORK/metadata"   # discovery, then full dumps

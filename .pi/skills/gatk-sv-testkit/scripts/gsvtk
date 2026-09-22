@@ -24,7 +24,7 @@ VENVBIN=".venv/bin"
 # Stamped, because this skill lives outside the repo it drives and an unstamped stale copy is
 # indistinguishable from a current one -- which is how a previous audit ended up quoting code that
 # did not exist. Bump it with the skill's own git tag; `gsvtk version` and `locate` print it.
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 die() { printf 'gsvtk: %s\n' "$*" >&2; exit 2; }
 

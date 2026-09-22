@@ -82,13 +82,27 @@ one and a failed verify are all refused, because "nobody checked these bytes" is
 tempted by `--allow-unverified`, say so out loud — that flag is the deliberate version of publishing
 coordinates nobody confirmed, and it prints that it was taken.
 
-`create` and `validate` pre-check the maps against `GSVTK_BRANCH`'s WDL in your own checkout and
+`create` and `validate` pre-check the maps against the target ref's WDL in your own checkout and
 refuse on an `EXTRA`/`MISSING`/`CANNOT CHECK`; without a checkout or a ref they print `pre-check
 SKIPPED`, which is not a pass. The maps are a snapshot of ONE branch's signature while `GSVTK_BRANCH`
 only picks the Dockstore URL, so a branch-only key against another ref is rejected as an extra input
 **at submission**, after the config was created -- and if that ref was never published you see a 404
 first and spend the time chasing the wrong thing. `--allow-unknown-inputs` exists; it prints that it
 took the override, and so should you.
+
+The rerun step runs the same pre-check in `create`, `validate` and `submit`, and grades
+`GSV_WDL_VERSION` (the Dockstore pin its own config carries) rather than `GSVTK_BRANCH` when those
+differ -- it imports `body()` from `batch_configs`, which is the builder and not the guard, and that
+was once enough to leave the submitting path unguarded. If you genuinely want a config shaped for a
+ref that lacks this branch's extra inputs, `--drop-branch-only-inputs` prunes the *known* branch-only
+keys against a ref it can read and prints the semantic consequence (`GenotypeBatch` trains PE/SR from
+`vcf` on main, from a separate training VCF on the branch). It is not a fix for pointing at the wrong
+ref: if you meant your branch, unset `GSVTK_BRANCH`.
+
+When the question is "did my code change the output", leave exactly one variable: same WDL ref on
+both arms, same frozen inputs, one `sv_pipeline_docker` differing. Do not also change the ref, and do
+not let both arms write the same `*<GSVTK_NEW_SUFFIX>` attributes -- the second overwrites the first
+and you end up comparing a run against itself. `docs/terra-head-to-head.md` §5 has the details.
 
 `batch_configs.py validate` also POSTs -- Terra resolves the Dockstore WDL and reports per-input
 bindings -- so it is deliberately outside the wrapper's whitelist. It is the cheapest real gate
