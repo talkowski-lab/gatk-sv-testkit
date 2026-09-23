@@ -148,6 +148,13 @@ each dropped key to **stderr** so `show | jq` stays valid JSON, and it prints th
 consequence plus the ref it compared. If you meant to run your own branch, unset `GSVTK_BRANCH`
 instead of reaching for this flag.
 
+The guard grades the **pruned** map, not the raw table: `check_maps(..., drop=...)` applies the same
+`BRANCH_ONLY_INPUTS` rule `_adapt_inputs()` uses, so `show`, `create`, `validate` and `submit` agree on
+what is about to be posted. Before that, `show --drop-branch-only-inputs` printed the 16-key body Rawls
+accepts while `create` on the same command line refused to POST it and named the key it had just
+dropped. The flag is still not a blindfold — a key outside the table is reported `EXTRA` with the flag
+set, and `probe_fixes.py`'s `drop_flag_guard` pins all three behaviours.
+
 Two non-obvious details that cost real debugging time when wrong:
 
 - **The root entity differs by step, and it is not what you would guess.** `09-MergeBatchSites`

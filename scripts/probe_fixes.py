@@ -854,6 +854,56 @@ def probe_adapt_drops() -> str:
             f"unreadable ref -> drop refused ({refused_drop})")
 
 
+def probe_drop_flag_guard() -> str:
+    """--drop-branch-only-inputs has to reach the GUARD, not only the body.
+
+    The defect: the prune lives in `_adapt_inputs()`, which `body()` calls; the gate that decides
+    whether create/validate/submit happen at all is `preflight() -> check_maps()`, and that compared
+    `spec["inputs"]` -- the raw table. So the documented escape hatch was unreachable: `show` printed
+    the 16-key body Rawls accepts, while `create` on the same command line refused to POST it and
+    named the very key it had just dropped. Three assertions, because each fails differently: with the
+    flag absent the guard must STILL refuse (a silent prune is the failure it must not become); with
+    the flag present it grades the pruned map and passes; and the flag must not BLIND it -- a key
+    outside `BRANCH_ONLY_INPUTS` is still EXTRA. Without that third one, "honour the flag" is just
+    "switch the guard off", which is what --allow-unknown-inputs already means.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_BRANCH": "probe-branch"}, "terra", "batch_configs")
+    tc = sys.modules["batch_configs"]
+    tree = TMP / "wdl-droprule"
+    _fixture_wdl(tree, "training_vcf", False)          # a main-shaped ref: declares no training_vcf
+    key = "GenotypeBatch.training_vcf"
+
+    def run(drop):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = tc.check_maps(str(tree), only="10-GenotypeBatch", drop=drop)
+        return rc, out.getvalue()
+
+    rc_no, txt_no = run(False)
+    if rc_no == 0 or f"EXTRA  {key}" not in txt_no:
+        raise AssertionError(f"the guard stopped refusing an undeclared key: {txt_no[-300:]}")
+    rc_yes, txt_yes = run(True)
+    if rc_yes != 0 or "DROPPED" not in txt_yes:
+        raise AssertionError(f"the flag never reached the guard: {txt_yes[-300:]}")
+    if "EXTRA" in txt_yes:
+        raise AssertionError("it pruned the key and still reported it as EXTRA")
+
+    bogus = "GenotypeBatch.probe_not_a_real_input"
+    spec_inputs = tc.CONFIGS["10-GenotypeBatch"]["inputs"]
+    spec_inputs[bogus] = "workspace.probe_bogus"
+    try:
+        rc_bogus, txt_bogus = run(True)
+    finally:
+        del spec_inputs[bogus]
+    if rc_bogus == 0 or f"EXTRA  {bogus}" not in txt_bogus:
+        raise AssertionError("an unknown key slipped through with the flag set -- the guard was "
+                             "switched off instead of one known key being pruned")
+    return (f"flag absent -> refuses ({rc_no}); flag present -> grades the pruned map and passes "
+            f"({rc_yes}); unknown key with flag set -> still EXTRA ({rc_bogus})")
+
+
 PROBES = [
     ("rerun_guards", probe_rerun_guards),
     ("stage_batch_row", probe_stage_batch_row),
@@ -866,6 +916,7 @@ PROBES = [
     ("map_vs_wdl", probe_map_vs_wdl),
     ("rerun_map_guard", probe_rerun_map_guard),
     ("adapt_drops", probe_adapt_drops),
+    ("drop_flag_guard", probe_drop_flag_guard),
 ]
 
 

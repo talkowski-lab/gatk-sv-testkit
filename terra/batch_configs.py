@@ -428,8 +428,17 @@ def _declared_inputs(wdl_dir: str, workflow: str):
     return declared, required
 
 
-def check_maps(wdl_dir: str, only: str | None = None) -> int:
-    """Every bound key vs what that ref declares, and every required input vs what is bound."""
+def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False) -> int:
+    """Every bound key vs what that ref declares, and every required input vs what is bound.
+
+    `drop` grades the map `body()` would actually POST. With `--drop-branch-only-inputs`,
+    `_adapt_inputs()` removes known-branch-only bindings the ref does not declare, so comparing the
+    raw table here refused -- with total confidence -- a document Rawls accepts: `show` printed a
+    16-key body, and `create` on the same command line refused to POST it while naming the key it had
+    just dropped. Same rule, same `BRANCH_ONLY_INPUTS` table, same declared set. It can only fire
+    here because `declared` came from miniwdl: the `CannotCheck` branch above already aborted when the
+    ref could not be read, and an unverified ref is not evidence that a binding is absent.
+    """
     bad = 0
     for name, spec in CONFIGS.items():
         if only and name != only:
@@ -446,11 +455,24 @@ def check_maps(wdl_dir: str, only: str | None = None) -> int:
         for k in spec["inputs"]:
             parts = k.split(".")
             (nested if len(parts) > 2 else bound).update({parts[-1]: k})
+        # The same rule _adapt_inputs() applies, so the guard and the body cannot disagree.
+        dropped = []
+        if drop:
+            dropped = [key for leaf, key in sorted(bound.items())
+                       if leaf not in declared and key in BRANCH_ONLY_INPUTS.get(name, set())]
+            for key in dropped:
+                bound.pop(key.split(".")[-1], None)
         unknown = [k for k in sorted(bound) if k not in declared]
         unbound = sorted(k for k in required if k not in bound)
         print(f"  {'BAD' if unknown or unbound else 'ok '} {name:<24} "
               f"{len(bound)} bound vs {len(declared)} declared"
-              + (f", {len(nested)} nested-call binding(s) not checked" if nested else ""))
+              + (f", {len(nested)} nested-call binding(s) not checked" if nested else "")
+              + (f", {len(dropped)} dropped by {DROP_FLAG}" if dropped else ""))
+        for key in dropped:
+            print(f"      DROPPED for this ref  {key} -- a known branch-only input this ref does not "
+                  f"declare.\n        The guard graded the PRUNED map because {DROP_FLAG} is set, so "
+                  f"this is what `body()`\n        posts. SEMANTIC change, not a fix: see the warning "
+                  f"_adapt_inputs() prints.")
         for k in unknown:
             bad += 1
             key = bound[k]
@@ -493,7 +515,7 @@ def cmd_check() -> int:
             # A ref you cannot read is not a ref that fits: say what failed, and do not exit 0.
             raise SystemExit(f"cannot read the WDL at {ref}: {e}") from None
         print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
-    return check_maps(wd, only=_flag_value("--config"))
+    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv)
 
 
 def preflight(tag: str) -> None:
@@ -521,7 +543,7 @@ def preflight(tag: str) -> None:
         raise SystemExit(f"{tag}: refusing to continue -- cannot read the WDL at {ref}: {e}.\n"
                          f"  Unverified is not verified. Fix the ref/checkout, or say you mean it "
                          f"with --allow-unknown-inputs.") from None
-    if check_maps(wd):
+    if check_maps(wd, drop=DROP_FLAG in sys.argv):
         raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
                          f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
 
