@@ -266,14 +266,16 @@ check "scripts/check_docs.py finds broken fences and dead relative links" \
 
 echo
 echo "selftest: probes for the defects a review confirmed (offline, no network, no creds)"
-# 11 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
+# 12 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
 # pins one defect that was reproduced before it was fixed (rerun-step guards, the batch row, the
 # copy-after-failed-hardlink TypeError, the WDL duplicate-definition pass-through, the frozen-publish
 # guard, miniwdl resolution in the venv, --help side effects, the hand-copied Dockstore URI, the
 # config-map-vs-WDL-ref mismatch that reached Rawls as an extra input, the fact that the pre-check
-# guarded the config path but not the rerun path that actually submits, and the three ways a
-# prune-the-branch-only-key feature could itself produce a silently wrong run).
-probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 11 \
+# guarded the config path but not the rerun path that actually submits, the three ways a
+# prune-the-branch-only-key feature could itself produce a silently wrong run, and the fact that a
+# direct-API probe cannot see the two places that turn the drop flag into a `drop=` argument -- nor the
+# command that pruned by one ref and POSTed the body of another.
+probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 12 \
     "$PY" scripts/probe_fixes.py
 printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that cannot fire is a\n'
 printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'

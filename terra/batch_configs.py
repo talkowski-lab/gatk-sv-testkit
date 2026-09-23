@@ -272,10 +272,15 @@ def _adapt_inputs(name: str, spec: dict, inputs: dict) -> dict:
     candidates = {k: v for k, v in inputs.items() if k in known}
     if not candidates or DROP_FLAG not in sys.argv:
         return inputs
-    got = declared_for_config(name)
+    # The SAME ref preflight() grades, from one place, so the guard and the body cannot be pointed at
+    # two documents. _posted_ref() refuses rather than guessing when --against names a third one, and
+    # it belongs here as much as in preflight(): by this point the message the user is reading already
+    # names the key it is removing.
+    ref = _posted_ref()
+    got = declared_for_config(name, ref)
     if got is None:
         print(f"{DROP_FLAG} ignored for {name}: cannot read the WDL at "
-              f"{_verify_ref() or 'GSVTK_BRANCH (unset)'}, and an unverified ref is not evidence that a "
+              f"{ref or 'GSVTK_BRANCH (unset)'}, and an unverified ref is not evidence that a "
               f"binding is absent.\n  Set GSVTK_GATK_SV_CHECKOUT and a resolvable GSVTK_BRANCH, or "
               f"post it as-is and accept the rejection.", file=sys.stderr)
         return inputs
@@ -285,14 +290,13 @@ def _adapt_inputs(name: str, spec: dict, inputs: dict) -> dict:
         del inputs[k]
     if dropped:
         print(f"{DROP_FLAG}: dropped {len(dropped)} binding(s) from {name} that "
-              f"{_verify_ref()} does not declare:", file=sys.stderr)
+              f"{ref} does not declare:", file=sys.stderr)
         for k in dropped:
             print(f"  - {k}", file=sys.stderr)
-        print("  This is a SEMANTIC change, not a fix: main's GenotypeBatch trains PE/SR from `vcf`, "
-              f"the\n  branch from a separate training VCF. You asked for {_verify_ref()}, which is "
-              f"NOT the "
-              f"ref these maps\n  were written against -- if you meant to run your own branch, unset "
-              f"GSVTK_BRANCH instead of\n  using this flag. What you see in `show` is what gets "
+        print(f"  This is a SEMANTIC change, not a fix: main's GenotypeBatch trains PE/SR from `vcf`, "
+              f"the\n  branch from a separate training VCF. You asked for {ref}, which is NOT the ref "
+              f"these\n  maps were written against -- if you meant to run your own branch, unset "
+              f"GSVTK_BRANCH instead\n  of using this flag. What you see in `show` is what gets "
               f"POSTed.", file=sys.stderr)
     return inputs
 
@@ -378,6 +382,35 @@ def _verify_ref() -> str:
     return VERIFY_REF or BRANCH
 
 
+def _posted_ref(tag: str = "") -> str:
+    """The one ref the guard and the body may read -- or a refusal, never two answers.
+
+    `--against` belongs to `check`: that command POSTs nothing, and asking about a ref you chose is the
+    whole reason it exists. On a command that POSTs it was a defect rather than a convenience.
+    `preflight()` graded `_flag_value("--against")` while `_adapt_inputs()` graded `_verify_ref()`, so
+    `create --confirm --against <a> --drop-branch-only-inputs` let the guard pass -- with total
+    confidence -- the pruned map of ref `a` while `body()` built and POSTed the map of
+    `GSVTK_BRANCH`/`GSV_WDL_VERSION`, which is the Dockstore pin inside that very config and so the WDL
+    Terra will actually run. A guard passing about a document nothing runs is the failure this file
+    already refuses elsewhere by carrying VERIFY_REF; with the drop flag it is worse than a wrong pass,
+    because the guard prints `DROPPED for this ref ... this is what body() posts` about a body that is
+    not the one being POSTed, and nothing but Terra can reveal the difference.
+    """
+    ref = _verify_ref()
+    against = _flag_value("--against")
+    if against and against != ref:
+        prefix = f"{tag}: " if tag else ""
+        raise SystemExit(
+            f"{prefix}refusing -- --against {against} is not the WDL this command runs "
+            f"({ref or 'GSVTK_BRANCH unset'}),\n"
+            "  and every config it POSTs pins its Dockstore version to that ref. Grading another ref "
+            "can only\n  produce a confident pass about a document nothing is about to run, and with "
+            f"{DROP_FLAG}\n  it prunes by one ref while posting the other.\n"
+            f"  To post {against}'s shape: GSVTK_BRANCH={against} (that pins Dockstore there too).\n"
+            f"  To see that ref's findings without posting: check --against {against} {DROP_FLAG}.")
+    return ref
+
+
 def declared_for_config(name: str, ref: str | None = None):
     """(declared, required) for one config's workflow at `ref` (default: what it will run).
 
@@ -428,7 +461,7 @@ def _declared_inputs(wdl_dir: str, workflow: str):
     return declared, required
 
 
-def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False) -> int:
+def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: str = "") -> int:
     """Every bound key vs what that ref declares, and every required input vs what is bound.
 
     `drop` grades the map `body()` would actually POST. With `--drop-branch-only-inputs`,
@@ -438,8 +471,13 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False) -> int
     just dropped. Same rule, same `BRANCH_ONLY_INPUTS` table, same declared set. It can only fire
     here because `declared` came from miniwdl: the `CannotCheck` branch above already aborted when the
     ref could not be read, and an unverified ref is not evidence that a binding is absent.
+
+    `ref` is only a label, but the label is the claim: `check --against <a>` grades `<a>`, while
+    `create`/`validate` grade the ref their own config runs (`_posted_ref`). Both print it, so
+    "graded" never silently means "graded against something other than what you asked for".
     """
     bad = 0
+    label = ref or _verify_ref() or "the ref under test"
     for name, spec in CONFIGS.items():
         if only and name != only:
             continue
@@ -469,10 +507,11 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False) -> int
               + (f", {len(nested)} nested-call binding(s) not checked" if nested else "")
               + (f", {len(dropped)} dropped by {DROP_FLAG}" if dropped else ""))
         for key in dropped:
-            print(f"      DROPPED for this ref  {key} -- a known branch-only input this ref does not "
-                  f"declare.\n        The guard graded the PRUNED map because {DROP_FLAG} is set, so "
-                  f"this is what `body()`\n        posts. SEMANTIC change, not a fix: see the warning "
-                  f"_adapt_inputs() prints.")
+            print(f"      DROPPED for {label}  {key} -- a known branch-only input that ref does not "
+                  f"declare.\n        {DROP_FLAG} is set, so the guard graded the map with it REMOVED "
+                  f"-- the same rule\n        `_adapt_inputs()` applies to the body it builds at that "
+                  f"ref. SEMANTIC change, not a fix:\n        see the warning `_adapt_inputs()` "
+                  f"prints.")
         for k in unknown:
             bad += 1
             key = bound[k]
@@ -515,17 +554,20 @@ def cmd_check() -> int:
             # A ref you cannot read is not a ref that fits: say what failed, and do not exit 0.
             raise SystemExit(f"cannot read the WDL at {ref}: {e}") from None
         print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
-    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv)
+    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv, ref=ref)
 
 
 def preflight(tag: str) -> None:
     """The same comparison, before anything that POSTs or burns a validation round-trip."""
+    # Resolved BEFORE the override is honoured: with --allow-unknown-inputs nothing gets compared, but
+    # body() still prunes by the ref its config runs, so an --against pointing elsewhere is still a
+    # command that means two different things and must not reach the network.
+    ref = _posted_ref(tag)
     if "--allow-unknown-inputs" in sys.argv:
         print(f"{tag}: OVERRIDE --allow-unknown-inputs taken: bindings are NOT compared to the WDL. "
               f"A config\n      Terra rejects as an extra input will still be created, and will fail "
               f"at submission.")
         return
-    ref = _flag_value("--against") or _verify_ref()
     ck = config.get("GATK_SV_CHECKOUT")
     if not ref or not ck or not os.path.isdir(ck):
         # Stated, never silent: this is the reason a wrong map used to reach submission at all.
@@ -543,7 +585,7 @@ def preflight(tag: str) -> None:
         raise SystemExit(f"{tag}: refusing to continue -- cannot read the WDL at {ref}: {e}.\n"
                          f"  Unverified is not verified. Fix the ref/checkout, or say you mean it "
                          f"with --allow-unknown-inputs.") from None
-    if check_maps(wd, drop=DROP_FLAG in sys.argv):
+    if check_maps(wd, drop=DROP_FLAG in sys.argv, ref=ref):
         raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
                          f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
 
@@ -652,6 +694,9 @@ def usage(code=0):
               --wdl-dir <dir> for a dirty tree, --config <name> for one config.
               `create` and `validate` run this first; --allow-unknown-inputs says you
               mean to post a map that does not fit the ref (it prints that it did).
+              --against belongs to THIS command only: a command that POSTs grades
+              the ref its own config runs (GSVTK_BRANCH, or GSV_WDL_VERSION on a
+              rerun), because that is the WDL Terra will actually read.
   create    POST the configs into GSVTK_TERRA_NAMESPACE/GSVTK_TERRA_WORKSPACE
               (requires --confirm: it overwrites configs a submission will read;
                refuses the shared baseline workspace unless --allow-shared-target)

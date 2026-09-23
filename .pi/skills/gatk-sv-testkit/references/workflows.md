@@ -90,12 +90,23 @@ only picks the Dockstore URL, so a branch-only key against another ref is reject
 first and spend the time chasing the wrong thing. `--allow-unknown-inputs` exists; it prints that it
 took the override, and so should you.
 
+With `--drop-branch-only-inputs` the guard grades the *pruned* map rather than the raw table -- the
+same `BRANCH_ONLY_INPUTS` rule `body()` applies -- and prints each removed key as `DROPPED for <ref>`.
+A key outside that table is still `EXTRA`, so the flag prunes, it does not blind: `EXTRA` without the
+flag means the guard really does refuse a branch-only key, and `EXTRA` with it means a key nobody has
+ever seen. Which ref the guard may read is not negotiable either: `--against` is `check`'s flag alone,
+and `create`/`validate` refuse it, because they POST configs whose Dockstore version *is* the branch
+under test -- grading a ref you picked would pass a document nothing runs, and with the drop flag set
+it prunes by one ref while posting the other. Want another ref's shape? Point `GSVTK_BRANCH` at it.
+Want its findings without posting? `check --against <ref> --drop-branch-only-inputs`.
+
 The rerun step runs the same pre-check in `create`, `validate` and `submit`, and grades
 `GSV_WDL_VERSION` (the Dockstore pin its own config carries) rather than `GSVTK_BRANCH` when those
 differ -- it imports `body()` from `batch_configs`, which is the builder and not the guard, and that
 was once enough to leave the submitting path unguarded. If you genuinely want a config shaped for a
 ref that lacks this branch's extra inputs, `--drop-branch-only-inputs` prunes the *known* branch-only
-keys against a ref it can read and prints the semantic consequence (`GenotypeBatch` trains PE/SR from
+keys against a ref it can read -- the same ref its own config runs, never a third one named by
+`--against` -- and prints the semantic consequence (`GenotypeBatch` trains PE/SR from
 `vcf` on main, from a separate training VCF on the branch). It is not a fix for pointing at the wrong
 ref: if you meant your branch, unset `GSVTK_BRANCH`.
 

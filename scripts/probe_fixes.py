@@ -12,7 +12,10 @@ same way. Same rule `scripts/selftest.sh` keeps for the checkers.
 
 Nothing here contacts Terra or GCE, needs credentials, or writes outside one temp directory:
 the Terra layer is replaced with a recorder that counts requests, so "zero requests left the
-machine" is a measured number rather than an expectation.
+machine" is a measured number rather than an expectation. It inherits nothing from the machine
+either: the `GSVTK_*` environment is cleared before the first probe, because `export
+GSVTK_GATK_SV_CHECKOUT=...` is the documented habit and env beats the profile a probe writes -- which
+made two probes answer questions about the developer's own checkout. `--env` prints what was dropped.
 
     python scripts/probe_fixes.py            # all probes, tally + nonzero on any failure
     python scripts/probe_fixes.py -v         # also print each probe's own detail lines
@@ -32,6 +35,9 @@ Probes (each names the defect it pins):
                          body() from it -- the one path that submits stayed unguarded
     adapt_drops          pruning the branch-only key must be explicit, must be verified against a
                          ref it can read, and must not rewrite CONFIGS as a side effect
+    drop_flag_guard      the guard that gates create/validate/submit has to honour the drop flag AS A
+                         COMMAND-LINE FLAG (not just as an API argument), on every path, and grade the
+                         one ref the config it POSTs will actually run
 """
 from __future__ import annotations
 
@@ -145,7 +151,10 @@ def install_recorder(terra) -> None:
     """
     def rec(name):
         def f(*a, **k):
-            REQUESTS.append((name,) + tuple(str(x) for x in a))
+            # Raw args, not str(x): a probe that has to ask what a tool ACTUALLY POSTED (did the pruned
+            # map reach Terra, or only the guard?) cannot do it against a repr() of the body. Failures
+            # print these, so keep them readable by holding the dict rather than its text.
+            REQUESTS.append((name,) + a)
             return _Resp()
         return f
     for n in ("create_workspace_config", "overwrite_workspace_config", "validate_config",
@@ -509,6 +518,37 @@ def _fixture_wdl(dirpath: Path, drop, add_required: bool) -> None:
         '  runtime { docker: "x" }\n}\n')
 
 
+def _fixture_tree(dirpath: Path, drop: str | None = None) -> None:
+    """EVERY workflow the toolkit builds, each declaring exactly the keys its own config binds.
+
+    `_fixture_wdl` writes one workflow, which is all `check --config` needs. The commands that POST
+    compare all five (`preflight()` calls `check_maps` with no `only`), and in a one-file tree the other
+    four answer `CANNOT CHECK` -- so a refusal there is not evidence that the guard caught the extra
+    key, only that SOMETHING refused. That is the ambiguity every positive control in this file exists
+    to kill, one level up. `drop` removes one declared input, which is the main-shaped case.
+    """
+    bc = sys.modules["batch_configs"]
+    (dirpath / "wdl").mkdir(parents=True, exist_ok=True)
+    for name, spec in bc.CONFIGS.items():
+        wf = spec["workflow"]
+        lines = []
+        for k, val in spec["inputs"].items():
+            leaf = k.split(".")[-1]
+            if leaf == drop:
+                continue
+            kind = "Int" if str(val).isdigit() else "String" if leaf == "batch" else "File"
+            lines.append(f"    {kind} {leaf}")
+        (dirpath / "wdl" / f"{wf}.wdl").write_text(
+            "version 1.1\n"
+            f"workflow {wf} {{\n"
+            "  input {" + "\n" + "\n".join(lines) + "\n  }\n"
+            "  call probe_task\n"
+            '  output { File o = probe_task.out }\n'
+            "}\n"
+            'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
+            '  runtime { docker: "x" }\n}\n')
+
+
 def probe_map_vs_wdl() -> str:
     """batch_configs must refuse to POST keys the target ref's WDL does not declare.
 
@@ -557,22 +597,25 @@ def probe_map_vs_wdl() -> str:
 
     # The gate itself: create() must refuse BEFORE any request leaves the machine. The override phase
     # proves the recorder records and that create() would otherwise have POSTed.
-    repo = TMP / "fakerepo"
-    _fixture_wdl(repo, "training_vcf", False)
-    env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
-               GIT_COMMITTER_EMAIL="p@p")
-    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "fixture"]):
-        subprocess.run(cmd, cwd=str(repo), env=env, check=True, capture_output=True)
-    # Not "master": the default branch name is a git config on the machine, and a probe that
-    # hardcodes it fails on boxes configured differently from the author's.
-    ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=str(repo),
-                         capture_output=True, text=True, check=True).stdout.strip()
+    #
+    # Two things this phase needed to be honest about, both found while pinning the drop flag:
+    #   * the tree declares ALL FIVE workflows. `preflight()` compares every config, and in a
+    #     one-workflow tree the other four answer CANNOT CHECK, so create() refused -- for a reason
+    #     unrelated to the extra key. Asserting on the refusal alone could not tell the two apart.
+    #   * the ref goes in GSVTK_BRANCH, not `--against`. `--against` is `check`'s flag; on a command
+    #     that POSTs it is refused outright (_posted_ref), because the configs it creates pin their
+    #     Dockstore version to GSVTK_BRANCH and grading a different ref is a confident pass about a
+    #     document nothing runs.
+    repo, ref = _fixture_repo("fakerepo", "training_vcf", all_workflows=True)
     argv_save, env_save = sys.argv, os.environ.get("GSVTK_GATK_SV_CHECKOUT")
     os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": ref}, "terra", "batch_configs")
     bc = sys.modules["batch_configs"]
+    install_recorder(sys.modules["terra"])           # fresh() re-imported terra: re-patch the calls
     try:
         REQUESTS.clear()
-        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", ref]
+        sys.argv = ["batch_configs.py", "create", "--confirm"]
         refused = None
         with contextlib.redirect_stdout(out):
             try:
@@ -581,10 +624,13 @@ def probe_map_vs_wdl() -> str:
                 refused = str(e)
         if refused is None or "do not fit the WDL" not in refused:
             raise AssertionError(f"create() posted anyway: {refused!r} / {out.getvalue()[-300:]}")
+        if "EXTRA  GenotypeBatch.training_vcf" not in out.getvalue():
+            raise AssertionError("create() refused, but not for the branch-only key -- with a "
+                                 "single-workflow fixture it refused for CANNOT CHECK instead: "
+                                 f"{out.getvalue()[-300:]}")
         if REQUESTS:
             raise AssertionError(f"create() reached Terra before refusing: {REQUESTS}")
-        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", ref,
-                    "--allow-unknown-inputs"]
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--allow-unknown-inputs"]
         REQUESTS.clear()
         with contextlib.redirect_stdout(out):
             try:
@@ -603,14 +649,22 @@ def probe_map_vs_wdl() -> str:
         else:
             os.environ["GSVTK_GATK_SV_CHECKOUT"] = env_save
     return (f"declared-everything -> clean; main-shaped tree -> extra named + labelled branch-only "
-            f"+ unbound required caught; create refused with 0 requests (override sent {sent}, "
-            f"said so: {said})")
+            f"+ unbound required caught; create refused naming that key with 0 requests (override "
+            f"sent {sent}, said so: {said})")
 
 
-def _fixture_repo(name: str, drop: str | None):
-    """A committed git repo holding the fixture WDL, so `git archive <ref>` works on it offline."""
+def _fixture_repo(name: str, drop: str | None, all_workflows: bool = False):
+    """A committed git repo holding the fixture WDL, so `git archive <ref>` works on it offline.
+
+    `all_workflows` writes every config's workflow (see `_fixture_tree`) -- needed by any probe that
+    drives `preflight()`, which compares all five and would otherwise spend its refusal on the four
+    files a single-workflow tree does not contain.
+    """
     repo = TMP / name
-    _fixture_wdl(repo, drop, False)
+    if all_workflows:
+        _fixture_tree(repo, drop)
+    else:
+        _fixture_wdl(repo, drop, False)
     env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
                GIT_COMMITTER_EMAIL="p@p")
     for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "fixture"]):
@@ -619,17 +673,23 @@ def _fixture_repo(name: str, drop: str | None):
                                 capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _fixture_two_refs(name: str):
+def _fixture_two_refs(name: str, all_workflows: bool = False):
     """One checkout, two named refs: `bad-ref` lacks training_vcf, `ok-ref` declares it.
 
     Two refs in one repo is what lets a probe ask the guard WHICH ref it compared. batch_rerun_step's
     Dockstore pin is GSV_WDL_VERSION and that may differ from GSVTK_BRANCH; a pre-check pointed at the
     other one is a confident pass about a document nothing is about to run. Branch names are created
     explicitly, so this does not depend on the machine's default branch name.
+
+    `all_workflows` writes all five workflows into both refs, so a probe driving `preflight()` sees a
+    real verdict on the config under test instead of four `CANNOT CHECK` lines.
     """
     repo = TMP / name
     fresh({"GSVTK_PROJECT": "probe"}, "terra", "batch_configs")   # fixture text comes from CONFIGS
-    _fixture_wdl(repo, "training_vcf", False)
+    if all_workflows:
+        _fixture_tree(repo, "training_vcf")
+    else:
+        _fixture_wdl(repo, "training_vcf", False)
     env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
                GIT_COMMITTER_EMAIL="p@p")
 
@@ -637,7 +697,11 @@ def _fixture_two_refs(name: str):
         return subprocess.run(["git", *a], cwd=str(repo), env=env, check=True, capture_output=True)
 
     git("init", "-q"); git("add", "-A"); git("commit", "-qm", "bad"); git("branch", "bad-ref")
-    _fixture_wdl(repo, None, False)                     # now declare everything the map binds
+    # now declare everything the map binds
+    if all_workflows:
+        _fixture_tree(repo, None)
+    else:
+        _fixture_wdl(repo, None, False)
     git("add", "-A"); git("commit", "-qm", "ok"); git("branch", "ok-ref")
     return repo
 
@@ -655,7 +719,7 @@ def probe_rerun_map_guard() -> str:
     # ref that only exists once the fixture repo is committed. BRANCH is read at import time, so a
     # single fresh() cannot both generate the fixture and name the ref.
     fresh({"GSVTK_PROJECT": "probe"}, "terra", "batch_configs")
-    repo = _fixture_two_refs("fakerepo-rerun")
+    repo = _fixture_two_refs("fakerepo-rerun", all_workflows=True)
     ref = "bad-ref"
     # The checkout goes in the ENVIRONMENT, not the profile: config.get reads GSVTK_GATK_SV_CHECKOUT
     # live, which is also what a user does (`export` it once, then run any tool).
@@ -866,6 +930,20 @@ def probe_drop_flag_guard() -> str:
     the flag present it grades the pruned map and passes; and the flag must not BLIND it -- a key
     outside `BRANCH_ONLY_INPUTS` is still EXTRA. Without that third one, "honour the flag" is just
     "switch the guard off", which is what --allow-unknown-inputs already means.
+
+    Then the paths themselves, because the three assertions above call an API and the flag is a
+    COMMAND-LINE flag. `cmd_check()` and `preflight()` each translate `DROP_FLAG in sys.argv` into that
+    `drop=` argument, and a probe that only calls `check_maps()` stays green when either translation is
+    deleted -- while `preflight()` is precisely the gate that decides whether create/validate/submit
+    happen at all. So drive both with a real argv, and assert on the body that actually leaves the
+    machine: "the guard grades the map that gets POSTed" is a claim about TWO components agreeing, and
+    only the POST is evidence of that.
+
+    Last, the ref. `preflight()` used to grade `--against` while `_adapt_inputs()` graded
+    `GSVTK_BRANCH`, so `create --against <a> --drop-branch-only-inputs` printed `DROPPED for this ref
+    ... this is what body() posts` about ref `a` and then POSTED the map of ref `b` -- which is the
+    Dockstore pin inside that same config, and so the WDL Terra will really run. Two components, each
+    self-consistent, together posting something neither of them approved. One ref, or refuse.
     """
     if not (have("firecloud") and have("WDL")):
         raise Skip("firecloud + WDL (miniwdl)")
@@ -900,8 +978,135 @@ def probe_drop_flag_guard() -> str:
     if rc_bogus == 0 or f"EXTRA  {bogus}" not in txt_bogus:
         raise AssertionError("an unknown key slipped through with the flag set -- the guard was "
                              "switched off instead of one known key being pruned")
+    # ------------------------------------------------- the two forwarding sites, driven by argv
+    # A tree declaring all five workflows: `preflight()` compares every config, and in a
+    # one-workflow tree it refuses over four `CANNOT CHECK` lines, which would let this whole phase
+    # pass without ever reaching the key it is about (same reason `_fixture_tree` exists).
+    repo, ref = _fixture_repo("fakerepo-dropfwd", "training_vcf", all_workflows=True)
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    argv_save = sys.argv
+
+    def load(branch):
+        """Re-import at `branch` (BRANCH is read at import) with the Terra calls recorded."""
+        fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+               "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": branch},
+              "terra", "batch_configs")
+        install_recorder(sys.modules["terra"])      # fresh() re-imports terra: re-patch it
+        return sys.modules["batch_configs"]
+
+    def bodies():
+        """The method-config bodies that actually reached the (recorded) Terra layer."""
+        return [x for r in REQUESTS for x in r[1:]
+                if isinstance(x, dict) and x.get("name") == "10-GenotypeBatch"]
+
+    try:
+        tc = load(ref)
+
+        def cli_check(drop):
+            sys.argv = ["batch_configs.py", "check", "--config", "10-GenotypeBatch"]
+            if drop:
+                sys.argv.append(tc.DROP_FLAG)
+            got = io.StringIO()
+            with contextlib.redirect_stdout(got):
+                rc = tc.cmd_check()
+            return rc, got.getvalue()
+
+        rc_ck_no, txt_ck_no = cli_check(False)
+        if rc_ck_no == 0 or f"EXTRA  {key}" not in txt_ck_no:
+            raise AssertionError(f"control: `check` with NO flag accepted an undeclared key "
+                                 f"(rc={rc_ck_no}), so the flagged run below proves nothing")
+        rc_ck, txt_ck = cli_check(True)
+        if rc_ck != 0 or "DROPPED" not in txt_ck:
+            raise AssertionError("`check --drop-branch-only-inputs` still refused the key it prunes: "
+                                 f"cmd_check() no longer forwards the flag (rc={rc_ck}) "
+                                 f"{txt_ck[-200:]}")
+        if ref not in txt_ck:
+            raise AssertionError("the report never named the ref it graded -- 'graded' has to say "
+                                 "against WHICH document")
+
+        # ---- preflight() -> create(): the gate that decides whether the POST happens, and the POST
+        sys.argv = ["batch_configs.py", "create", "--confirm"]
+        REQUESTS.clear()
+        refused = None
+        got = io.StringIO()
+        with contextlib.redirect_stdout(got):
+            try:
+                tc.create()
+            except SystemExit as e:
+                refused = str(e)
+        if refused is None or "do not fit the WDL" not in refused:
+            raise AssertionError(f"preflight() let an undeclared key through with no flag: "
+                                 f"{refused!r}")
+        if f"EXTRA  {key}" not in got.getvalue():
+            raise AssertionError(f"create() refused for something other than the branch-only key: "
+                                 f"{got.getvalue()[-300:]}")
+        if REQUESTS:
+            raise AssertionError(f"create() reached Terra before refusing: {len(REQUESTS)} request(s)")
+
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        REQUESTS.clear()
+        got2 = io.StringIO()
+        with contextlib.redirect_stdout(got2), contextlib.redirect_stderr(got2):
+            tc.create()                      # the recorder answers 201; nothing here should raise
+        posted = bodies()
+        if not posted:
+            raise AssertionError("control: the flagged create() POSTED no GenotypeBatch body "
+                                 f"({len(REQUESTS)} request(s)), so 'the guard grades what gets "
+                                 "POSTed' is not evidence of anything")
+        sent = posted[0]["inputs"]
+        if key in sent:
+            raise AssertionError("the guard passed the PRUNED map and body() POSTED the raw one: the "
+                                 "flag reached one component and not the other")
+        expect = len(tc.CONFIGS["10-GenotypeBatch"]["inputs"]) - 1
+        if len(sent) != expect:
+            raise AssertionError(f"it posted {len(sent)} inputs, not the pruned {expect}")
+        if key not in tc.CONFIGS["10-GenotypeBatch"]["inputs"]:
+            raise AssertionError("body() rewrote CONFIGS on the way (probe_adapt_drops pins that)")
+        guard_agrees = "DROPPED" in got2.getvalue() and ref in got2.getvalue()
+
+        # ---- one ref: the guard may grade only the document this config will run
+        # ok-ref DECLARES the key (and is what this command pins Dockstore to); bad-ref lacks it.
+        repo2 = _fixture_two_refs("fakerepo-droponeref", all_workflows=True)
+        os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo2)
+        tc = load("ok-ref")
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", "bad-ref", tc.DROP_FLAG]
+        REQUESTS.clear()
+        refused2 = None
+        got3 = io.StringIO()
+        with contextlib.redirect_stdout(got3), contextlib.redirect_stderr(got3):
+            try:
+                tc.create()
+            except SystemExit as e:
+                refused2 = str(e)
+        if refused2 is None or "--against" not in refused2 or "bad-ref" not in refused2:
+            raise AssertionError("the guard graded bad-ref and pruned there, then body() POSTED the "
+                                 f"map of ok-ref that this config runs: {refused2!r}, "
+                                 f"{len(REQUESTS)} request(s) left the machine")
+        if REQUESTS:
+            raise AssertionError(f"it POSTed while guard and body named different refs: "
+                                 f"{len(REQUESTS)} request(s)")
+        # Control: the coherent form of the same wish -- GSVTK_BRANCH names the ref whose shape you
+        # want, which is also what pins Dockstore there -- really does post the pruned body.
+        tc = load("bad-ref")
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        REQUESTS.clear()
+        got4 = io.StringIO()
+        with contextlib.redirect_stdout(got4), contextlib.redirect_stderr(got4):
+            tc.create()
+        control = bodies()
+        if not control or key in control[0]["inputs"]:
+            raise AssertionError("control: with GSVTK_BRANCH at the ref whose shape you want, the "
+                                 "flagged create() posted no pruned body -- so the refusal above is "
+                                 "a wall, not a guard")
+    finally:
+        sys.argv = argv_save
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
     return (f"flag absent -> refuses ({rc_no}); flag present -> grades the pruned map and passes "
-            f"({rc_yes}); unknown key with flag set -> still EXTRA ({rc_bogus})")
+            f"({rc_yes}); unknown key with flag set -> still EXTRA ({rc_bogus}); `check` CLI forwards "
+            f"the flag ({rc_ck_no} -> {rc_ck}, ref named: {ref in txt_ck}); create() without it names "
+            f"{key} and sends 0, with it posts {len(sent)} pruned inputs (guard said so: "
+            f"{guard_agrees}); --against bad-ref on create -> refused with 0 requests, and the "
+            f"GSVTK_BRANCH form posted the pruned body")
 
 
 PROBES = [
@@ -925,10 +1130,28 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--keep", action="store_true", help="keep the temp tree and print its path")
+    ap.add_argument("--env", action="store_true",
+                    help="keep the inherited GSVTK_* environment (a probe then reads YOUR machine)")
     a = ap.parse_args()
     VERBOSE = a.verbose
     ok = skip = fail = 0
     print(f"probes: {len(PROBES)} defects, offline, temp tree {TMP}")
+    if not a.env:
+        # A probe must not inherit the developer's machine. `export GSVTK_GATK_SV_CHECKOUT=...` is the
+        # documented habit (docs/setup.md), and an exported value beats the profile `fresh()` writes,
+        # so on a normally-configured box two probes were answering questions about the real gatk-sv
+        # tree: `rerun_guards` reached a real checkout instead of printing `pre-check SKIPPED`, and
+        # `wdl_flat_dup` resolved imports against the real WDL dir. Same for GSVTK_WORK, which
+        # `fresh()` pins to the temp tree precisely so a probe cannot drop a file in a real work
+        # directory. GSVTK_CONFIG stays -- `fresh()` has to see the profile it generates.
+        leaked = sorted(k for k in os.environ if k.startswith("GSVTK_") and k != "GSVTK_CONFIG")
+        for k in leaked:
+            os.environ.pop(k)
+        if leaked:
+            print(f"  (unset {len(leaked)} inherited key(s) so no probe reads this machine: "
+                  f"{' '.join(leaked)})")
+            print("  (a probe that NEEDS a checkout sets GSVTK_GATK_SV_CHECKOUT itself; --env keeps "
+                  "them if you mean to)")
     try:
         for name, fn in PROBES:
             REQUESTS.clear()

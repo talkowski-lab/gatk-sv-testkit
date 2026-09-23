@@ -149,11 +149,21 @@ consequence plus the ref it compared. If you meant to run your own branch, unset
 instead of reaching for this flag.
 
 The guard grades the **pruned** map, not the raw table: `check_maps(..., drop=...)` applies the same
-`BRANCH_ONLY_INPUTS` rule `_adapt_inputs()` uses, so `show`, `create`, `validate` and `submit` agree on
-what is about to be posted. Before that, `show --drop-branch-only-inputs` printed the 16-key body Rawls
-accepts while `create` on the same command line refused to POST it and named the key it had just
-dropped. The flag is still not a blindfold — a key outside the table is reported `EXTRA` with the flag
-set, and `probe_fixes.py`'s `drop_flag_guard` pins all three behaviours.
+`BRANCH_ONLY_INPUTS` rule `_adapt_inputs()` uses. Before that, `show --drop-branch-only-inputs`
+printed the 16-key body Rawls accepts while `create` on the same command line refused to POST it and
+named the key it had just dropped. The flag is still not a blindfold — a key outside the table is
+reported `EXTRA` with the flag set.
+
+**…and it grades the one ref that config runs.** `--against` belongs to `check`, and a command that
+POSTS refuses it: `create` and `validate` compare the ref their own Dockstore pin names
+(`GSVTK_BRANCH`, or `GSV_WDL_VERSION` on a rerun), because that is the WDL Terra will actually read.
+Letting you pick a different one was worse than a wrong pass — with `--drop-branch-only-inputs` the
+guard pruned the key *there* and then posted the map built from the branch, printing `DROPPED … this
+is what body() posts` about a body it had not built. To post another ref's shape, point
+`GSVTK_BRANCH` at it (that is what pins Dockstore there); to see that ref's findings without posting
+anything, `check --against <ref> --drop-branch-only-inputs`. `probe_fixes.py`'s `drop_flag_guard` pins
+both halves — including the body that actually leaves the machine, because "the guard and the body
+agree" is a claim about two components and only the POST can settle it.
 
 Two non-obvious details that cost real debugging time when wrong:
 
