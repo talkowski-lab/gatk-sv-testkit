@@ -315,7 +315,7 @@ def render(task, stub: str = 'X') -> str:
 def bash_syntax_ok(script: str) -> tuple:
     """(ok, stderr_tail). `bash -n` parses without executing, which is all any static check can do.
 
-    The temp path is stripped from the message: a finding that embeds `/var/folders/.../tmpXXXX.sh`
+    The temp path is stripped from the message: a finding that embeds `<TMPDIR>/tmpXXXX.sh`
     differs on every run, and an artifact nobody can diff against its own baseline is not evidence.
     """
     with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as fh:
