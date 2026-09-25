@@ -23,10 +23,13 @@ PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py 
 # data and no network: every one of these only prints usage and exits.
 HELP_SAFE    := checks/svshell_contract_check.py checks/svshell_jq_plumbing_scan.py \
                 compare/compare_batch_tables.py compare/diff_rd_states.py \
+                compare/table_diff.py compare/matrix_diff.py compare/site_set_diff.py \
+                compare/lineset_diff.py compare/json_diff.py compare/tar_manifest.py \
+                compare/make_fixtures.py \
                 examples/recompute_het_population.py scripts/fetch_wdl.py kit/config.py \
                 scripts/audit.py
 HELP_NUMPY   := compare/gq_scale_compare.py compare/gq_paired_compare.py \
-                compare/profile_summarize.py
+                compare/profile_summarize.py compare/vcf_paired_diff.py
 HELP_PYSAM   := compare/pair_level_concordance.py
 HELP_MINIWDL := replay/build_inputs.py
 HELP_TERRA   := $(wildcard terra/*.py)
@@ -45,7 +48,7 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + 32 selftests; needs no config file, no credentials, no network. A missing"
+	@echo "              + 55 selftests; needs no config file, no credentials, no network. A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
 	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"

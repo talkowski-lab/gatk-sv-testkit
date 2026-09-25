@@ -17,12 +17,23 @@ someone else checking it.
 | `gq_paired_compare.py` | on the *same* (site, sample) pairs, same number or different scale? | two VCFs |
 | `diff_rd_states.py` | where do RD copy-state calls disagree, per (site, sample)? | two depth VCFs |
 | `compare_batch_tables.py` | the per-column table diff, strategy-aware | the two runs' table files |
+| `table_diff.py` | any two keyed tables (TSV/CSV, gz or plain), by named key and named column | two tables |
+| `matrix_diff.py` | a wide site×sample matrix: which sample moved, which row moved | two matrices |
+| `vcf_paired_diff.py` | any `FORMAT`/`INFO` tag paired on the same (site, sample) — the general form of the two GQ tools and `diff_rd_states.py` | two VCFs |
+| `site_set_diff.py` | which sites came back, stratified by svtype / size / algorithm / contig | two VCFs |
+| `lineset_diff.py` | sample lists, interval lists, VID lists, PED-like files, compared as sets | two line files |
+| `json_diff.py` | did `inputs.json` change (paths foldable, string lists compared as sets) | two JSON / JSON.gz |
+| `tar_manifest.py` | did a bundle change — members, sizes, optionally bytes, tar-in-tar included | two tarballs or directories |
 
-Only `diff_rd_states.py` has defaults (baseline `staging/<batch>.genotyped_depth.vcf.gz`, new side
-`runs/train/train.genotyped.vcf.gz`); the other five take explicit paths, and only
-`compare_batch_tables.py` writes a file at all (at `--out-prefix`). Everything needs `numpy`,
-`pandas`, `pysam` or `bcftools` as noted in `requirements.txt` — but none of them touch the
-network, and none of them write outside the path you name.
+The last seven are generic engines; the first six are fixed rules that happen to be the ones a
+v1.1.1 head-to-head needed. Both kinds take `--json`; see **One artifact envelope** below.
+
+Seven of the thirteen need nothing but the standard library (`table_diff`, `matrix_diff`,
+`site_set_diff`, `lineset_diff`, `json_diff`, `tar_manifest`, `compare_batch_tables`); the GQ pair
+and `vcf_paired_diff` need `numpy`, `profile_summarize` needs `numpy`/`pandas`,
+`pair_level_concordance` needs `pysam` and `diff_rd_states` shells out to `bcftools`. None of them
+touch the network, and none of them write outside the path you name — `--out-prefix` and `--json`
+are the only writes anywhere in this directory.
 
 ## Read this before quoting any concordance number
 
@@ -39,6 +50,13 @@ Three properties that have each burned someone:
 3. **Marginals are not pairs.** Each side's distribution can match while the per-site values
    disagree. `gq_paired_compare.py` restricts to the intersection of (site, sample) pairs and asks
    the sharper question: on the same pair, is it the same number, or just a different scale?
+4. **Reordering is not a difference, and a duplicate is not one row.** Two pipelines' outputs
+   routinely list the same samples in a different column order, or the same columns in a different
+   order, and a positional join turns that into a phantom disagreement — or, in one case that
+   reached a fixture, compared a variant against *a different variant* sharing its ID and reported
+   the gap as a delta. Every tool here joins by **name**, and when a key repeats it prints the count
+   (`duplicate join keys: A 1, B 1 — the first record per key won, which is a choice, not a
+   measurement`) instead of folding the rows together.
 
 `compare/profile_summarize.py` is validated by a self-comparison **property**, not a shipped test:
 point it at a profile run of a callset against itself and every rate must be 1.0000
@@ -137,3 +155,81 @@ and you now know which number to stop quoting until the rule is written down.
 baseline and the new outputs, then `table` runs the differ over both sides' table files. It
 refuses a non-empty output directory without `--force`, because a half-written profile run reads
 plausibly.
+
+## Which artefact shape needs which tool
+
+The 118 production WDLs in `gatk-sv` declare a few thousand `File` outputs, and their filenames are
+not a usable index: `*.tsv.gz` covers a per-sample metric table, a site×sample matrix and a
+long-format observation list, which need three different operations. Sorting artefacts by **what a
+comparison has to do to them** is what makes the set small enough to implement:
+
+| Shape | What it looks like | What comparing it means | Tool |
+|---|---|---|---|
+| cell table | VCF: site × sample × `FORMAT` tag | pair the same (site, sample), then compare one tag | `vcf_paired_diff.py`, `gq_paired_compare.py`, `diff_rd_states.py`, `pair_level_concordance.py` |
+| keyed rows | `*.tsv.gz` with a header and a stable first column | join on the named key, diff named columns, report one-sided columns | `table_diff.py`, `compare_batch_tables.py` |
+| wide matrix | key columns + one column per sample (`all_samples.RD.txt.gz`, binned coverage, `all_batches.ploidy.tsv`) | join samples by name, report cohort change separately from value change | `matrix_diff.py` |
+| long list | unheadered 5–7 column records (`all_samples.sr.txt.gz`, `all_samples.pe.txt.gz`) | compare sets of fields, never positions | `lineset_diff.py --columns N` |
+| set | sample lists, contig lists, VID lists, PED files | set difference, with normalization opt-in | `lineset_diff.py` |
+| key→value with a preamble | `inputs.json`, metrics JSON, `.json.gz` | compare by JSON pointer, fold paths, sets for string lists | `json_diff.py` |
+| bundle | `*.tar.gz` (and tar inside tar, the `Array[Array[File]]` gCNV case) | manifest of members; bytes only when asked | `tar_manifest.py` |
+
+Three shapes are deliberately **not** covered, and pretending otherwise would be the interesting
+kind of wrong:
+
+* **parquet and pickle.** `gatk-sv-profile`'s per-contig `sites_*.parquet` and the trainers'
+  pickled models need `pyarrow`/`pickle`, which are not in `requirements.txt`. Convert them in the
+  profile environment and diff the TSV, or read them there; `compare/` stays importable on a bare
+  interpreter.
+* **figures.** A `.pdf`/`.png` difference is a judgement, and a pixel diff would be a number that
+  means nothing without a human. Read them yourself.
+* **fuzzy site matching.** `site_set_diff.py` compares exact keys and will happily tell you a site
+  you know is shared is missing, because "did the matcher pair these" is `gatk-sv-profile`'s
+  question, not this directory's. If you need the fuzzy answer, run the profiler and quote its rule.
+
+The contig trap (`chr20` in the evidence `.txt.gz` files, bare `20` in genotyped VCFs, sometimes
+both across two versions of the same cohort) is handled the same way everywhere: the tools do **not**
+quietly strip prefixes. An empty intersection exits 2 and names the contigs it saw; you then decide,
+with `--normalize chrom` (`site_set_diff.py`) or `--normalize chr` (`lineset_diff.py`), and the
+output states that normalization happened, because a comparison that silently folded namespaces is
+a comparison that hid a bug.
+
+## One artifact envelope (`--json`)
+
+Every comparator takes `--json PATH` and writes the same shape (`compare/artifact.py`):
+
+```json
+{ "tool": "table_diff", "argv": [...],
+  "inputs": {"baseline": {"path": "…", "bytes": 102, "sha256_16": "b26c4868…"}},
+  "rule": {"join": "VID", "tolerance": 0.5, "…": "every decision that makes the number mean something"},
+  "…metric keys…": {},
+  "compared_something": true }
+```
+
+`inputs` carries a hash prefix because an artifact that does not name the bytes it measured cannot
+be re-checked after a re-fetch. `rule` is not metadata: it is the written-down rule this whole
+directory exists to demand, stored next to the number it produced. `compared_something: false` means
+exit 2 — an empty result is never a silent pass.
+
+Exit codes are part of the contract across all thirteen: **0** compared and nothing outside the
+stated rule, **1** compared and found differences, **2** compared nothing (disjoint keys, no shared
+sample, unreadable join) — never a pass.
+
+## How these are tested
+
+`make smoke` used to exercise one of the six comparators, on 40 MB of real VCF, with no assertion
+about the numbers that came out. Now `compare/make_fixtures.py` writes a synthetic pair whose
+planted differences are **listed in its docstring** — 2 moved GQ cells, 2 moved `RD_CN` cells,
+1 moved `PCC` cell, 1 dropped site, 1 added site, a duplicate VID, a shuffled sample order, a
+same-size byte change in a tarball — and `scripts/selftest.sh` asserts the exit code **and** the
+number for every tool (`expect DESC WANT_RC NEEDLE… -- cmd`). Two properties are worth keeping in
+mind when you add a comparator:
+
+* the fixture pair that differs only in **column order** must come back exact 100 %, and
+* a Float `FORMAT` field must produce real statistics — the original integer-histogram tool printed
+  `mean 0.00 / zero 100 %` for `PCC`, with only a `frac` column hinting that every value had been
+  fractional.
+
+`scripts/check_artifacts.py` runs the fixture pair through every comparator that can take it and
+fails if any `--json` output is missing `tool`, `argv`, `inputs` (with a hash per file), `rule` or
+`compared_something`. That check is what caught four of the new tools inventing four slightly
+different envelopes.

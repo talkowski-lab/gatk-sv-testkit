@@ -119,7 +119,7 @@ checks/wdl_gate.sh origin/main my-branch
 docker/     gatk-sv-build.sh + remote-build.sh   build+push any branch's images, no local Docker
 terra/      recon, baseline freezing, method configs, status, cost, fetch+compare  (Terra loop)
 checks/     static checks: WDL launchability, sv_shell JSON contract, image byte-proof
-compare/    table differ, VCF concordance, GQ scale, gatk-sv-profile summariser
+compare/    13 comparators: keyed tables, site×sample matrices, VCF fields, sets, bundles
 replay/     rebuild a launchable input JSON from a captured successful run
 scripts/    fetch_wdl.py (WDLs from your checkout, never vendored), audit.py (publish guard)
 kit/        the config layer every tool reads (gsvtk-config + config.sh + config.py)

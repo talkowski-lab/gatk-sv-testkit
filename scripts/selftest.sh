@@ -63,6 +63,43 @@ canary() {
     fi
 }
 
+# expect DESC WANT_RC NEEDLE [NEEDLE...] -- CMD...
+# Two things are asserted, because a comparator has both. The exit code is part of the contract
+# (0 = compared and clean, 1 = compared and found a difference, 2 = compared NOTHING, which is never
+# a pass), and the number in the output is the actual result: a tool that exits 1 having printed
+# nothing at all has not compared anything either. `check` alone cannot catch that.
+expect() {
+    local desc="$1" want="$2"; shift 2
+    local needles=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles+=("$1"); shift; done
+    [ "$#" -gt 0 ] && shift
+    local out rc missing=""
+    out="$("$@" 2>&1)"; rc=$?
+    local n
+    # An empty NEEDLE list would expand to "unbound variable" on bash 3.2 anyway; stating it makes
+    # the rule real -- an assertion that names no number cannot fail for the right reason.
+    if [ "${#needles[@]}" -eq 0 ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s (expect was called with no NEEDLE: assert the number, not just the exit code)\n' "$desc"
+        return
+    fi
+    for n in "${needles[@]}"; do
+        printf '%s\n' "$out" | grep -qF -- "$n" || missing="$missing[$n] "
+    done
+    if [ "$rc" -ne "$want" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s (exit %s, want %s%s)\n' "$desc" "$rc" "$want" \
+            "${missing:+, and the output never says}"
+        printf '%s\n' "$out" | head -5 | sed 's/^/          /'
+    elif [ -n "$missing" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s (exit %s is right but the output never says %s)\n' "$desc" "$rc" "$missing"
+        printf '%s\n' "$out" | head -5 | sed 's/^/          /'
+    else
+        ok=$((ok + 1)); printf '  ok    %s\n' "$desc"
+    fi
+}
+
 # covcheck DESC CMD... — a jq-plumbing scan whose block coverage must be complete.
 covcheck() {
     local desc="$1"; shift
@@ -387,6 +424,89 @@ else
     fail=$((fail + 1)); printf '  FAIL  three waivers were applied and the header does not say 3\n'
 fi
 rm -f "$A/audit.local.txt"
+
+# --------------------------------------------------------------------------- comparators
+echo
+echo "comparators: every tool pinned to a synthetic pair whose differences are written down"
+# compare/ grew from six tools to thirteen and `make smoke` still only exercised one of them, on
+# 40 MB of real VCF, with no assertion about what came out. These run in about a second, on files
+# small enough that the expected number is derived by hand and stated in compare/make_fixtures.py.
+CMP="$TMP/cmp-fixtures"
+if "$PY" compare/make_fixtures.py "$CMP" >"$TMP/fixtures.out" 2>&1; then
+    ok=$((ok + 1)); printf '  ok    compare/make_fixtures.py writes the fixture pair\n'
+else
+    fail=$((fail + 1)); printf '  FAIL  compare/make_fixtures.py could not write its fixtures\n'
+    head -6 "$TMP/fixtures.out" | sed 's/^/          /'
+fi
+if [ -d "$CMP" ]; then
+    expect "table_diff: permuted columns and re-sorted rows are NOT a difference (15 cells, 0 deltas),
+             and the duplicate SV_1 key is disclosed rather than folded" 0 \
+        'MATCH 15, DELTA 0' 'duplicate join keys: A 1, R 1' -- \
+        "$PY" compare/table_diff.py "$CMP/tbl_a.tsv" "$CMP/tbl_reordered.tsv" --key vid --label-a A --label-b R
+    expect "table_diff: the planted delta is found, and the column only B has is reported, not diffed" 1 \
+        'DELTA 1' 'ONE_SIDED columns (not diffed): pe_min_support' -- \
+        "$PY" compare/table_diff.py "$CMP/tbl_a.tsv" "$CMP/tbl_b.tsv" --key vid
+    expect "table_diff: two files with no key in common exit 2, they do not report a clean comparison" 2 \
+        'FATAL: 0 shared vid values, so nothing was compared' -- \
+        "$PY" compare/table_diff.py "$CMP/tbl_a.tsv" "$CMP/tbl_disjoint.tsv" --key vid
+    expect "table_diff: gatk-sv-profile's gzipped same-schema twins diff cell by cell (an integer column
+             and a float column in one table)" 1 'mean_gq' 'DELTA 1' -- \
+        "$PY" compare/table_diff.py "$CMP/profile_a.tsv.gz" "$CMP/profile_b.tsv.gz" --key metric
+    expect "matrix_diff: a file compared to itself is exact, and the cell count is the whole grid" 0 \
+        'inside tolerance 20 (100.0000%)' -- \
+        "$PY" compare/matrix_diff.py "$CMP/wide_a.tsv" "$CMP/wide_a.tsv"
+    expect "matrix_diff: shuffled sample columns still find exactly the one moved cell, and a cohort
+             change is reported as a cohort change" 1 'shared 4, baseline-only 1, new-only 1' \
+        'inside tolerance 14 (93.3333%)' -- \
+        "$PY" compare/matrix_diff.py "$CMP/wide_a.tsv" "$CMP/wide_b.tsv"
+    expect "matrix_diff: a grid that diverges mid-file is refused, not half-compared" 2 'diverged' -- \
+        "$PY" compare/matrix_diff.py "$CMP/wide_a.tsv" "$CMP/wide_c.tsv"
+    expect "vcf_paired_diff: permuted sample columns give exact 100%, and a repeated VID is not paired
+             against a different variant (this bug produced 3 phantom cells before the fixture caught it)" \
+        0 'exact 100.0000%' 'were NOT compared' -- \
+        "$PY" compare/vcf_paired_diff.py "$CMP/geno_a.vcf" "$CMP/geno_same.vcf" --field FORMAT:GQ
+    expect "vcf_paired_diff: the planted GQ, RD_CN and PCC moves are each found" 1 \
+        'FORMAT:GQ=DELTA' 'FORMAT:RD_CN=DELTA' 'FORMAT:PCC=DELTA' -- \
+        "$PY" compare/vcf_paired_diff.py "$CMP/geno_a.vcf" "$CMP/geno_b.vcf" \
+        --field FORMAT:GQ --field FORMAT:RD_CN --field FORMAT:PCC
+    expect "vcf_paired_diff: a Float FORMAT field is not tested with an integer tolerance" 1 \
+        'values are NOT integers here' -- \
+        "$PY" compare/vcf_paired_diff.py "$CMP/geno_a.vcf" "$CMP/geno_b.vcf" --field FORMAT:PCC
+    expect "site_set_diff: the dropped INV and the added BND are a set difference with the strata named" 1 \
+        'shared keys 4  baseline-only 1  new-only 1' -- \
+        "$PY" compare/site_set_diff.py "$CMP/geno_a.vcf" "$CMP/geno_b.vcf"
+    expect "lineset_diff: sample lists that differ by one name on each side are reported by name" 1 \
+        'shared 2, only in A 1, only in B 1' 'SAMPLE2' 'SAMPLE4' -- \
+        "$PY" compare/lineset_diff.py "$CMP/list_a.txt" "$CMP/list_b.txt"
+    expect "lineset_diff: chr20 vs 20 is a difference UNTIL normalization is asked for, and the tool
+             says which it did either way" 1 'normalization: NONE' -- \
+        "$PY" compare/lineset_diff.py "$CMP/list_chr.txt" "$CMP/list_nochr.txt"
+    expect "lineset_diff: the same pair with --normalize chr is equal, and says so" 0 \
+        'normalization: chr' -- \
+        "$PY" compare/lineset_diff.py "$CMP/list_chr.txt" "$CMP/list_nochr.txt" --normalize chr
+    expect "json_diff: an inputs.json pair differing in two paths, one number and one added key is
+             counted per kind" 1 '1 added' '1 numeric' '2 value/type' -- \
+        "$PY" compare/json_diff.py "$CMP/inputs_a.json" "$CMP/inputs_b.json"
+    expect "json_diff: --fold-paths removes the path differences and ONLY those" 1 \
+        '2 difference(s)' -- \
+        "$PY" compare/json_diff.py "$CMP/inputs_a.json" "$CMP/inputs_b.json" --fold-paths
+    expect "tar_manifest: a same-size byte change is NOT claimed as identical when --hash was not given,
+             and the output says so instead of implying the bundles match" 1 \
+        'byte identity not checked' -- \
+        "$PY" compare/tar_manifest.py "$CMP/bundle_a.tar.gz" "$CMP/bundle_b.tar.gz"
+    expect "tar_manifest: with --hash the same-size byte change is found" 1 '1 byte-differing' -- \
+        "$PY" compare/tar_manifest.py "$CMP/bundle_a.tar.gz" "$CMP/bundle_b.tar.gz" --hash
+    expect "gq_paired_compare: a reordered header is matched by name (this pair used to exit 2)" 0 \
+        'matched BY NAME' 'exact 100.0000%' -- \
+        "$PY" compare/gq_paired_compare.py "$CMP/geno_a.vcf" "$CMP/geno_same.vcf" --field GQ --scale 1/1
+    expect "gq_scale_compare: a Float field is binned finely enough to report its real distribution
+             (it used to print mean 0.00 / zero 100%)" 0 'PCC=1/1000' -- \
+        "$PY" compare/gq_scale_compare.py "$CMP/geno_a.vcf" "$CMP/geno_b.vcf" --fields GQ,PCC
+    expect "gq_scale_compare: an uncompressed VCF is read, not a traceback" 0 'GQ=1/1' -- \
+        "$PY" compare/gq_scale_compare.py "$CMP/geno_a.vcf" "$CMP/geno_b.vcf" --fields GQ
+    check "--json writes the one envelope for every comparator (tool/argv/inputs+hash/rule/verdict)" \
+        "$PY" scripts/check_artifacts.py "$CMP"
+fi
 
 echo
 echo "selftest: probes for the defects a review confirmed (offline, no network, no creds)"

@@ -29,6 +29,8 @@ import sys
 
 import pysam
 
+import artifact
+
 
 def gts(path: str) -> tuple:
     """vid -> {sample: genotype-string-or-None}, plus the sample order from the header."""
@@ -65,15 +67,26 @@ def main() -> int:
     ap.add_argument("--label-a", default="A")
     ap.add_argument("--label-b", default="B")
     ap.add_argument("--code", action="store_true", help="also print the full GT drift matrix")
+    ap.add_argument("--json", dest="json_out", help="write the machine-readable artifact here")
     a = ap.parse_args()
 
     A, sA, dupA = gts(a.vcf_a)
     B, sB, dupB = gts(a.vcf_b)
     print(f"# {a.label_a}: {len(A)} sites with VID ({dupA} duplicate VIDs) | {len(sA)} samples")
     print(f"# {a.label_b}: {len(B)} sites with VID ({dupB} duplicate VIDs) | {len(sB)} samples")
+    rule = {"join": "VCF ID (VID); (CHROM,POS,REF,ALT) intersects near zero across these "
+                   "pipelines because GenotypeSVs resolves REF and writes BNDs",
+            "both_called": "both sides have a non-no-call GT",
+            "match": "GT allele SETS compared unphased, so 0|1 == 1|0"}
+    inputs = {**artifact.input_file(a.label_a, a.vcf_a, sites=len(A), duplicate_vids=dupA),
+              **artifact.input_file(a.label_b, a.vcf_b, sites=len(B), duplicate_vids=dupB)}
     if set(sA) != set(sB):
         print(f"  !! sample sets differ: only-A {sorted(set(sA) - set(sB))[:5]} "
               f"only-B {sorted(set(sB) - set(sA))[:5]}")
+        artifact.write(a.json_out, artifact.envelope(
+            "pair_level_concordance", inputs, rule,
+            {"reason": "the two files share no usable sample set", "samples_a": len(sA),
+             "samples_b": len(sB)}, verdict="NOTHING_COMPARED", compared_something=False))
         return 2
     shared = sorted(set(A) & set(B))
     print(f"# shared VIDs {len(shared)}  "
@@ -99,6 +112,16 @@ def main() -> int:
         print(f"    drift {ga:>5s} -> {gb:<5s} {n:8d}  ({n / both:.6f})")
     print(f"# (total discordant pairs {sum(drift.values())}, "
           f"{sum(drift.values()) / both:.6f} of both-called)")
+    artifact.write(a.json_out, artifact.envelope(
+        "pair_level_concordance", inputs, rule,
+        {"shared_vids": len(shared), "both_called_pairs": both, "exact_match": exact,
+         "exact_match_rate": exact / both if both else None,
+         "recovery": {f"{a.label_a}->{a.label_b}": len(shared) / len(A) if A else None,
+                      f"{a.label_b}->{a.label_a}": len(shared) / len(B) if B else None},
+         "samples": len(sA), "duplicate_vids": {a.label_a: dupA, a.label_b: dupB},
+         "drift": {f"{ga} -> {gb}": n for (ga, gb), n in drift.most_common(200)}},
+        verdict="MEASURED — pass/fail is the caller's call",
+        compared_something=bool(both)))
     return 0
 
 

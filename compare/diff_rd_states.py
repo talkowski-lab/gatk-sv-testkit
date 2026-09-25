@@ -21,6 +21,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kit"))
 import config  # noqa: E402
+import artifact  # noqa: E402
 
 
 def _default_baseline() -> str:
@@ -34,8 +35,8 @@ FMT = "[%CHROM\t%POS\t%INFO/END\t%INFO/SVLEN\t%INFO/SVTYPE\t%SAMPLE\t%RD_CN\n]"
 
 
 def parse_args(argv):
-    """Positional NEW, plus --baseline; keeps the original `diff_rd_states.py FILE` usage."""
-    global BASE, NEW
+    """Positional NEW, plus --baseline and --json; keeps the original `diff_rd_states.py FILE` usage."""
+    global BASE, NEW, JSON_OUT
     rest = []
     i = 0
     while i < len(argv):
@@ -45,6 +46,9 @@ def parse_args(argv):
         if a == "--baseline":
             i += 1
             BASE = argv[i]
+        elif a == "--json":
+            i += 1
+            JSON_OUT = argv[i]
         else:
             rest.append(a)
         i += 1
@@ -53,15 +57,37 @@ def parse_args(argv):
     return rest
 
 
+JSON_OUT = None
+
+
+def _query(path, fmt):
+    """One `bcftools query`, with a message instead of a traceback when it fails.
+
+    A CalledProcessError from here used to print a Python stack ending in `returned non-zero exit
+    status 255`, which tells a reader nothing about the VCF header that bcftools rejected. bcftools'
+    own last lines do, so they are quoted, and the run is recorded as having compared nothing.
+    """
+    try:
+        return subprocess.run(["bcftools", "query", "-f", fmt, path],
+                              capture_output=True, text=True, check=True, errors="replace")
+    except FileNotFoundError:
+        _nothing("bcftools is not on PATH")
+        sys.exit("FATAL: bcftools is not on PATH, and this script reads VCFs through it.\n"
+                 "       conda install -c bioconda bcftools -- docs/setup.md")
+    except subprocess.CalledProcessError as exc:
+        _nothing(f"bcftools could not read {path}")
+        tail = (exc.stderr or "").strip().splitlines()
+        sys.exit(f"FATAL: `bcftools query` failed on {path} (exit {exc.returncode}):\n"
+                 + "\n".join(f"       {line}" for line in (tail[-3:] or ["(bcftools printed nothing)"]))
+                 + "\n       Typical causes: the INFO tags above are not declared in the header, or\n"
+                   "       the file is not bgzip+tabixed and bcftools refused it.")
+
+
 def dump(path):
     states = {}    # (key, sample) -> state string
     samples = set()
     keysamples = {}
-    p = subprocess.run(
-        ["bcftools", "query", "-f", FMT, path],
-        capture_output=True, text=True, check=True,
-        errors="replace",
-    )
+    p = _query(path, FMT)
     for line in p.stdout.splitlines():
         cols = line.rstrip("\n").split("\t")
         if len(cols) != 7:
@@ -76,10 +102,7 @@ def dump(path):
     # state a last-write-wins accident. The states pass above cannot see that (it collapses into the
     # dict), so count the raw records in a second query -- the cheap, honest way to know how much of
     # the comparison rests on a collision.
-    p2 = subprocess.run(
-        ["bcftools", "query", "-f", "%CHROM\t%POS\t%INFO/END\t%INFO/SVLEN\t%INFO/SVTYPE\n", path],
-        capture_output=True, text=True, check=True,
-    )
+    p2 = _query(path, "%CHROM\t%POS\t%INFO/END\t%INFO/SVLEN\t%INFO/SVTYPE\n")
     dups = Counter()
     for line in p2.stdout.splitlines():
         c = line.rstrip("\n").split("\t")
@@ -98,6 +121,17 @@ for _label, _path in (("baseline", BASE), ("new", NEW)):
                          f"  baseline side: python terra/stage_inputs.py (docs/local-replay.md)\n"
                          f"  new side:      terra/batch_fetch_compare.sh fetch (docs/terra-head-to-head.md)")
 
+def _nothing(reason):
+    """A run that compared nothing still writes an artifact, so 'empty' is never silent."""
+    artifact.write(JSON_OUT, artifact.envelope(
+        "diff_rd_states",
+        {**artifact.input_file("baseline", BASE), **artifact.input_file("java", NEW)},
+        {"join": "coordinate key (CHROM,POS,END,SVLEN,SVTYPE) — variant IDs are rewritten across "
+                 "versions, so an ID join here would compare nothing",
+         "value": "FORMAT/RD_CN copy state", "state_sets": "state 1 or 3 (DEL-leaning / DUP-leaning)"},
+        {"reason": reason}, verdict="NOTHING_COMPARED", compared_something=False))
+
+
 base_states, base_keys, base_samples, base_dup = dump(BASE)
 new_states, new_keys, new_samples, new_dup = dump(NEW)
 
@@ -114,6 +148,7 @@ print(f"matched site keys: {len(common_keys)} (of {len(base_keys)} baseline dept
 if not common_keys:
     # A comparison of nothing. Everything below would print 0 / 0.0000 / n/a and exit 0, which reads
     # like "the two agree" -- which is exactly the false pass this file exists to prevent.
+    _nothing("no site key matched between the two files")
     sys.exit("FATAL: no site key matched between the two files, so nothing was compared.\n"
              "       Check the contig naming (chr20 vs 20) and that both paths are the files you\n"
              "       think they are -- docs/local-replay.md")
@@ -175,6 +210,7 @@ if unparseable:
         print(f"  {side:8s} {val!r:20s} x{c}")
 if total == 0:
     # Both fractions below divide by this. Zero comparable observations is not 100 % agreement.
+    _nothing("every record was no-call on both sides, or unparseable")
     sys.exit("FATAL: 0 comparable observations (every record was no-call on both sides, or "
              "unparseable),\n       so there is no agreement figure to report.")
 print(f"\ncomparable obs: {total}; agree {agree} ({agree / total:.4f}); mismatch {mism}")
@@ -211,3 +247,19 @@ print(f"\nobs with |state diff| == 1: {one_off} ({one_off / total:.4f} of compar
 # total > 0 is proven above, so this script only ever exits 0 after comparing something.
 print(f"\nverdict: compared {total} obs across {len(common_keys)} shared site keys "
       f"({mism} mismatched); this prints numbers, it does not judge them pass/fail.")
+artifact.write(JSON_OUT, artifact.envelope(
+    "diff_rd_states",
+    {**artifact.input_file("baseline", BASE), **artifact.input_file("java", NEW)},
+    {"join": "coordinate key (CHROM,POS,END,SVLEN,SVTYPE); samples by name",
+     "value": "FORMAT/RD_CN copy state", "ambiguous_keys": "counted, last-writer-wins per (key,sample)"},
+    {"comparable_observations": total, "agree": agree, "agree_rate": agree / total,
+     "mismatch": mism, "shared_site_keys": len(common_keys),
+     "baseline_site_keys": len(base_keys), "java_site_keys": len(new_keys),
+     "ambiguous_site_keys": {"baseline": base_dup, "java": new_dup},
+     "state_1_3": {"baseline": len(set_base13), "java": len(set_new13), "shared": len(both),
+                   "symmetric_difference": _sd, "rel_diff_vs_baseline": _rel},
+     "off_by_one": one_off,
+     "confusion_matrix": {f"{b}->{n}": c for (b, n), c in conf.items()},
+     "excluded_not_integer": {f"{side}:{val}": c for (side, val), c in unparseable.items()}},
+    verdict="MEASURED — pass/fail is the caller's call",
+    compared_something=total > 0))

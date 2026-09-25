@@ -194,8 +194,8 @@ write-once, is in [terra-head-to-head.md](terra-head-to-head.md).
 
 ## 5. Loop: "the numbers moved — do they match?"
 
-Six comparators, one rule each, all of them written down so a number survives someone checking it.
-They take explicit paths, touch no network, and write nothing except the one tool with `--out-prefix`.
+Thirteen comparators, one rule each, all of them written down so a number survives someone checking
+it. They take explicit paths, touch no network, and their only writes are `--out-prefix` and `--json`.
 
 | Tool | Question it answers | Needs |
 |---|---|---|
@@ -205,6 +205,17 @@ They take explicit paths, touch no network, and write nothing except the one too
 | `gq_paired_compare.py` | on the *same* (site, sample) pairs: same number, or different scale? | two VCFs |
 | `diff_rd_states.py` | where do RD copy-state calls disagree? | two depth VCFs |
 | `compare_batch_tables.py` | the per-column table diff, strategy-aware | the two runs' table files |
+| `table_diff.py` | any two keyed tables (gz or plain), by named key and named column | two tables |
+| `matrix_diff.py` | a site×sample matrix: which sample moved, which row moved | two matrices |
+| `vcf_paired_diff.py` | any `FORMAT`/`INFO` tag paired on the same (site, sample) | two VCFs |
+| `site_set_diff.py` | which sites came back, stratified by svtype / size / algorithm | two VCFs |
+| `lineset_diff.py` | sample lists, interval lists, VID lists, as sets | two line files |
+| `json_diff.py` | did `inputs.json` change | two JSON / JSON.gz |
+| `tar_manifest.py` | did a bundle change (tar-in-tar included) | two tarballs or dirs |
+
+The last seven are generic; the first six are the fixed rules a v1.1.1 head-to-head happened to need.
+Every one of them takes `--json`, which writes `{tool, argv, inputs+hash, rule, …, compared_something}`
+— the rule that produced a number travels with the number.
 
 Run the differ with nothing in it and it tells you it compared nothing, with exit 1, instead of
 printing a tidy empty table:

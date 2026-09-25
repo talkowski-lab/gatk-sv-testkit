@@ -44,6 +44,8 @@ import sys
 import numpy as np
 import pandas as pd
 
+import artifact
+
 # metric table -> (relative path, value columns, weight columns, rate columns of interest)
 TABLES = {
     "genotype_concordance": "genotype_concordance/tables/concordance_metrics.tsv.gz",
@@ -72,12 +74,13 @@ def col(df, base, label, where):
     return df[name]
 
 
-def summarize(outdir, label_a, label_b):
+def summarize(outdir, label_a, label_b, json_out=None):
     missing = [k for k, rel in TABLES.items() if not os.path.isfile(os.path.join(outdir, rel))]
     if missing:
         print(f"ERROR: missing table(s) for {missing} under {outdir}", file=sys.stderr)
         print("Expected a completed `gatk-sv-profile run` output dir.", file=sys.stderr)
         return 2
+    metrics = {"concordance": {}, "exact_match": {}, "site_overlap": {}}
 
     print(f"# site-weighted summary of {outdir}")
     print(f"#   A = {label_a}   B = {label_b}")
@@ -94,6 +97,8 @@ def summarize(outdir, label_a, label_b):
         fmt = lambda v: "  n/a " if v is None else f"{v:.4f}"
         print(f"  {metric:32s} A-side {fmt(a)} ({na:4d} rows, {da:4d} NaN dropped)"
               f"   B-side {fmt(b)} ({nb:4d} rows, {db:4d} NaN dropped)")
+        metrics["concordance"][metric] = {"a_side": a, "b_side": b, "a_rows": na, "b_rows": nb,
+                                         "a_nan_dropped": da, "b_nan_dropped": db}
     # A-side weights answer "of the baseline's calls, how much agrees", and vice versa.
     print("  (A-side = fraction of baseline genotype calls agreeing; B-side = same from the new side)")
 
@@ -112,6 +117,8 @@ def summarize(outdir, label_a, label_b):
         filled = e[rate_col].fillna(0.0)
         fv = float(np.average(filled, weights=e.n_sites))
         print(f"  {nice:24s} {fv:.6f}   (NaN -> 0 assumed; {d} of {len(e)} rows NaN)")
+        metrics["exact_match"][nice] = {"value": fv, "nan_rows": d, "total_rows": len(e),
+                                       "nan_treated_as": 0.0}
 
     o = pd.read_csv(os.path.join(outdir, TABLES["site_overlap"]), sep="\t")
     oa = o[col(o, "n_total", label_a, "site_overlap") > 0]
@@ -125,6 +132,23 @@ def summarize(outdir, label_a, label_b):
     print(f"  pct_matched A->B {a:.4f}   B->A {b:.4f}")
     print(f"  sum-ratio cross-check  A->B {ma/sa:.4f} ({ma}/{sa})   B->A {mb/sb_:.4f} ({mb}/{sb_})"
           f"   [n_total sums exceed record counts when a site carries >1 algorithm]")
+    metrics["site_overlap"] = {"pct_matched_a_to_b": a, "pct_matched_b_to_a": b,
+                               "sum_ratio_a_to_b": ma / sa if sa else None,
+                               "sum_ratio_b_to_a": mb / sb_ if sb_ else None,
+                               "n_total_sums": {label_a: sa, label_b: sb_},
+                               "n_matched_sums": {label_a: ma, label_b: mb}}
+    artifact.write(json_out, artifact.envelope(
+        "profile_summarize", {"profile_run_dir": str(outdir)},
+        {"weighting": "site-weighted; rows with n_sites>0 only; each side filtered and weighted on "
+                      "its OWN counts",
+         "known_limitation": "gatk-sv-profile explodes each site once per algorithm, so bucket sums "
+                             "double-count multi-caller sites; use the pair/matcher count for "
+                             "'what fraction came back'",
+         "tables": TABLES},
+        metrics,
+        verdict="AGGREGATED from a gatk-sv-profile run — the bucketing caveat above travels with the "
+                "number",
+        compared_something=bool(metrics["concordance"] or metrics["site_overlap"])))
     return 0
 
 
@@ -133,8 +157,9 @@ def main():
     p.add_argument("outdir", help="gatk-sv-profile output directory")
     p.add_argument("--label-a", default="baseA")
     p.add_argument("--label-b", default="baseB")
+    p.add_argument("--json", dest="json_out", help="write the machine-readable artifact here")
     args = p.parse_args()
-    return summarize(os.path.abspath(args.outdir), args.label_a, args.label_b)
+    return summarize(os.path.abspath(args.outdir), args.label_a, args.label_b, args.json_out)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ import os
 import sys
 from pathlib import Path
 
+import artifact
+
 EXACT, REL, ABS, STRATEGY, SCALE = "exact", "rel", "abs", "strategy", "scale"
 REL_TOL, ABS_TOL, QC_TOL = 1e-9, 1e-4, 1e-4  # QC_TOL = print precision of the diagnostics file
 HEADER = ["surface", "param", "baseline", "new", "abs_diff", "rel_pct", "verdict"]
@@ -218,6 +220,7 @@ def main():
     ap.add_argument("--baseline-dir", type=Path, required=True)
     ap.add_argument("--new-dir", type=Path, required=True)
     ap.add_argument("--out-prefix", type=Path, help="write <prefix>.tsv ('.tsv' appended if absent)")
+    ap.add_argument("--json", dest="json_out", help="write the machine-readable artifact here")
     ap.add_argument("--baseline-file", action="append", default=[], metavar="ROLE=PATH")
     ap.add_argument("--new-file", action="append", default=[], metavar="ROLE=PATH")
     ap.add_argument("--max-rows", type=int, default=20, help="stdout rows per surface; TSV is complete")
@@ -253,6 +256,23 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\t".join(HEADER) + "\n" + "".join("\t".join(map(str, r)) + "\n" for r in rows))
         print("wrote %d rows -> %s" % (len(rows), out))
+    artifact.write(a.json_out, artifact.envelope(
+        "compare_batch_tables",
+        {"baseline-dir": {"path": str(a.baseline_dir),
+                          "files": {k: str(v) for k, v in paths_b.items() if v}},
+         "new-dir": {"path": str(a.new_dir), "files": {k: str(v) for k, v in paths_n.items() if v}}},
+        {"roles": {k: {"baseline": v[0], "new": v[1]} for k, v in PATTERNS.items()},
+         "tolerances": {"exact": "integer counts and tallies must match digit for digit",
+                        "rel": REL, "abs": ABS_TOL, "qc_print_precision": QC_TOL},
+         "strategy_columns": [p for p, kind in SR_SPECS if kind == STRATEGY] + sorted(RENAMES),
+         "scale_note": SCALE_NOTE,
+         "ambiguity": "a role matching more than one file is reported, never guessed"},
+        {"rows": [dict(zip(HEADER, map(str, r))) for r in rows],
+         "summary": {v: sum(1 for r in rows if r[6] == v) for v in ("MATCH", "DELTA", "STRATEGY",
+                                                                    "MISSING")},
+         "notes": notes_b + notes_n + notes},
+        verdict="STRATEGY rows are behaviour/scale changes and are never a numeric verdict",
+        compared_something=not all_missing))
     if all_missing:
         sys.exit(1)
 
