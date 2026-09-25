@@ -187,6 +187,42 @@ Say, in this order, before running it:
 Never present a mutating run as finished when it only reached `--dry-run`, and never report
 `--check` success as proof the build will work — it verifies read paths, not push rights.
 
+## 5. Facts you should not be typing by hand
+
+Three questions every branch asks, where the answer lives upstream or inside one artifact — not in a
+file in this repo:
+
+```bash
+# "what breaks if I change this file?" (script edges included; a full-tree parse is ~34 s)
+./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target Structs.wdl
+
+# "what does production actually pin?" read from gatk-sv's dockerfiles at a ref, git show only
+./scripts/prod_pins.py --repo "$GSVTK_GATK_SV_CHECKOUT" --ref origin/main
+
+# "what does THIS artifact contain?" counted independently, no second arm
+./compare/artifact_tally.py run.vcf --info MOI --header-assert '##INFO=<ID=MOI,'
+./compare/artifact_tally.py run.vcf --info SVTYPE --invariant 'info=SVTYPE=DEL:0'   # VIOLATED exits 1
+```
+
+The `--invariant` form exists because a comparator once asserted `CTX == 0` on an arm whose baseline
+holds 7 such records, and an `elif` chain skipped the checks after it — a false REVIEW over good data.
+Every invariant is measured and printed with both numbers whether or not the previous one failed, so a
+violation is a finding rather than a gap in the report.
+
+On the Terra side, two things that were hand-assembled in `curl` in every review: `terra/batch_peek.py`
+for a bounded call-level peek (what is running, what retried, what broke first — its live path needs
+credentials and is named as unexercised in the offline gate), and `terra/fetch_outputs.py`, which takes
+the **workflow output name** out of Cromwell metadata instead of a bucket path you guessed:
+
+```bash
+./terra/fetch_outputs.py --metadata "$GSVTK_WORK"/metadata/run1.*.json \
+    --output GATKSVPipelineSingleSample.svVCF --dry-run
+```
+
+`--dry-run` prints the exact `gsutil -m cp -n` line without running it, and "the workflow never declared
+that name" (exit 3) is a different answer from "declared, but this run produced no file for it"
+(exit 4) — the tool says so, because conflating them is how a finished-but-empty output gets re-run.
+
 ## Where the real documentation lives
 
 In the checkout, not in this skill:
