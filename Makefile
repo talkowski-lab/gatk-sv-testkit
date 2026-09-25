@@ -22,16 +22,20 @@ PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py 
 # Tools that accept --help AND are safe to invoke with no config file, no credentials, no
 # data and no network: every one of these only prints usage and exits.
 HELP_SAFE    := checks/svshell_contract_check.py checks/svshell_jq_plumbing_scan.py \
+                compare/artifact_tally.py \
                 compare/compare_batch_tables.py compare/diff_rd_states.py \
                 compare/table_diff.py compare/matrix_diff.py compare/site_set_diff.py \
                 compare/lineset_diff.py compare/json_diff.py compare/tar_manifest.py \
                 compare/make_fixtures.py \
                 examples/recompute_het_population.py scripts/fetch_wdl.py kit/config.py \
-                scripts/audit.py
+                scripts/audit.py scripts/prod_pins.py
 HELP_NUMPY   := compare/gq_scale_compare.py compare/gq_paired_compare.py \
                 compare/profile_summarize.py compare/vcf_paired_diff.py
 HELP_PYSAM   := compare/pair_level_concordance.py
-HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py
+# checks/wdl_reach.py is here because its --help works without miniwdl but importing the module does
+# not: it builds its graph out of the AST. The sweep skips this whole list when miniwdl is absent,
+# which is honest -- a --help it cannot reach is not a --help it ran.
+HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py
 HELP_TERRA   := $(wildcard terra/*.py)
 HELP_SH      := checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_compare.sh \
                 examples/replay_reference_run.sh
@@ -48,7 +52,7 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 58 selftests; needs no config file, no credentials, no"
+	@echo "              + publish audit + 78 selftests; needs no config file, no credentials, no"
 	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
 	@echo "              untracked file passes this gate and fails it one commit later. A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"

@@ -38,6 +38,14 @@ Probes (each names the defect it pins):
     drop_flag_guard      the guard that gates create/validate/submit has to honour the drop flag AS A
                          COMMAND-LINE FLAG (not just as an API argument), on every path, and grade the
                          one ref the config it POSTs will actually run
+    listing_lie          the fiss client answered [] for a workspace holding 5 submissions; an empty
+                         listing now names the endpoint, and disagreement prints both counts
+    recon_empty_inventory  recon exited 0 on that empty answer: its failure counter reads printed
+                         " failed:" lines and a quiet empty printed none
+    step_lookup_names_itself  the step->workflow map was copied into three tools, and a lookup that
+                         missed died with a bare StopIteration
+    call_cache           call caching was a value the builder carried, not a choice the command line made;
+                         batch_rerun_step.py imported it and POSTed a cache it never chose
     nested_bindings      a 3-segment (call-site) binding crashed check_maps instead of being counted and
                          named, which made the guard refuse by blowing up and left the one report about
                          un-compared bindings unreachable
@@ -528,6 +536,12 @@ def _fixture_wdl(dirpath: Path, drop, add_required: bool) -> None:
                       if k.startswith("GenotypeBatch."))
     declared = [d for d in declared if d != drop]
     body = "\n".join(f"    File {d}" if d != "batch" else "    String batch" for d in declared)
+    # The declared side has to cover OUTPUTS too, or this fixture lies about what it declares: the
+    # config binds ~10 output keys, and a tree offering one output named `o` makes the (correct)
+    # per-key output check refuse 10 problems in a probe whose subject is inputs. Leaf names, deduped,
+    # because two keys sharing a leaf would be a duplicate WDL output.
+    outs = list(dict.fromkeys(k.split(".")[-1] for k in bc.CONFIGS["10-GenotypeBatch"]["outputs"]))
+    out_block = "  output {\n" + "".join(f"    File {o} = probe_task.out\n" for o in outs) + "  }\n"
     if add_required:
         body += "\n    File probe_required_unbound"
     (dirpath / "wdl").mkdir(parents=True, exist_ok=True)
@@ -536,7 +550,7 @@ def _fixture_wdl(dirpath: Path, drop, add_required: bool) -> None:
         "workflow GenotypeBatch {\n"
         "  input {" + "\n" + body + "\n  }\n"
         "  call probe_task\n"
-        '  output { File o = probe_task.out }\n'
+        + out_block +
         "}\n"
         'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
         '  runtime { docker: "x" }\n}\n')
@@ -567,7 +581,8 @@ def _fixture_tree(dirpath: Path, drop: str | None = None) -> None:
             f"workflow {wf} {{\n"
             "  input {" + "\n" + "\n".join(lines) + "\n  }\n"
             "  call probe_task\n"
-            '  output { File o = probe_task.out }\n'
+            '  output {\n' + "".join(f"    File {k.split('.')[-1]} = probe_task.out\n"
+                                     for k in dict.fromkeys(spec["outputs"])) + '  }\n'
             "}\n"
             'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
             '  runtime { docker: "x" }\n}\n')
@@ -1218,6 +1233,287 @@ def probe_nested_bindings() -> str:
             "present")
 
 
+def probe_listing_lie() -> str:
+    """An empty Terra listing must name the endpoint that claimed it -- and never be the last word.
+
+    `fapi.list_submissions` answered [] for a workspace holding 5 submissions and
+    `fapi.list_workspace_configs` answered [] for one holding 1 config while raw REST on the same URL
+    returned the data (docs/terra-head-to-head.md §8). The prose said to bypass the lying client; the
+    code did not, so `gsvtk terra status` would have printed "no submission matching <prefix>" at a
+    sandbox with five -- and recon exited 0 on the same answer.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    (tt,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-ws"}, "terra")
+    two = [{"submissionId": "s1"}, {"submissionId": "s2"}]
+    saved_rest, saved_fiss = tt.rest_get, tt.fapi.list_submissions
+    seen = {}
+    try:
+        def drive(rest_value, fiss_value, rest_raises=None):
+            calls = []
+
+            def fake_rest(path, what, params=None):
+                calls.append("rest")
+                if rest_raises:
+                    raise rest_raises
+                return rest_value
+            tt.rest_get = fake_rest
+
+            def fake_fiss(*a, **k):
+                calls.append("fiss")
+                # fiss hands back the requests.Response and _j() reads .status_code/.json() off it. A
+                # bare dict here would make the fiss leg report itself "unavailable" every time, and
+                # the probe would pass while never once testing the client it exists to watch.
+                return type("R", (), {"status_code": 200, "text": "",
+                                      "json": lambda self: fiss_value})()
+            tt.fapi.list_submissions = fake_fiss
+            err = None
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                try:
+                    got = tt.submissions("probe-ns", "probe-ws")["submissions"]
+                except Exception as e:
+                    got, err = None, e
+            seen[tuple(calls)] = None
+            return got, err, buf.getvalue()
+
+        # CONTROL: both clients agree on a populated inventory. A fake that never asked raw REST, or a
+        # _read_both that stopped asking for it, fails the request-count assert below.
+        got, err, note = drive(two, two)
+        if err is not None or len(got) != 2:
+            raise AssertionError(f"control: a healthy listing did not come back: {err} {got}")
+        if "raised" in note or "DISAGREE" in note:
+            raise AssertionError(f"the control was not actually healthy: {note[:170]}")
+        if set(seen) != {("rest", "fiss")}:
+            raise AssertionError(f"both clients were not asked: {list(seen)}")
+
+        # §8's actual state: REST sees two, the fiss client sees nothing.
+        got, err, note = drive(two, [])
+        if err is not None or len(got) != 2:
+            raise AssertionError(f"the lie was preferred over the data: {err} {got}")
+        if "DISAGREE" not in note or "answered 2" not in note or "answered 0" not in note:
+            raise AssertionError(f"disagreement not printed with both counts: {note[:140]}")
+
+        # Both empty: raise, naming the endpoint AND what each client answered.
+        got, err, _ = drive([], [])
+        if not isinstance(err, tt.TerraError):
+            raise AssertionError(f"an empty listing was returned as a clean answer: {got!r}")
+        if "raw REST" not in str(err) or "list_submissions" not in str(err):
+            raise AssertionError(f"the refusal does not name both clients: {str(err)[:140]}")
+
+        # REST unreachable, fiss answers []: the fallback is loud and still refuses to call it empty.
+        got, err, note = drive(None, [], RuntimeError("HTTP 404"))
+        if not isinstance(err, tt.TerraError) or "unconfirmed" not in note:
+            raise AssertionError(f"REST-404 fallback was not marked unconfirmed: {str(err)[:120]}")
+
+        # A shape _as_items does not understand is not "nothing there" -- from EITHER client.
+        got, err, _ = drive({"unexpected": True}, {"unexpected": True})
+        if not isinstance(err, tt.TerraError) or "unexpected listing response shape" not in str(err):
+            raise AssertionError(f"an unknown shape read as empty: {str(err)[:140]}")
+    finally:
+        tt.rest_get, tt.fapi.list_submissions = saved_rest, saved_fiss
+    return ("control: 2/2 returned, both clients asked; REST 2 vs fiss 0 -> REST wins + DISAGREE with "
+            "both counts; 0/0 -> TerraError naming both; REST-404 fallback marked unconfirmed; "
+            "unknown shape refuses")
+
+
+def probe_recon_empty_inventory() -> str:
+    """recon must not exit 0 on an inventory its own doc says the client lies about.
+
+    recon counts failures by the printed ` failed:` marker, because eleven sections each catch their
+    own exception -- cheaper than bookkeeping in every section. That works only if a section that got
+    a quiet empty answer *prints a failure*, which it did not: "0 recent" carried no marker and recon
+    exited 0 on an endpoint measured to answer [] for a workspace holding 5 submissions
+    (GAP-REVIEW-manta-tloc.md §3.1). Same summary line, opposite exit code, is the whole fix.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import terra
+    (recon,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                      "GSVTK_TERRA_WORKSPACE": "probe-ws"}, "recon")
+    real = recon.terra
+
+    class Stub:
+        TerraError = terra.TerraError
+        BASELINE_NS, BASELINE_WS = "probe-ns", "probe-ws"
+
+        def __init__(self, cfgs, subs):
+            self.cfgs, self.subs = cfgs, subs
+
+        def dump(self, obj, path):
+            return path
+
+        def whoami(self):
+            return "probe"
+
+        def billing_projects(self):
+            return []
+
+        def workspaces(self):
+            return []
+
+        def workspace(self, ns, name):
+            return {"workspace": {"workspaceId": "id", "bucketName": "b", "attributes": {}},
+                    "canCompute": True, "accessLevel": "OWNER", "workspaceSubmissionStats": {}}
+
+        def entity_types(self, ns, name):
+            return {}
+
+        def entity_sample(self, ns, name, etype, page_size=50, page=1):
+            return {"results": []}
+
+        def workspace_configs(self, ns, name):
+            if isinstance(self.cfgs, Exception):
+                raise self.cfgs
+            return self.cfgs
+
+        def submissions(self, ns, name, limit=20):
+            if isinstance(self.subs, Exception):
+                raise self.subs
+            return {"submissions": self.subs}
+
+        def submission(self, ns, name, sid):
+            return {}
+
+    def run(cfgs, subs):
+        recon.FAILS[:] = []
+        recon.terra = Stub(cfgs, subs)
+        out, argv = io.StringIO(), sys.argv
+        sys.argv = ["recon.py", "--ns", "probe-ns", "--ws", "probe-ws"]
+        try:
+            with contextlib.redirect_stdout(out):
+                recon.main()
+        finally:
+            sys.argv = argv
+        return out.getvalue()
+
+    try:
+        populated = run([{"namespace": "n", "name": "06-X", "snapshotId": 1,
+                          "rootEntityType": "sample_set", "methodUri": "dockstore://x"}],
+                        [{"submissionDate": "d", "workflowStatus": "SUCCEEDED",
+                          "methodConfigurationNamespace": "n", "methodConfigurationName": "06-X",
+                          "entityType": "sample_set", "entityName": "e", "submissionId": "sid"}])
+        bad = [f for f in recon.FAILS if "configs" in f or "submissions" in f or "recent" in f]
+        if bad or "1 recent" not in populated or "1 configs" not in populated:
+            raise AssertionError(f"CONTROL: a populated inventory did not read clean: {bad} "
+                                 f"{populated[-160:]}")
+        lied = run(terra.TerraError("raw REST GET /api/.../methodconfigs listed 0 method configs"),
+                   terra.TerraError("raw REST GET /api/.../submissions listed 0 submissions"))
+        got = [f for f in recon.FAILS if "configs failed" in f or "submissions failed" in f]
+        if len(got) != 2:
+            raise AssertionError(f"lying-empty inventory counted {len(got)} failures, not 2: {got}")
+        if "0 recent" in lied:
+            raise AssertionError("an empty listing still printed a summary with no failure marker")
+    finally:
+        recon.terra = real
+        recon.FAILS[:] = []
+    return (f"populated: same two summary lines, FAILS empty; lying-empty: {len(got)} named "
+            "failures, no bare '0 recent' line -- exit 1 by recon's own tail")
+
+
+def probe_step_lookup_names_itself() -> str:
+    """One step map, and a lookup that refuses by name instead of dying with StopIteration.
+
+    The step->workflow map was copied into three tools; `batch_check_inputs` looked a step up with
+    `next(...)` over an empty generator, so a renamed or un-numbered step surfaced as a bare
+    `StopIteration` -- and the copy it read from was the one that drifted.
+    """
+    (st, bs, bsm, bci) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                                "GSVTK_TERRA_WORKSPACE": "probe-ws"},
+                               "steps", "batch_status", "batch_save_metadata", "batch_check_inputs")
+    names = ["10-GenotypeBatch_Ab12Cd", "10-GenotypeBatch"]
+    if st.match_configs("10", names)[0] != "10-GenotypeBatch":
+        raise AssertionError("a chain snapshot outranked the live config -- the freeze took the wrong "
+                             f"one: {st.match_configs('10', names)}")
+    if st.config_name("10", names) != "10-GenotypeBatch":
+        raise AssertionError(f"config_name took the snapshot, not the live config: "
+                             f"{st.config_name('10', names)}")
+    # The third pattern is what keeps a chain snapshot named by workflow alone from vanishing: a bare
+    # workflow name has to resolve, or that step is dropped from the manifest without a word.
+    if st.config_name("09", ["MergeBatchSites"]) != "MergeBatchSites":
+        raise AssertionError("a workflow-named-only config matched nothing -- the hole comes back")
+    # A step-numbered config whose workflow name moved still resolves: the number is what the operator
+    # asked for, and upstream renames workflows. Documented here so nobody "fixes" this into a refusal.
+    if st.config_name("10", ["10-SomethingElse"]) != "10-SomethingElse":
+        raise AssertionError("a numbered config from a renamed workflow stopped resolving")
+    try:
+        st.config_name("10", ["09-MergeBatchSites"])
+        raise AssertionError("no config for the step and still no refusal")
+    except SystemExit as e:
+        for frag in ("step 10", "GenotypeBatch", "tried"):
+            if frag not in str(e):
+                raise AssertionError(f"the refusal omits {frag!r}: {str(e)[:120]}")
+    # CONTROL: the guarded map is the live one -- every consumer reads it, and the drifted copy is
+    # gone. A fix that only added a nicer error to a dead copy would pass the asserts above.
+    if list(bs.STEPS) != list(st.step_names()):
+        raise AssertionError("batch_status still carries its own step list")
+    if bsm.STEPS is not st.STEPS:
+        raise AssertionError("batch_save_metadata still carries its own step list")
+    if getattr(bci, "WDLS", None) is not None:
+        raise AssertionError("batch_check_inputs still carries the third copy (WDLS)")
+    return ("exact live name outranks the <step>_<sha> snapshot; un-numbered name matches; unknown "
+            "step refuses naming step+patterns; 3 consumers read one map, WDLS gone")
+
+
+def probe_call_cache() -> str:
+    """useCallCache must be chosen on the command line, not carried by the builder.
+
+    The builder shipped `"useCallCache": True` with no way to say otherwise, and batch_rerun_step.py
+    imports `body()` -- so the rerun path POSTed a call cache it never chose. One single-sample
+    submission on that setting died mid-run attempting cross-workspace cache copies
+    (docs/handoff/003-single-sample-blockers-pr966.md). For a two-arm head-to-head a wrong value here
+    is worse than an error: one arm's calls get served from the other arm's outputs and the run still
+    goes green, which is how "the flag changed nothing" gets reported from an arm that never ran.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import terra
+    install_recorder(terra)
+    (bc, r) = fresh({"GSVTK_PROJECT": "p", "GSVTK_BRANCH": "probe-branch",
+                     "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                     "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                    "batch_configs", "batch_rerun_step")
+    # The rerun tool's docker-pin guard is probe_drop_flag_guard's subject, not this one: here the only
+    # question is which useCallCache reaches the body that would be POSTed.
+    r.CONFIRMED = r.ALLOW_UNPINNED = True
+    seen = {}
+    argv_save = sys.argv
+    try:
+        for extra in ([], ["--no-call-cache"], ["--call-cache"]):
+            sys.argv = ["batch_configs.py", "show"] + extra
+            seen[" ".join(extra) or "(no flag)"] = bc.body("10-GenotypeBatch")["useCallCache"]
+        if seen["(no flag)"] is not False or seen["--no-call-cache"] is not False:
+            raise AssertionError(f"the default still turns caching on: {seen}")
+        if seen["--call-cache"] is not True:
+            raise AssertionError(f"--call-cache never reached the body: {seen}")
+
+        # CONTROL for the rerun path. It imports this builder, so the flag has to travel through the
+        # imported body() -- a guard inside batch_rerun_step alone would leave the POSTed body wrong.
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm", "--call-cache"]
+        if r.make_body()["useCallCache"] is not True:
+            raise AssertionError("batch_rerun_step.make_body() lost the flag on its way in")
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm"]
+        if r.make_body()["useCallCache"] is not False:
+            raise AssertionError("batch_rerun_step still inherits a cache it was not asked for")
+
+        # Both flags is a contradiction, not last-one-wins: argv order must not decide which arm of
+        # an A/B reuses calls.
+        sys.argv = ["batch_configs.py", "show", "--call-cache", "--no-call-cache"]
+        try:
+            bc.body("10-GenotypeBatch")
+            raise AssertionError("both flags were accepted -- argv order picked the arm")
+        except SystemExit as e:
+            if "both" not in str(e):
+                raise AssertionError(f"the refusal does not name the contradiction: {str(e)[:90]}")
+    finally:
+        sys.argv = argv_save
+    if REQUESTS:
+        raise AssertionError(f"a probe that only builds bodies sent {len(REQUESTS)} request(s)")
+    return ("default/--no-call-cache -> False, --call-cache -> True in both the builder and the "
+            "rerun body, both-flags refusal named, 0 requests left the machine")
+
+
 PROBES = [
     ("rerun_guards", probe_rerun_guards),
     ("stage_batch_row", probe_stage_batch_row),
@@ -1231,6 +1527,10 @@ PROBES = [
     ("rerun_map_guard", probe_rerun_map_guard),
     ("adapt_drops", probe_adapt_drops),
     ("drop_flag_guard", probe_drop_flag_guard),
+    ("listing_lie", probe_listing_lie),
+    ("recon_empty_inventory", probe_recon_empty_inventory),
+    ("step_lookup_names_itself", probe_step_lookup_names_itself),
+    ("call_cache", probe_call_cache),
     # Last: this probe injects a key into batch_configs.CONFIGS. Every other probe re-imports the module
     # through fresh() so it could not read that, but a probe that mutates shared module state has no
     # business running before the ones that do not.

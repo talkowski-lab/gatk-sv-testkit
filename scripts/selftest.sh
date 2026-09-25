@@ -544,8 +544,115 @@ if [ -d "$CMP" ]; then
 fi
 
 echo
+echo "selftest: one artifact, counted independently (compare/ was pairwise-only)"
+# Every branch re-derived its own counts by hand because compare/ only answers "how do these two
+# files differ?" -- one review recounted 17,789 records to check a MOI summary and read a QC table of
+# 10 PASS / 17 FAIL with no tool that could name the qc_def behind it. The tool carries the real
+# assertions; what is pinned here is that they RUN and report their own tally, since a checker that
+# detects nothing also sails through a --help sweep.
+expect 'compare/artifact_tally.py --selftest finds and refuses every case it claims' 0 \
+    'all selftest assertions passed' -- "$PY" compare/artifact_tally.py --selftest
+expect 'checks/wdl_reach.py --selftest resolves the graph both ways and names the orphan' 0 \
+    'selftest: ok' -- "$PY" checks/wdl_reach.py --selftest
+
+echo
+echo "selftest: production pins are read from upstream, not transcribed here"
+# scripts/prod_pins.py exists because a version written into this repo is a version that stops being
+# true. Its own --selftest builds a two-dockerfile git fixture and asserts the refusals; the line
+# below asserts the COUNT too, because the bug class is a pin list with holes that reads complete (a
+# one-line parser saw 6 of 11 pins and exited 0). Raise the number with the file, never lower it.
+expect 'scripts/prod_pins.py --selftest: every pin found, every refusal named' 0 \
+    'prod_pins selftest: 9 ok, 0 failed' -- "$PY" scripts/prod_pins.py --selftest
+
+echo
+echo "selftest: the in-image runner refuses before a VM exists (offline; creates no instance)"
+# Two reviews hand-rolled a boot-a-VM driver and both trusted it: one printed `MISSING LOCAL IMAGE`
+# and carried on, so both arms died rc=1 with records=0 -- which reads exactly like "the flag changed
+# nothing". These assert the refusals by their words. The last line is the CONTROL: a probe holding
+# real bytes passes, so the three rc=2 results above cannot be the script failing to parse its own
+# arguments -- the failure mode a guard suite made of `--dry-run` calls is vulnerable to.
+RII=checks/image-check/run_in_image.sh
+RIIT=$(mktemp -d "${TMPDIR:-/tmp}/gsvtk-rii.XXXXXX")
+printf '#!/bin/bash\necho hi\n' > "$RIIT/probe.sh"
+: > "$RIIT/empty.sh"
+expect 'no --image: refuses and names where a real ref comes from' 2 \
+    'no --image given' 'IMAGE_REPO' -- bash "$RII" --dry-run --probe "$RIIT/probe.sh"
+expect 'image ref containing a space: refused, a reference is one token' 2 \
+    'whitespace' 'one token' -- bash "$RII" --dry-run --image "reg/foo tag" --probe "$RIIT/probe.sh"
+expect '0-byte probe: refused, since booting for it measures nothing' 2 \
+    '0 BYTES' -- bash "$RII" --dry-run --image reg/foo:tag --probe "$RIIT/empty.sh"
+expect 'CONTROL: a probe with real bytes gets through --dry-run' 0 \
+    'non-comment bytes' 'nothing was created' -- bash "$RII" --dry-run --image reg/foo:tag \
+    --probe "$RIIT/probe.sh"
+rm -rf "$RIIT"
+
+echo
+echo "selftest: fetch_outputs.py resolves by WORKFLOW OUTPUT NAME, offline, and refuses to invent one"
+# This fetcher exists because the Terra entity attributes stayed empty and only Cromwell's `outputs`
+# map had the paths (GAP-REVIEW-manta-tloc.md §1), so every assertion below reads a metadata fixture
+# written here. Nothing contacts a bucket: the bytes that actually move are a local --link-dir capture,
+# and the `gsutil -m cp -n …` line is asserted as TEXT from --dry-run. The header of
+# terra/fetch_outputs.py names which of its paths that leaves unexecuted.
+FO="$TMP/fo"
+mkdir -p "$FO/meta" "$FO/objects"
+cat > "$FO/meta/run1.aaaa1111.json" <<'JSON'
+{"workflowName": "GATKSVPipelineSingleSample", "id": "aaaa1111-2222-3333-3333-555566667777",
+ "status": "Succeeded",
+ "outputs": {"GATKSVPipelineSingleSample.svVCF": "gs://gsvtk-fixture/run1/sv.vcf.gz",
+             "GATKSVPipelineSingleSample.pedFile": "gs://gsvtk-fixture/run1/pedfile.txt",
+             "GATKSVPipelineSingleSample.depthRatioQCMatrix":
+                 "gs://gsvtk-fixture/run1/depthRatioQCMatrix.txt",
+             "GATKSVPipelineSingleSample.svDisensVCF": null}}
+JSON
+printf 'sv call lines\n' > "$FO/objects/sv.vcf.gz"
+printf 'ped lines\n' > "$FO/objects/pedfile.txt"
+FOMETA="$FO/meta/run1.aaaa1111.json"
+FOWORK="$FO/work"
+FOFOM="$FOWORK/manifests/outputs_manifest.json"
+expect 'fetch_outputs --help needs no profile and no credentials' 0 \
+    'Fetch a run'\''s artifacts by Cromwell output NAME' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py --help
+check 'and --help created no scratch directory on the way out' \
+    test ! -e "$FOWORK"
+expect 'an output name the run never declared: refused, and the declared names are printed' 3 \
+    "declares no output named 'GATKSVPipelineSingleSample.svAnnotateVcf'" \
+    'GATKSVPipelineSingleSample.svVCF' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py \
+    --metadata "$FOMETA" --output GATKSVPipelineSingleSample.svAnnotateVcf
+expect 'declared-with-no-value is a DIFFERENT answer than a wrong name (exit 4, and it says so)' 4 \
+    'IS declared but carries no value' 'This is not "the workflow has no such output" (exit 3)' \
+    -- env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py \
+    --metadata "$FOMETA" --output GATKSVPipelineSingleSample.svDisensVCF
+check 'neither refusal wrote a manifest: a manifest with a hole in it is not a result' \
+    test ! -e "$FOFOM"
+expect '--dry-run prints the exact command a fetch would run, labelled as needing real cloud access' 0 \
+    'gsutil -m cp -n gs://gsvtk-fixture/run1/depthRatioQCMatrix.txt' \
+    'needs real cloud access' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py \
+    --metadata "$FOMETA" --output depthRatioQCMatrix --dry-run
+check 'and --dry-run put no bytes on disk' test ! -e "$FOWORK/outputs/depthRatioQCMatrix.txt"
+expect 'present: the output is copied (offline, from a local capture) and hashed' 0 \
+    'adopted from --link-dir' 'sha256=' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py \
+    --metadata "$FOMETA" --output GATKSVPipelineSingleSample.svVCF --link-dir "$FO/objects"
+check 'the manifest row is keyed by the WORKFLOW OUTPUT NAME, not by a bucket path' \
+    command grep -qF '"GATKSVPipelineSingleSample.svVCF"' "$FOFOM"
+expect 'a second --output appends its line and keeps the first' 0 \
+    '1 fetched this run, 1 carried from the previous manifest' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py \
+    --metadata "$FOMETA" --output pedFile --link-dir "$FO/objects"
+check 'and both output names are still in that manifest (append, never replace)' \
+    test "$(command grep -cF '"gs://' "$FOFOM")" -eq 2
+expect '--verify re-hashes what the manifest recorded and calls it clean' 0 \
+    'verify: 2 recorded, 0 problem(s)' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py --verify
+printf 'tampered bytes\n' > "$FOWORK/outputs/pedfile.txt"
+expect 'and the same --verify finds one tampered file, rather than exiting 0' 6 'DRIFT' -- \
+    env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$FOWORK" "$PY" terra/fetch_outputs.py --verify
+
+echo
 echo "selftest: probes for the defects a review confirmed (offline, no network, no creds)"
-# 13 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
+# 17 = len(PROBES) in scripts/probe_fixes.py. Raise it with the file, never lower it: each entry
 # pins one defect that was reproduced before it was fixed (rerun-step guards, the batch row, the
 # copy-after-failed-hardlink TypeError, the WDL duplicate-definition pass-through, the frozen-publish
 # guard, miniwdl resolution in the venv, --help side effects, the hand-copied Dockstore URI, the
@@ -555,8 +662,13 @@ echo "selftest: probes for the defects a review confirmed (offline, no network, 
 # direct-API probe cannot see the two places that turn the drop flag into a `drop=` argument -- nor the
 # command that pruned by one ref and POSTed the body of another; and, added by the module-profiles
 # review, the 3-segment call-site binding that CRASHED the map-vs-WDL check instead of reporting the
-# binding it could not compare.
-probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 13 \
+# binding it could not compare. And from the three gap reviews: the fiss client answering [] for a
+# workspace that held 5 submissions (listing_lie), recon exiting 0 on exactly that empty answer
+# (recon_empty_inventory), the step->workflow map copied into three tools with a lookup that died as a
+# bare StopIteration (step_lookup_names_itself), and call caching being a value the builder carried
+# rather than a choice the command line made -- which batch_rerun_step imported and never chose
+# (call_cache).
+probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 17 \
     "$PY" scripts/probe_fixes.py
 printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that cannot fire is a\n'
 printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'
