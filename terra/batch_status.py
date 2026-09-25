@@ -23,9 +23,9 @@ from terra import fapi  # noqa: E402  # via terra: one friendly missing-dependen
 
 import terra  # noqa: E402
 import batch_configs as tc  # noqa: E402
+import steps  # noqa: E402  # one reader for the step -> workflow map (see terra/steps.py)
 
-STEPS = ["06-GenerateBatchMetrics", "07-FilterBatchSites", "08-FilterBatchSamples",
-         "09-MergeBatchSites", "10-GenotypeBatch"]
+STEPS = steps.step_names()
 TERMINAL = ("Done", "Aborted")
 
 

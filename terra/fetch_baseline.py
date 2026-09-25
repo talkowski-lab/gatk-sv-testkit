@@ -102,6 +102,23 @@ def resolve(expr, ent_name, tables, ws_attrs, root_type):
     return {"resolved_from": expr, "value": row.get(path)}
 
 
+def pick_config(by_name, prefix: str) -> list:
+    """Every config in the workspace whose name belongs to step `prefix`, best match first.
+
+    Deliberately NOT `steps.match_configs`: that one answers a *request* for a known step and refuses
+    a number the map does not carry, which is right for `batch_rerun_step` and wrong here -- this tool
+    lists what a workspace actually holds, and a workspace can hold step 05 while this repo's map
+    still knows only 06..10. Refusing would turn "report what is there" into "agree with my table".
+
+    Shortest name first, because the live config is a prefix of its own chain snapshot:
+    `10-GenotypeBatch` < `10-GenotypeBatch_Ab12Cd`. Taking `sorted(matches)[0]` froze whichever
+    sorted first -- the snapshot, in the runs this repo measured. Kept out of main() so the ordering
+    is checkable offline.
+    """
+    cand = sorted(n for n in by_name if n.startswith(prefix + "-"))
+    return sorted(cand, key=lambda n: (len(n), n))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ns", default=terra.BASELINE_NS)
@@ -136,12 +153,14 @@ def main():
                 "bucket": ws["workspace"]["bucketName"], "baseline_tag": "v1.1.1",
                 "workspace_attributes": ws_attrs, "steps": {}, "entities": {}}
 
+    missing = []
     for prefix in args.steps:
-        matches = [n for n in by_name if n.startswith(prefix + "-")]
+        matches = pick_config(by_name, prefix)
         if not matches:
             p(f"!! no config for step {prefix}")
+            missing.append(prefix)
             continue
-        name = sorted(matches)[0]
+        name = matches[0]
         summ = by_name[name]
         cfg = get_config(args.ns, args.ws, summ.get("namespace") or args.ns, name)
         terra.dump(cfg, os.path.join(RECON, f"configs_{name}.json"))
@@ -164,10 +183,20 @@ def main():
           f"in={len(resolved_in):3d} out={len(resolved_out):3d} gs_uris={ngs}")
 
     manifest["entities"] = {k: v["rows"] for k, v in ent_tables.items()}
+    # A freeze that quietly skipped a step reads exactly like a freeze of a run that had no such step.
+    # Name the hole inside the artifact, and leave a nonzero exit behind so no caller mistakes a
+    # partial baseline for the baseline.
+    if missing:
+        manifest["steps_missing"] = missing
     out = os.path.join(MAN, "baseline_run.json")
     with open(out, "w") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=True, default=str)
     p(f"-> {out} ({os.path.getsize(out)/1e6:.1f} MB)")
+    if missing:
+        p(f"!! {len(missing)} of {len(args.steps)} step(s) had no config to freeze: "
+          f"{', '.join(missing)}")
+        p(f"   {out} records them under `steps_missing`; the manifest is PARTIAL, not complete.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

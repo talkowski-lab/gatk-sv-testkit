@@ -24,6 +24,7 @@ import config  # noqa: E402
 import terra  # noqa: E402
 from terra import fapi  # noqa: E402  (one friendly missing-dependency message, in terra.py)
 import batch_configs as tc  # noqa: E402
+import steps  # noqa: E402  # one reader for the step -> workflow map (see terra/steps.py)
 
 # The two sides of the head-to-head sit in different workspaces: the reference run in
 # the baseline workspace, your chain in the sandbox. Steps are matched by the numeric
@@ -33,8 +34,7 @@ def sides() -> dict:
     with the written fix rather than at import of an unrelated subcommand."""
     ns, ws, _ = tc.require_target()
     return {"new": (ns, ws), "baseline": (terra.BASELINE_NS, terra.BASELINE_WS)}
-STEPS = {"06": "GenerateBatchMetrics", "07": "FilterBatchSites", "08": "FilterBatchSamples",
-         "09": "MergeBatchSites", "10": "GenotypeBatch"}
+STEPS = steps.STEPS
 
 
 def targets() -> dict:
@@ -48,7 +48,14 @@ def targets() -> dict:
     out = {}
     for side, (ns, ws) in sides().items():
         for step, wdl in STEPS.items():
-            found = terra.latest_workflow(ns, ws, f"{step}-")
+            try:
+                found = terra.latest_workflow(ns, ws, f"{step}-")
+            except terra.TerraError as e:
+                # One line per SIDE, not one per step: an unusable listing answers the same way five
+                # times, and five copies of "[skip]" bury the sentence that says which it was -- no
+                # credentials, a workspace you are not on, or an endpoint that answered empty.
+                print(f"  [skip] {side} side ({ns}/{ws}): {str(e).splitlines()[0]}", file=sys.stderr)
+                break
             if not found or not found.get("workflow_id"):
                 print(f"  [skip] {step}-{wdl} ({side}): no submission in {ns}/{ws}",
                       file=sys.stderr)
@@ -179,7 +186,7 @@ def main():
     ap.add_argument("--outdir", default=str(config.work_path("metadata")))
     ap.add_argument("--target", action="append", metavar="KEY",
                     help="e.g. 10-new / 06-baseline (default: every step found on both sides)")
-    ap.add_argument("--step", action="append", choices=sorted(STEPS),
+    ap.add_argument("--step", action="append", choices=steps.known_steps(),
                     help="restrict discovered targets to these step numbers")
     ap.add_argument("--side", action="append", choices=("new", "baseline"),
                     help="restrict discovered targets to one side of the head-to-head")

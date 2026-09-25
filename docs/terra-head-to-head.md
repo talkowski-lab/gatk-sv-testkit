@@ -370,15 +370,26 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
 
 - `GET …/submissions` via `firecloud.api.list_submissions` → `[]`. So does `list_workspace_configs`
   for a workspace holding 1 config. Raw REST with a `gcloud auth print-access-token` bearer returns
-  the truth. This is why you must raw-REST the submission list after any submit call that raised
-  mid-flight, to prove you did not double-spend.
+  the truth. **You no longer hand-curl this:** `terra.submissions()` and `terra.workspace_configs()`
+  ask both clients on every call, print `the two endpoints DISAGREE — raw REST GET /api/… answered 2,
+  fapi.list_submissions answered 0` when the counts differ (and use raw REST), and **raise naming the
+  endpoint** when both answer empty — because an empty listing and an invisible workspace are otherwise
+  the same answer. One extra request per listing is the accepted price of detecting the lie.
+  `probe_listing_lie` pins it offline; `recon` exits 1 on this answer rather than 0
+  (`probe_recon_empty_inventory`). The reason to check after a submit call that raised mid-flight is
+  unchanged: prove you did not double-spend.
 - Per-workflow metadata is a **cached snapshot**: two fetches 30+ min apart returned byte-identical
   JSON while the scratch bucket proved the run had advanced. It also omits sub-workflow internals —
   top-level `calls` sat at 9 entries while ~200 tasks ran inside `GatherBatchEvidence`. Use
   `?expandSubWorkflows=true` for the real call graph and know it returns **~45 MB**: `curl -o` it and
   print a summary, never into an agent's context.
 - For live progress and spend, trust the scratch bucket (`gsutil ls -d …/call-*/`) and the submission's
-  `cost` field. `twatch.py --diagnose` answers HTTP **405**; don't route around it by hand.
+  `cost` field. `twatch.py --diagnose` answers HTTP **405**; don't route around it by hand. For the
+  call-level view without the 45 MB payload, `terra/batch_peek.py` reads non-expanded metadata and
+  prints a bounded tally (240 records across 60 calls renders 18 lines) plus the first failure message
+  and per-attempt rc values; it refuses a submission it cannot see instead of reporting nothing. Its
+  live-Terra path needs credentials and was **not** exercised by this repo's offline gate — the
+  guards, the tally, and the exit codes were proven against metadata fixtures.
 - Finished submissions store their config under a per-submission snapshot name
   (`single-sample-trio-a0e10b99_B0EJFlC5SLk`). Those are not extra configs; don't clean them up.
 

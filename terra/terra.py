@@ -10,6 +10,12 @@ Two things this fixes once so every tool gets them right:
   * **Credentials.** Application Default Credentials, i.e. whatever
     `gcloud auth application-default login` established. Nothing is stored here.
 
+A third rule lives here because two tools were wrong without it: the submission and
+method-config listings are read from **both** fiss and raw REST, and the disagreement is printed
+(`_read_both`). docs/terra-head-to-head.md §8 recorded fiss answering `[]` twice for workspaces that
+demonstrably had the data; the code kept trusting it, so the monitoring loop reported "no submission
+matching <prefix>" against a workspace holding five.
+
 Read operations are always allowed. Every mutating helper requires an explicit
 `confirm=True` argument so nothing is created, updated, or submitted by accident.
 
@@ -108,6 +114,108 @@ def session():
     return AuthorizedSession(cred)
 
 
+def rest_get(path: str, what: str, params: dict | None = None) -> Any:
+    """GET one endpoint through the ADC session, i.e. raw REST rather than through fiss.
+
+    Exists because of the measurement in docs/terra-head-to-head.md §8 (2026-09-22…25, five real
+    submissions): the same `GET …/submissions` answered `[]` through fiss and returned 5 submissions
+    through this bearer path. Same URL, same application-default credentials, two answers; the
+    mechanism was never pinned down, which is why the listing helpers below read BOTH rather than
+    picking a favourite client.
+    """
+    return _j(session().get(f"{TERRA_API}{path}", params=params, timeout=60), what)
+
+
+def _as_items(d: Any, via: str) -> list:
+    """Unwrap the shapes these list endpoints actually answer with, or name the one it sent.
+
+    `GET …/submissions` answers a bare array; the same endpoint with `?limit`/`?offset` answers
+    `{"subset": […]}`; `…/methodconfigs` answers a bare array. The old `submissions()` read only
+    `d.get("submissions")` — a shape no version of Rawls has been observed to send — so every
+    *unexpected* shape decoded as an empty list, which is this repo's named failure class: an empty
+    that reads like nothing was wrong.
+    """
+    out = d if isinstance(d, list) else None
+    if out is None and isinstance(d, dict):
+        for key in ("submissions", "subset", "methodconfigs", "items"):
+            if isinstance(d.get(key), list):
+                out = d[key]
+                break
+    if out is None:
+        raise TerraError(f"{via}: unexpected listing response shape "
+                         f"({type(d).__name__}: {str(d)[:200]}) — refusing to read that as "
+                         "'nothing there'.")
+    if out and not isinstance(out[0], dict):
+        raise TerraError(f"{via}: listed {len(out)} entries of type "
+                         f"{type(out[0]).__name__}, not objects — refusing to walk that.")
+    return out
+
+
+def _read_both(path: str, subject: str, fiss_call, fiss_name: str) -> list:
+    """List one endpoint with BOTH clients, prefer raw REST, and never answer empty quietly.
+
+    `fapi.list_submissions` returned `[]` for a workspace holding 5 submissions and
+    `fapi.list_workspace_configs` returned `[]` for one holding 1 config, while raw REST on the same
+    URL returned the data (docs/terra-head-to-head.md §8, observed 2026-09-22…25). The prose was
+    written; the code was not — `batch_status`, `latest_workflow` and `recon` all read the lying
+    client, so `gsvtk terra status` would have printed `no submission matching <prefix>` against a
+    sandbox with five. So:
+
+      * ask both, every call (one extra request per listing is the price of detecting the lie);
+      * when the counts differ, print both numbers and WHICH endpoint answered which, and use REST;
+      * when both answer empty, raise naming the endpoint that claimed it — an empty submission
+        list and an invisible one are otherwise indistinguishable to the caller.
+    """
+    rest_via = f"raw REST GET /api/{path}"
+    rest = fiss = None
+    rest_err = fiss_err = None
+    try:
+        rest = _as_items(rest_get(path, f"{subject} via {rest_via}"), rest_via)
+    except Exception as exc:                       # a 404 and an expired ADC token both land here
+        rest_err = exc
+    try:
+        fiss = _as_items(_j(fiss_call(), f"{fiss_name} {subject}"), fiss_name)
+    except Exception as exc:
+        fiss_err = exc
+
+    if rest is None and fiss is None:
+        raise TerraError(
+            f"{subject}: neither client could list it.\n"
+            f"  {rest_via}: {type(rest_err).__name__}: {str(rest_err)[:200]}\n"
+            f"  {fiss_name}: {type(fiss_err).__name__}: {str(fiss_err)[:200]}")
+    source = rest_via
+    if rest is None:
+        print(f"[terra] {subject}: {rest_via} raised {type(rest_err).__name__} "
+              f"({str(rest_err)[:160]}); falling back to {fiss_name} — whose emptiness this repo "
+              "has measured as a lie, so treat the count as unconfirmed "
+              "(docs/terra-head-to-head.md §8).", file=sys.stderr)
+        chosen, source = fiss, fiss_name
+    elif fiss is not None and len(fiss) != len(rest):
+        print(f"[terra] {subject}: the two endpoints DISAGREE — {rest_via} answered "
+              f"{len(rest)}, {fiss_name} answered {len(fiss)}. Using raw REST "
+              "(docs/terra-head-to-head.md §8).", file=sys.stderr)
+        chosen = rest
+    else:
+        if fiss is None:
+            print(f"[terra] {subject}: {fiss_name} raised {type(fiss_err).__name__} "
+                  f"({str(fiss_err)[:160]}); using {rest_via}.", file=sys.stderr)
+        chosen = rest
+
+    if not chosen:
+        counts = (f"raw REST {len(rest)}" if rest is not None
+                  else f"raw REST unavailable ({type(rest_err).__name__})")
+        counts += (f", {fiss_name} {len(fiss)}" if fiss is not None
+                   else f", {fiss_name} unavailable ({type(fiss_err).__name__})")
+        raise TerraError(
+            f"{source} listed 0 {subject} ({counts}).\n"
+            "  An empty listing is not evidence the workspace is empty: this repo measured the\n"
+            "  fiss client answering [] for a workspace that held 5 submissions and 1 method config\n"
+            "  while raw REST returned them (docs/terra-head-to-head.md §8). Check the target\n"
+            "  against what you can actually read -- recon prints the accessible workspace list,\n"
+            "  and `kit/gsvtk-config show` names the file each --ns/--ws came from.")
+    return chosen
+
+
 def whoami() -> str:
     r = session().get(TERRA_API.replace("/api/", "/register/v1/user/info"), timeout=40)
     if r.status_code == 200:
@@ -138,7 +246,9 @@ def entity_sample(ns: str, name: str, etype: str, page_size: int = 50, page: int
 
 
 def workspace_configs(ns: str, name: str) -> list:
-    return _j(fapi.list_workspace_configs(ns, name), f"list_workspace_configs {ns}/{name}")
+    """Method configs in a workspace. See `_read_both` for why fiss is not trusted alone."""
+    return _read_both(f"workspaces/{ns}/{name}/methodconfigs", f"method configs in {ns}/{name}",
+                      lambda: fapi.list_workspace_configs(ns, name), "fapi.list_workspace_configs")
 
 
 def config_payload(ns: str, name: str, cnamespace: str, config_name: str) -> dict:
@@ -147,8 +257,14 @@ def config_payload(ns: str, name: str, cnamespace: str, config_name: str) -> dic
 
 
 def submissions(ns: str, name: str, limit: int = 20) -> dict:
-    d = _j(fapi.list_submissions(ns, name), f"list_submissions {ns}/{name}")
-    items = d.get("submissions", []) if isinstance(d, dict) else d
+    """Recent submissions, newest first, from both clients (see `_read_both`).
+
+    Returns `{"submissions": […]}` because that is the shape `batch_rerun_step status` and
+    `batch_check_inputs` already unpack; the fix is in where the items came from, not in the shape.
+    Raises rather than returning an empty list.
+    """
+    items = _read_both(f"workspaces/{ns}/{name}/submissions", f"submissions in {ns}/{name}",
+                       lambda: fapi.list_submissions(ns, name), "fapi.list_submissions")
     items = sorted(items, key=lambda s: s.get("submissionDate") or "", reverse=True)[:limit]
     return {"submissions": items}
 
@@ -162,7 +278,9 @@ def latest_workflow(ns: str, name: str, config_prefix: str) -> dict:
 
     Submissions are discovered from the workspace rather than remembered, so nothing has
     to be carried in source between sessions (and a rerun after a failure is correctly
-    the one you wanted to look at). Returns {} when no submission matches.
+    the one you wanted to look at). Returns {} when submissions exist but none matches;
+    an empty *listing* is a raised error, not an empty dict, because that is the case
+    where a lying endpoint and an unused workspace look identical.
 
     A submission can fan out to one workflow per entity; workflowCount is reported so a
     multi-entity run cannot be silently rolled up as if it were one workflow.

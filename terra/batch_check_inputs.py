@@ -33,14 +33,13 @@ import config  # noqa: E402
 from terra import fapi  # noqa: E402  # via terra: one friendly missing-dependency message
 import terra  # noqa: E402
 import batch_configs as tc  # noqa: E402
+import steps  # noqa: E402  # one reader for the step -> workflow map (see terra/steps.py)
 
 # womtool is the only thing that can tell you a WDL's REQUIRED call inputs: a missing
 # input binding does not fail WDL typecheck, it fails later, at input-resolution time,
 # mid-submission. Fetch it once (docs/static-checks.md) and point WOMTOOL_JAR at it.
 WOMTOOL = os.environ.get("WOMTOOL_JAR", "")
 JAVA = os.environ.get("JAVA", "java")
-WDLS = {"06": "GenerateBatchMetrics", "07": "FilterBatchSites", "08": "FilterBatchSamples",
-        "09": "MergeBatchSites", "10": "GenotypeBatch"}
 
 
 def checkout() -> str:
@@ -71,12 +70,15 @@ def last_submission(config_name: str) -> tuple:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--step", default="10", choices=sorted(WDLS))
+    ap.add_argument("--step", default="10", choices=steps.known_steps())
     ap.add_argument("--no-sidecars", action="store_true")
     a = ap.parse_args()
 
-    wf = WDLS[a.step]
-    config_name = next(c for c in tc.CONFIGS if c.startswith(a.step + "-"))
+    wf = steps.workflow(a.step)
+    # steps.config_name, not `next(c for c in tc.CONFIGS if c.startswith(step + "-"))`: that raised a
+    # bare StopIteration for a step no config carries, naming neither the step nor what it tried
+    # (docs/module-profiles.md §9.4).
+    config_name = steps.config_name(a.step, tc.CONFIGS)
     req = required_inputs(f"wdl/{wf}.wdl", wf)
     payload = terra.config_payload(tc.NS, tc.WS, tc.NS, config_name)
     bound = {k.split(".", 1)[1] for k in payload.get("inputs", {})}

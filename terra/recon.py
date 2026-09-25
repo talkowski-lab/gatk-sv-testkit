@@ -32,6 +32,10 @@ def p(*a):
     # Every failure path in this file prints a line containing "failed:". Counting here keeps
     # one honest exit code without wrapping all eleven sections in bookkeeping -- and without
     # it, a recon where nothing worked (no ADC, wrong workspace) exited 0 like a clean one.
+    # That counter only sees what is PRINTED, which is why an empty submission/config listing now
+    # raises in terra._read_both instead of returning []: the summary line for an empty inventory
+    # carries no "failed:" marker, so recon exited 0 on the endpoint §8 says lies
+    # (GAP-REVIEW-manta-tloc.md §3.1 reproduces it offline).
     if " failed:" in line:
         FAILS.append(line.strip()[:60])
     print(line, flush=True)
@@ -132,18 +136,30 @@ def main():
 
     p("== workspace method configs")
     try:
-        cfgs = terra.session().get(f"{terra.TERRA_API}workspaces/{args.ns}/{args.ws}/methodconfigs",
-                                   timeout=60).json()
+        # This section was the one place in this file that already bypassed fiss, for the reason
+        # docs/terra-head-to-head.md §8 records. terra.workspace_configs() now does that AND compares
+        # the two clients AND refuses a quiet empty, so the inline session().get() here would have
+        # been a second, weaker copy of the same rule -- which is how the submissions section below
+        # stayed on the lying endpoint after the prose said not to use it.
+        cfgs = terra.workspace_configs(args.ns, args.ws)
         terra.dump(cfgs, os.path.join(OUT, "baseline_configs.json"))
         for c in cfgs:
             p(f"   {c.get('namespace')}/{c.get('name')}  snapshot={c.get('snapshotId')}"
               f"  entity={c.get('rootEntityType')}  wdl={c.get('methodUri')}")
+        p(f"   {len(cfgs)} configs -> recon/baseline_configs.json")
     except Exception as e:
         p("   configs failed:", type(e).__name__, str(e)[:300])
 
     p("== submissions")
+    subs = {}
     try:
-        subs = {"submissions": terra.submissions(args.ns, args.ws, limit=args.subs)}
+        # Both clients, raw REST preferred, and an empty listing raises (terra._read_both). The line
+        # this replaced wrapped terra.submissions()'s dict in another dict, so `for s in
+        # subs["submissions"]` iterated the dict's KEY -- a str -- and died with
+        # `'str' object has no attribute 'get'` (GAP-REVIEW-manta-tloc.md §3.1, hit live), while a
+        # genuinely empty answer printed "0 recent" with no " failed:" marker and recon exited 0 on
+        # the endpoint this repo's own doc says lies.
+        subs = terra.submissions(args.ns, args.ws, limit=args.subs)
         terra.dump(subs, os.path.join(OUT, "baseline_submissions.json"))
         p(f"   {len(subs['submissions'])} recent -> recon/baseline_submissions.json")
         for s in subs["submissions"]:
