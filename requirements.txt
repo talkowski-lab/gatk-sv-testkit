@@ -1,0 +1,19 @@
+# Everything a tool in this repo IMPORTS. Nothing else.
+#
+# Derived by grepping the tree for third-party imports, one comment per line naming the
+# consumer, so a stale line is obvious the next time someone greps. If you add an import,
+# add it here in the same commit; if you delete one, delete its line.
+#
+# Deliberately unpinned. This is a toolkit that gets dropped next to someone else's
+# gatk-sv work, not an application with one reproducible deployment: an upper bound here
+# would fight with the caller's environment, and a lower bound we cannot test is a
+# fiction. External binaries a tool shells out to (jq, bcftools, gsutil, gcloud, java) are
+# NOT pip dependencies and are listed in docs/setup.md instead.
+
+firecloud         # terra/terra.py -> firecloud.api: every Terra call (submissions, configs, entities)
+                  # NOTE the PyPI name is `firecloud`; `pip install fiss` does not exist.
+google-auth       # terra/terra.py: ADC session used for every authenticated request
+numpy             # compare/gq_scale_compare.py, compare/gq_paired_compare.py,
+                  # compare/profile_summarize.py: distribution and per-field statistics
+pandas            # compare/profile_summarize.py: reads gatk-sv-profile's bucketed .tsv.gz tables
+pysam             # compare/pair_level_concordance.py: reads the two VCFs directly, no profiler

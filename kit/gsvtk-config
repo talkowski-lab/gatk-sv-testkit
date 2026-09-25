@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Resolve gatk-sv-testkit configuration: env > profile file > derived > default.
+
+Every tool in this repo asks this program (directly in Python, or through
+kit/config.sh in bash) for environment-specific values, so there is exactly one
+place that decides what "my project / my workspace / my image registry" means.
+
+Precedence, highest first:
+  1. a variable already exported in the process environment
+  2. a profile file, later files winning over earlier ones:
+        $GSVTK_CONFIG                      (explicit path: REPLACES the three below)
+        $PWD/testkit.env                   (per-checkout, gitignored)
+        <repo>/testkit.local.env           (per-checkout, gitignored)
+        ~/.config/gatk-sv-testkit/env      (per-user)
+  3. a value derived from another key (e.g. the image repo from the project)
+  4. a built-in default
+
+Nothing here is Broad-internal: the two values that have no built-in default at
+all -- the GCP project and the Terra workspace -- are exactly the two you must
+supply. `require` prints a written instruction instead of running with a
+guess.
+
+Usage:
+    gsvtk-config get PROJECT            # empty string if unset
+    gsvtk-config require PROJECT        # exit 4 + instruction if unset
+    gsvtk-config env                    # eval-able `export GSVTK_X='...'`
+    gsvtk-config show                   # key, value, provenance
+    gsvtk-config work [SUBDIR ...]      # absolute work dir, creating subdirs
+    gsvtk-config miniwdl                # path to a usable miniwdl, empty if none (exit 0 either way)
+    gsvtk-config doctor                 # what is configured, what is missing
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# ---------------------------------------------------------------- keys
+# key -> (built-in default, help, required_for_use)
+DEFAULTS: dict[str, tuple[str, str, bool]] = {
+    "PROJECT": ("", "GCP project that runs builder/probe VMs", True),
+    "ZONE": ("us-central1-a", "compute zone for those VMs", False),
+    "MACHINE_TYPE": ("e2-standard-8", "builder VM machine type", False),
+    "DISK_GB": ("150", "builder VM boot disk size (GB)", False),
+    "IMAGE_NAMESPACE": ("test", "path segment under the registry that is yours, "
+                                 "so a test push can never overwrite a production image", False),
+    "IMAGE_REPO": ("", "registry repo to push gatk-sv images to", False),
+    "GATK_IMAGE_REPO": ("", "registry repo to push the GATK java image to", False),
+    "GATK_SV_REPO_URL": ("https://github.com/broadinstitute/gatk-sv",
+                         "git URL the builder VM clones for gatk-sv", False),
+    "GATK_REPO_URL": ("https://github.com/broadinstitute/gatk",
+                      "git URL the builder VM clones for the GATK java image", False),
+    "GATK_SV_CHECKOUT": ("", "local gatk-sv clone, used by WDL fetch + static checks", False),
+    "GATK_CHECKOUT": ("", "local gatk clone, used when running the java genotyper", False),
+    "TERRA_API_ROOT": ("https://api.firecloud.org/api/",
+                       "Terra orchestration API root; api.terra.bio does not resolve "
+                       "on some networks, api.firecloud.org does", False),
+    "TERRA_NAMESPACE": ("", "Terra workspace namespace of your sandbox", True),
+    "TERRA_WORKSPACE": ("", "Terra workspace name of your sandbox", True),
+    # The baseline side is Terra's public featured GATK-SV workspace, the one
+    # upstream's own docs send you to (see gatk-sv website/docs/execution/joint.md),
+    # so it is a legitimate default -- override it to point at your own frozen run.
+    "BASELINE_NAMESPACE": ("broad-firecloud-dsde-methods",
+                           "namespace of the baseline (reference) Terra workspace", False),
+    "BASELINE_WORKSPACE": ("GATK-Structural-Variants-Joint-Calling",
+                           "baseline workspace holding the reference joint-calling run", False),
+    "BRANCH": ("", "gatk-sv branch under test -- the new side of a head-to-head", False),
+    "FROZEN_SUFFIX": ("frz", "entity-attribute suffix for frozen baseline inputs", False),
+    "NEW_SUFFIX": ("new", "entity-attribute suffix for this chain's outputs", False),
+    "BATCH": ("all_samples", "sample_set entity name carrying the batch-level attributes", False),
+    "WORK": ("", "scratch tree for staging/, runs/, manifests/, recon/, outputs/", False),
+}
+
+PREFIX = "GSVTK_"
+
+
+def _profile_files() -> list[Path]:
+    """Profile files in increasing order of precedence."""
+    # An EXPLICIT --config/GSVTK_CONFIG replaces the chain rather than joining it. It has to:
+    # otherwise a repo-local testkit.local.env keeps winning over the very override a user
+    # reaches for when they want to run against something else, and "no configuration" cannot
+    # be produced at all -- which makes CI and any reproducible run a lie.
+    explicit = os.environ.get(PREFIX + "CONFIG")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    out: list[Path] = []
+    out.append(Path.cwd() / "testkit.env")
+    out.append(REPO_ROOT / "testkit.local.env")
+    out.append(Path.home() / ".config" / "gatk-sv-testkit" / "env")
+    return out
+
+
+def _parse_profile(path: Path) -> dict[str, str]:
+    """Read `KEY=value` lines. Bash-sourced format on purpose: no TOML parser
+    needed in shell, and the same file works for both languages."""
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]                     # a fully quoted value: use it verbatim
+        elif " #" in value:
+            # `KEY=value   # note` must not swallow the note. Only an unquoted value, and
+            # only a '#' preceded by whitespace, because a real path can contain '#'.
+            value = value.split(" #", 1)[0].rstrip()
+        if key:
+            values[key] = value
+    return values
+
+
+def _short(path) -> str:
+    """$HOME as ~, so provenance stays readable on one line."""
+    home = str(Path.home())
+    s = str(path)
+    return "~" + s[len(home):] if s.startswith(home) else s
+
+
+def _file_vars():
+    """(merged values, key -> the file that won).
+
+    The origin is returned because it is the answer to the only question that matters before a
+    write: profile files are merged last-wins, so `testkit.local.env` and ~/.config/... outrank
+    the repo's `testkit.env`, and the coordinates that decide whose workspace gets written and
+    whose project gets billed can come from a file you are not looking at. Printing `[profile]`
+    hides that; printing the path makes it one glance in `show`.
+    """
+    merged: dict[str, str] = {}
+    origin: dict[str, str] = {}
+    for path in _profile_files():
+        for key, value in _parse_profile(path).items():
+            merged[key] = value
+            merged[key.removeprefix(PREFIX)] = value  # accept bare `PROJECT=`
+            origin[key] = _short(path)
+            origin[key.removeprefix(PREFIX)] = _short(path)
+    return merged, origin
+
+
+def resolve() -> dict[str, tuple[str, str]]:
+    """Return key -> (value, provenance)."""
+    files, origin = _file_vars()
+    resolved: dict[str, tuple[str, str]] = {}
+    for key, (default, _help, _req) in DEFAULTS.items():
+        env_name = PREFIX + key
+        if os.environ.get(env_name):
+            resolved[key] = (os.environ[env_name], "env")
+        elif files.get(env_name):
+            resolved[key] = (files[env_name], f"profile:{origin[env_name]}")
+        elif files.get(key):
+            resolved[key] = (files[key], f"profile:{origin[key]}")
+        else:
+            resolved[key] = (default, "default" if default else "unset")
+
+    # ---- derived values (only when still unset)
+    project = resolved["PROJECT"][0]
+    if not resolved["IMAGE_REPO"][0]:
+        if project:
+            ns = resolved["IMAGE_NAMESPACE"][0]
+            derived = f"us.gcr.io/{project}/{ns}/gatk-sv"
+            resolved["IMAGE_REPO"] = (derived, "derived from PROJECT")
+    if not resolved["GATK_IMAGE_REPO"][0]:
+        if project:
+            ns = resolved["IMAGE_NAMESPACE"][0]
+            resolved["GATK_IMAGE_REPO"] = (f"us.gcr.io/{project}/{ns}/gatk",
+                                           "derived from PROJECT")
+    if not resolved["WORK"][0]:
+        resolved["WORK"] = (str(REPO_ROOT / "work"), "default")
+    return resolved
+
+
+def get(key: str) -> str:
+    key = key.removeprefix(PREFIX).upper()
+    if key not in DEFAULTS:
+        raise KeyError(key)
+    return resolve()[key][0]
+
+
+def require(key: str) -> str:
+    key = key.removeprefix(PREFIX).upper()
+    value, _ = resolve()[key]
+    if not value:
+        _help = DEFAULTS[key][1]      # DEFAULTS[..][2] (required_for_use) is `doctor`'s business;
+                                      # a caller reaching require() has already declared it required
+        sys.stderr.write(
+            f"gsvtk-config: {PREFIX}{key} is not set ({_help}).\n"
+            f"  set it in the environment, or put `{PREFIX}{key}=...` in one of:\n"
+            f"    {'  '.join(str(p) for p in _profile_files() if p.exists()) or '(no profile file found -- start from testkit.env.example)'}\n"
+            f"  see docs/config.md\n"
+        )
+        raise SystemExit(4)
+    return value
+
+
+# ---------------------------------------------------------------- commands
+def cmd_get(a):
+    sys.stdout.write(get(a.key) + "\n")
+
+
+def cmd_require(a):
+    sys.stdout.write(require(a.key) + "\n")
+
+
+def cmd_env(a):
+    for key, (value, _prov) in sorted(resolve().items()):
+        if value:
+            # config.sh evals this output, so a value containing a quote must not be able to
+            # break the quoting of its own line -- or of every line after it.
+            safe = value.replace("'", "'\\''")
+            sys.stdout.write(f"export {PREFIX}{key}='{safe}'\n")
+
+
+def cmd_show(a):
+    for key, (value, prov) in sorted(resolve().items()):
+        _default, _help, required = DEFAULTS[key]
+        flag = " " if value else ("!" if required else "-")
+        sys.stdout.write(f"{flag} {PREFIX}{key:<20} {value or '(unset)':<52} [{prov}]\n")
+    sys.stdout.write("\n! = required and missing   - = optional and unset\n")
+
+
+def cmd_work(a):
+    """Print the directory it created -- including the subdirs, not just their parent.
+
+    Every caller is `SOMETHING="$(gsvtk_work staging)"`. Printing the root made those assignments
+    succeed quietly with the WRONG path: the staging tree and the run outputs both landed in the
+    work dir, and two runs (`gsvtk_work runs/train_chr20` and `runs/train_definitive`) wrote into
+    the same directory and overwrote each other while every log said it had its own. This is the
+    behaviour scripts/selftest.sh now pins with a real assertion.
+    """
+    root = Path(require("WORK")).expanduser()
+    target = root.joinpath(*a.subdirs) if a.subdirs else root
+    target.mkdir(parents=True, exist_ok=True)
+    sys.stdout.write(str(target) + "\n")
+
+
+def find_miniwdl() -> str:
+    """A usable `miniwdl` path, or ''.
+
+    Why this exists instead of `command -v miniwdl`: `make setup` installs miniwdl as a console
+    script in .venv/bin, which is NOT on the PATH of a shell that never activated the venv, and the
+    tools are routinely invoked as `.venv/bin/python terra/wdl_flat.py ...` or from make. A
+    PATH-only lookup therefore reported "miniwdl not found" on a machine where `miniwdl check`
+    passes, and the whole WDL loop got written off as unavailable. Precedence:
+
+        $MINIWDL (verbatim, must be executable)  >  PATH  >  sibling of this interpreter
+                                                      >  <repo>/.venv/bin
+
+    `gsvtk-config miniwdl` exits 0 whether or not it finds one, so that
+    `X="$(gsvtk-config miniwdl)"` cannot fail a `set -e` script or a bash 3.2 pipeline; callers test
+    for the empty string and print the install hint themselves.
+    """
+    import shutil
+    env = os.environ.get("MINIWDL")
+    cands = [env, os.path.expanduser(env)] if env else []
+    found = shutil.which(env or "miniwdl")
+    if found:
+        cands.append(found)
+    if sys.executable:
+        cands.append(str(Path(sys.executable).parent / "miniwdl"))
+    cands.append(str(REPO_ROOT / ".venv" / "bin" / "miniwdl"))
+    for cand in cands:
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return ""
+
+
+def cmd_miniwdl(a):
+    found = find_miniwdl()
+    if found:
+        sys.stdout.write(found + "\n")
+
+
+def cmd_doctor(a):
+    res = resolve()
+    missing = [k for k, (_v, _p) in res.items() if DEFAULTS[k][2] and not _v]
+    sys.stdout.write("profiles read:\n")
+    found = [p for p in _profile_files() if p.exists()]
+    for p in found:
+        sys.stdout.write(f"  {p}\n")
+    if not found:
+        sys.stdout.write("  (none -- copy testkit.env.example to testkit.env)\n")
+    sys.stdout.write("\nrequired:\n")
+    for key, (_d, help_, req) in DEFAULTS.items():
+        if req:
+            value, prov = res[key]
+            sys.stdout.write(f"  {'ok ' if value else 'MISS'} {key:<16} {value or '(unset)'}\n")
+    sys.stdout.write("\noptional:\n")
+    for key, (_d, help_, req) in DEFAULTS.items():
+        if not req:
+            value, prov = res[key]
+            if value:
+                sys.stdout.write(f"  {key:<20} {value}\n")
+    mini = find_miniwdl()
+    sys.stdout.write(f"\nminiwdl: {mini}\n" if mini else
+                     "\nminiwdl: NOT FOUND -- the WDL gate and wdl_flat --check cannot run "
+                     "(make setup, or export MINIWDL=<path>)\n")
+    checkout = res["GATK_SV_CHECKOUT"][0]
+    if checkout:
+        path = Path(checkout).expanduser()
+        sys.stdout.write(
+            f"\ngatk-sv checkout {path}: {'found' if (path / '.git').exists() else 'NOT a git repo'}\n")
+    else:
+        sys.stdout.write("\nGATK_SV_CHECKOUT unset: fetch_wdl and the static checks need it\n")
+    if missing:
+        sys.stdout.write(f"\nmissing required: {', '.join(PREFIX + m for m in missing)}\n")
+        raise SystemExit(4)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name, fn in (("get", cmd_get), ("require", cmd_require)):
+        p = sub.add_parser(name)
+        p.add_argument("key")
+        p.set_defaults(fn=fn)
+    sub.add_parser("env", help="eval-able exports").set_defaults(fn=cmd_env)
+    sub.add_parser("show", help="values + provenance").set_defaults(fn=cmd_show)
+    p = sub.add_parser("work", help="absolute scratch dir")
+    p.add_argument("subdirs", nargs="*")
+    p.set_defaults(fn=cmd_work)
+    sub.add_parser("miniwdl", help="path to a usable miniwdl (empty if none)") \
+        .set_defaults(fn=cmd_miniwdl)
+    sub.add_parser("doctor", help="what is configured / missing").set_defaults(fn=cmd_doctor)
+    a = ap.parse_args()
+    try:
+        a.fn(a)
+    except KeyError as exc:
+        sys.stderr.write(f"gsvtk-config: unknown key {exc}; try one of "
+                         f"{', '.join(sorted(DEFAULTS))}\n")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,59 @@
+--- a/wdl/GenotypeBatch.wdl	2026-09-10 21:29:30
++++ b/wdl/GenotypeBatch.wdl	2026-09-10 21:30:02
+@@ -28,6 +28,16 @@
+     File training_vcf
+ 
+     File training_intervals
++    # RD copy-state training loci (evidence: testkit/CHECKPOINT.md §15). v1.1.1 fit the RD
++    # copy-state mean/sd inside a curated reviewed-CNV bed (v1.1.1
++    # wdl/TrainRDGenotyping.wdl `MakeTrainingBed` -> /opt/RdTest/train_hg38_reviewed_final.bed;
++    # hg19: 1kg.train.loci.bed). Feeding a batch's condensed intervals instead makes the fit
++    # self-referential: the copy states used to partition the training observations are assigned
++    # by the very fixed seed cutoffs (0.25/0.75/1.25/1.75) whose replacements are being fit.
++    # Measured on the frozen v1.1.1 156-sample cohort: state-0 sd 10.51x baseline -> 2.32x with
++    # curated loci, 1.000x with curated loci + 100000 bins + the real bin_exclude.
++    # Unset => previous behavior (condensed intervals).
++    File? rd_training_intervals
+     File median_coverage
+     File rd_file
+     File pe_file
+@@ -83,6 +93,8 @@
+       vcf_index = FilterWhamDeletionsTraining.filtered_vcf_index,
+       output_name = batch,
+       training_intervals = training_intervals,
++      rd_training_intervals = rd_training_intervals,
++      n_RD_genotype_bins = n_RD_genotype_bins,
+       median_coverage = median_coverage,
+       rd_file = rd_file,
+       rd_file_index = rd_file + ".tbi",
+@@ -237,6 +249,13 @@
+     File vcf
+     File vcf_index
+     File training_intervals
++    File? rd_training_intervals
++    # v1.1.1 used n_RD_genotype_bins = 100000 for RD training *and* genotyping (v1.1.1
++    # wdl/TasksGenotypeBatch.wdl:359 `-i ~{n_bins}`). GenotypeSVs.numBins already defaults to
++    # 100000 (GenotypeSVs.java:239) but TrainSVGenotyping.numBins defaults to 10
++    # (TrainSVGenotyping.java:238) and no caller passed either, so RD cutoffs were fit on
++    # 10-bin compressed depth values and applied to 100000-bin ones.
++    Int n_RD_genotype_bins = 100000
+     File median_coverage
+     File rd_file
+     File rd_file_index
+@@ -321,7 +340,7 @@
+     gatk --java-options "-Xmx${JVM_MAX_MEM}" TrainSVGenotyping \
+       -XL chrX -XL chrY \
+       -V ~{vcf} \
+-      --training-intervals ~{training_intervals} \
++      --training-intervals ~{select_first([rd_training_intervals, training_intervals])} \
+       -O ~{output_name}.vcf.gz \
+       --median-coverage ~{median_coverage} \
+       --rd-file ~{rd_file} \
+@@ -335,6 +354,7 @@
+       --sr-quality ${SRQ} \
+       --rd-depth-min-separation ${DEPTH_SEP} \
+       --rd-pesr-min-separation ${PESR_SEP} \
++      --num-bins ~{n_RD_genotype_bins} \
+       --output-dir ./ \
+       --output-name ~{output_name} \
+       ~{training_args}

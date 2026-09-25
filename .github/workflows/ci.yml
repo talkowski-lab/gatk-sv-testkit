@@ -1,0 +1,57 @@
+name: ci
+
+# Two things this job guarantees, and nothing else:
+#
+#   1. every tool still parses, and still prints usage when NOTHING is configured. A tool
+#      whose --help path reaches require() is a bug, and this is the cheapest place to
+#      catch it (it happened: a --help path resolved a required key and died).
+#   2. nothing that identifies the private working directory this repo was built in is
+#      present in the publishable set (project ids, workspace buckets, people, machine
+#      paths). `make audit` is the last line of defence, so it runs on a clean checkout
+#      where the tracked set IS the public repo. Note what a clean checkout CANNOT do:
+#      it has no profile, so the personal half of the audit (values derived from the
+#      machine's own resolved config) is empty here and only the credential/path SHAPES
+#      are graded. That is why CONTRIBUTING asks for `make audit` locally too, and why
+#      the target prints which tiers were live instead of a bare "clean".
+#
+# There are no secrets here, and none are needed: `make test` never contacts Terra or GCE,
+# and no workflow step can reach a path that spends money — submission, config creation,
+# bucket copies and VM boots are deliberately not wired to any make target.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # Both files, so the gate runs with nothing skipped: firecloud/google-auth make the
+      # Terra tools importable (their --help is then actually exercised instead of skipped),
+      # numpy/pandas/pysam do the same for compare/, and miniwdl provides the `WDL` module
+      # replay/build_inputs.py imports plus the `miniwdl` CLI checks/wdl_gate.sh calls.
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: make test
+        run: make test
+
+      - name: make audit
+        run: make audit

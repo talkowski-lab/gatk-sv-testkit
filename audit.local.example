@@ -1,0 +1,22 @@
+# audit.local.txt — YOUR identifiers for `make audit`, kept on your machine.
+#
+# `make audit` already derives your coordinates from the resolved configuration
+# (kit/gsvtk-config minus the shipped defaults), so this file is usually empty. Add a
+# line for anything private that config does not name: a hostname, a personal directory
+# that is not $GSVTK_WORK, initials, a colleague's username, a lab-internal bucket.
+#
+# Copy to `audit.local.txt` (gitignored) and fill it in. It is gitignored because it is
+# the one place a personal string is ALLOWED to live: nothing else in the tracked tree
+# may contain one, which is what the audit enforces -- and why the shipped version of
+# this file contains nothing but placeholders and comments.
+
+# A literal, matched case-insensitively, one per line:
+#   <your-machine-hostname>
+#   <your-initials>
+
+# A regex, prefixed with `re:` (matched case-insensitively):
+#   re:\b[a-z]+-[a-z]+-[0-9]{4,}\b        # e.g. your workspace-name convention
+
+# Declare a derived value PUBLIC so it stops being flagged. Use it only when the value
+# really is public -- a waived value is invisible to the gate, so say which one you waived:
+#   waive all_samples
