@@ -17,6 +17,12 @@ image from a workspace attribute. Literal File values must be quoted inside the
 expression (Terra parses a bare `us.gcr.io/...` as an unquoted identifier and
 rejects it: "The value you entered is not in the correct format for this data
 type"), hence the embedded double quotes.
+
+Caching is the second thing this tool used to inherit rather than choose. It imports `body()` from
+batch_configs.py, so when that builder shipped `"useCallCache": True` this rerun POSTed `true` --
+and `show` printed it, but nothing here said it was a choice. A rerun exists to ask "did my change
+alter the output", which a cache hit answers before the VM boots, so the shared default is now False
+and this file states the mode it resolved (and refuses `--call-cache --no-call-cache` together).
 """
 from __future__ import annotations
 
@@ -186,6 +192,13 @@ def submit() -> None:
     # older map or a different ref than this invocation's, and the map this tool builds is the one it
     # assumes is there -- so compare that map to the WDL it will actually run before the fleet does.
     tc.preflight("rerun submit")
+    # Named before the fleet boots, the same way the images are: a rerun whose calls were served from
+    # a cache did not run the code you came to measure, and its output still looks like a pass. Read
+    # from the same one rule batch_configs.body() applies to the body, never from a copy of its result.
+    cache = tc.call_cache("rerun")
+    print(f"rerun submit: useCallCache={str(cache).lower()} -- "
+          + ("calls whose command+inputs match may be served from the cache"
+             if cache else "every call re-runs, which is the whole point of a rerun"))
     d = terra.submit(tc.NS, tc.WS, tc.NS, CONFIG, ENTITY, ETYPE, None, confirm=True)
     print(json.dumps(d, indent=1)[:600])
     terra.dump(d, str(config.work_dir("metadata") / "rerun_submission.json"))
@@ -218,6 +231,10 @@ so the run cannot inherit a stale image from a workspace attribute.
   --drop-branch-only-inputs  build the config for a ref that does NOT declare this branch's extra
                             inputs (e.g. GSV_WDL_VERSION=main) by dropping them. A SEMANTIC change:
                             it prints what it dropped and which ref it compared.
+  --call-cache / --no-call-cache  whether Cromwell may reuse call outputs. Off unless asked for, and
+                            this tool now says so instead of inheriting batch_configs' default: a
+                            cached call never ran your image. (docs/terra-head-to-head.md §5, and the
+                            cross-workspace cache copy that timed out mid-run in docs/handoff/003.)
   status            recent submissions in the configured workspace""",
           file=sys.stderr if code else sys.stdout)
     raise SystemExit(code)
@@ -249,6 +266,12 @@ if __name__ == "__main__":
             # discoverable, and because this parser's job is to make typos a usage error -- an option
             # the guard needs but the parser rejects would be an option that cannot be used here.
             i += 1
+        elif a in ("--call-cache", "--no-call-cache"):
+            # Accepted here, resolved later by tc.call_cache(): the same rule as the drop flag (that
+            # one is read from sys.argv by batch_configs.body()). Listed in usage() because a flag that
+            # changes what runs has to be discoverable, and because this parser's job is to make a
+            # typo a usage error rather than an unusable option.
+            i += 1
         elif a.startswith("--"):
             raise SystemExit(f"unknown option {a!r}   (--help for the options)")
         else:
@@ -256,6 +279,11 @@ if __name__ == "__main__":
 
     globals()["IMAGES"] = parse_images(specs)
     globals()["CONFIRMED"] = confirm
+    # Called for its refusal only, at dispatch, so `--call-cache --no-call-cache` is refused by THIS
+    # tool in any mode before anything is built, POSTed or submitted. The value itself is read where it
+    # is used -- body() for the body that gets POSTed, submit() for the line printed before compute --
+    # so nothing here holds a copy that could disagree with what runs.
+    tc.call_cache("rerun")
     if not globals()["IMAGES"]:
         globals()["IMAGES"] = images_from_config()
         if globals()["IMAGES"] and argv and argv[0] != "show":
