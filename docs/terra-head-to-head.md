@@ -329,3 +329,68 @@ whose inputs are *superset* on one side has no right to be compared as a mean.
   and re-reads live outputs first.
 - Terra has no per-workspace budget cap. A whole-chain rerun is a fleet of VMs. Prefer
   `batch_rerun_step.py` (single step) over a full rerun, and `--wait` over watching the console.
+
+## 8. API edges that bite, with the exact text each produces
+
+All of these were hit driving real submissions on 2026-09-22…25 (gatk-sv `trio_denovo_single_sample`,
+single-sample pipeline, ~$26 of real runs). Each was worth a round trip, none is documented elsewhere
+in this repo, and two of them only surface after a run has already spent money.
+
+**Payload shape — rejected at submit time, cheap to find, painful to guess.**
+
+- Config `inputs` keys must be **workflow-qualified**: `GATKSVPipelineSingleSample.dragen_vcf`, not
+  `dragen_vcf`. Strip the prefix and the validator reports every single input as extra (observed:
+  117 `extraInputs`, 87 missing) — a total-misery error message for a one-line cause.
+- Submission entity expression is exactly `this`. `this.sample.SM-GN4BI` → HTTP 400.
+- Config `outputs` **values** are unqualified: `this.moi_summary`, not
+  `this.GATKSVPipelineSingleSample.moi_summary`:
+  `400 … Invalid outputs: GATKSVPipelineSingleSample.moi_summary -> Entity references not permitted in
+  the middle of output expressions`. The workflow prefix belongs to the key, never to the value.
+- `methodRepoMethod.sourceRepo` must be `dockstore`; `github` → `400 Illegal method repo 'github'`.
+
+**Outputs are not validated. Ever.** `create_workspace_config` / `overwrite_workspace_config` return
+`extraInputs` / `invalidInputs` / `invalidOutputs`, and `invalidOutputs` is **0 even for an output name
+the workflow does not declare**. A stale key then fails at the very end of a finished run:
+
+```
+output named GATKSVPipelineSingleSample.final_bed does not exist
+```
+
+Cromwell's own root status was `Succeeded`, all 17 outputs existed, and Terra still marked the
+workflow `Failed`. Cost of that one key: an entire 20 h / $18.87 run reported as a failure. **Check
+the config's output names against the descriptor before submitting** — the only validator is the run:
+
+```bash
+ID='%23workflow%2Fgithub.com%2Fbroadinstitute%2Fgatk-sv%2FSingleSamplePipeline'
+curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/descriptor" \
+  | python3 -c "import json,sys,re; c=json.load(sys.stdin)['content']; i=c.rindex('output {'); print('\n'.join(re.findall(r'^\s*\w+\??\s+(\w+)\s*=', c[i:], re.M)))"
+```
+
+**Endpoints that lie by omission** (all observed on a workspace that demonstrably had the data):
+
+- `GET …/submissions` via `firecloud.api.list_submissions` → `[]`. So does `list_workspace_configs`
+  for a workspace holding 1 config. Raw REST with a `gcloud auth print-access-token` bearer returns
+  the truth. This is why you must raw-REST the submission list after any submit call that raised
+  mid-flight, to prove you did not double-spend.
+- Per-workflow metadata is a **cached snapshot**: two fetches 30+ min apart returned byte-identical
+  JSON while the scratch bucket proved the run had advanced. It also omits sub-workflow internals —
+  top-level `calls` sat at 9 entries while ~200 tasks ran inside `GatherBatchEvidence`. Use
+  `?expandSubWorkflows=true` for the real call graph and know it returns **~45 MB**: `curl -o` it and
+  print a summary, never into an agent's context.
+- For live progress and spend, trust the scratch bucket (`gsutil ls -d …/call-*/`) and the submission's
+  `cost` field. `twatch.py --diagnose` answers HTTP **405**; don't route around it by hand.
+- Finished submissions store their config under a per-submission snapshot name
+  (`single-sample-trio-a0e10b99_B0EJFlC5SLk`). Those are not extra configs; don't clean them up.
+
+**Two WDL-side facts that cost real runs, because the backend is not a filesystem.**
+
+- A `write_lines()`/`write_tsv()`/`write_json()` at **workflow** scope cannot be materialized on
+  PAPIv2: `Could not build the path "write_lines_….tmp". It may refer to a filesystem not supported
+  by this instance of Cromwell. Supported filesystems are: DRS, Google Cloud Storage, HTTP.` It checks
+  clean in miniwdl and runs fine on local Cromwell. Materialize inside a task command instead.
+- Every `File` input is **downloaded** into the task's working directory before the command runs, even
+  when the command only asks `defined(the_file)`. Two whole-genome parental CRAMs onto a task asking
+  for `local-disk 10 HDD` = a job that runs ~20 min, writes **no stdout/stderr at all**, and dies with
+  `The job was stopped before the command finished` — which reads like an image-pull failure until you
+  `gsutil cat` the task's `gcs_localization.sh` and see the CRAMs in it. Pass a `Boolean` computed at
+  the call site when you only need presence.
