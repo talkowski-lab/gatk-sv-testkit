@@ -26,16 +26,16 @@ jinja2           # what gatk-sv's own renderer imports (`scripts/inputs/build_in
                  # `inputs/templates/**`). Nothing here imports it, so the plainest question about a
                  # shipped template -- does the single-sample workspace template render, and how many
                  # rows x attributes? -- could not be asked of this venv: `./.venv/bin/python -c
-                 # "import jinja2"` is `ModuleNotFoundError: No module named 'jinja2'` (measured in
-                 # ./.venv at the time of writing), and the review that hit it had to build another
-                 # interpreter to render the template it was asking about.
+                 # "import jinja2"` was `ModuleNotFoundError: No module named 'jinja2'` (measured in
+                 # ./.venv before this line existed), and the review that hit it had to build another
+                 # interpreter to render the template it was asking about. Now installed: jinja2 3.1.6.
 
 PyYAML           # provides `yaml`, the difference between parsing `.github/.dockstore.yml` and
                  # text-inspecting it. That file decides which gatk-sv workflows Dockstore publishes,
-                 # and it is read with grep today only because `./.venv/bin/python -c "import yaml"`
-                 # is `ModuleNotFoundError: No module named 'yaml'` (measured the same way). A
+                 # and it was read with grep only because `./.venv/bin/python -c "import yaml"` was
+                 # `ModuleNotFoundError: No module named 'yaml'` (measured the same way). A
                  # `branches:`/`name:` list checked by eye is a check that cannot say how many entries
-                 # it saw.
+                 # it saw. Now installed: PyYAML 6.0.3.
 
 # Not pip-installable, and therefore not listed here either:
 #   womtool.jar  - set WOMTOOL_JAR=/path/to/womtool.jar for terra/batch_check_inputs.py
