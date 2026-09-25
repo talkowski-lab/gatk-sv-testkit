@@ -70,7 +70,7 @@ Genotyping module today — generalising them to any module is
 | **Build a docker image from a branch** | Install Docker Desktop, or hand-run the manual build on a VM; ~1-3 h; Apple Silicon cannot build `linux/amd64` locally at all | `docker/gatk-sv-build.sh <branch>` — one throwaway x86_64 GCE VM, no local Docker, streams the log, deletes itself | [docker builds](docs/docker-builds.md) |
 | **Compare a branch against a real baseline run** | Re-run the whole pipeline twice and hope the inputs matched | Freeze one baseline's inputs, run only the changed stage, diff the tables and VCFs that came out | [Terra head-to-head](docs/terra-head-to-head.md) |
 | **Test a genotyper change without any cloud spend** | Not possible without a Terra run | `terra/stage_inputs.py` pulls the exact frozen inputs; a locally built GATK jar runs the real trainer on them | [local replay](docs/local-replay.md) |
-| **Catch a WDL / `sv_shell` break before submitting** | Discover it mid-submission, after VMs booted | `checks/` — static: seconds, no data, no docker, no network (`image-check/` is the deliberate exception: it asks a shipped image) | [static checks](docs/static-checks.md) |
+| **Catch a WDL / `sv_shell` break before submitting** | Discover it mid-submission, after VMs booted | `checks/` — static: seconds, no data, no docker, no network. `wdl_gate.sh` asks whether the call bindings are right; `wdl_semantics.py` asks whether the workflow would RUN at all (both diff against a base ref). `image-check/` is the deliberate exception: it asks a shipped image | [static checks](docs/static-checks.md) |
 
 ## Quickstart
 
@@ -119,7 +119,8 @@ checks/wdl_gate.sh origin/main my-branch
 ```
 docker/     gatk-sv-build.sh + remote-build.sh   build+push any branch's images, no local Docker
 terra/      recon, baseline freezing, method configs, status, cost, fetch+compare  (Terra loop)
-checks/     static checks: WDL launchability, sv_shell JSON contract, image byte-proof
+checks/     static checks: WDL launchability, WDL semantics + blast radius, sv_shell JSON
+            contract, image byte-proof (and running a script inside an image)
 compare/    13 comparators: keyed tables, site×sample matrices, VCF fields, sets, bundles
 replay/     rebuild a launchable input JSON from a captured successful run
 scripts/    fetch_wdl.py (WDLs from your checkout, never vendored), audit.py (publish guard)

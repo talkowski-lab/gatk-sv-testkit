@@ -55,7 +55,43 @@ gatk-sv checkout ([Configure](#configure)). Those are checks, not probes, so the
 pinned count. CI installs both files, which is why CI is where the gate is enforced; on a laptop the
 coverage is a choice you make with your eyes open.
 
+## Pinning a local venv to what production actually runs
+
+The versions that matter are not in this repo, and they must not be: a version written here is a
+version that stops being true the day gatk-sv moves a dockerfile. `scripts/prod_pins.py` reads them
+out of the upstream clone at a ref, with `git show <ref>:<path>` — the clone's working tree, index and
+HEAD are never touched, the same discipline `scripts/fetch_wdl.py` keeps with `git archive`:
+
+```bash
+./scripts/prod_pins.py --repo "$GSVTK_GATK_SV_CHECKOUT" --ref origin/main
+./scripts/prod_pins.py --requirements venv-prod.txt      # pip-installable approximation
+```
+
+Run against a real clone, that prints the provenance of each file it read and then the pins — on
+2026-09-25 at `e1909d2fa646` it was 14 keys (`pysam=0.15.4`, `python=3.10.4`, `pybedtools=0.9.0`, …)
+from three dockerfiles:
+
+```
+prod_pins: <clone> @ e1909d2fa646 (origin/main)  dockerfiles/sv-pipeline-virtual-env/Dockerfile: 13 pin(s)
+prod_pins: <clone> @ e1909d2fa646 (origin/main)  dockerfiles/samtools-cloud-virtual-env/Dockerfile: 1 pin(s)
+prod_pins: <clone> @ e1909d2fa646 (origin/main)  dockerfiles/sv-utils-env/Dockerfile: 1 pin(s)
+```
+
+`pysam=0.15.4` is the load-bearing one. A local pysam newer than that is exactly what produces
+`[E::vcf_format] Invalid BCF, the INFO tag id=16 is too large` when a header-added INFO tag goes
+through a `bcftools sort` stdin pipe ([troubleshooting.md](troubleshooting.md) has the row) — so the
+requirements file it emits carries that warning in its header too, and `python` stays a comment
+because pip cannot install an interpreter.
+
+What it refuses, each pinned by `--selftest` (9 assertions, offline, git fixture in a temp dir): a ref
+that does not resolve, a `--repo` that is not a git repository, a dockerfile that is not there, a
+required pin that has gone, and **one package pinned twice to two versions — naming both**, because
+first-write-wins would silently pick an answer about someone else's version. The selftest's control
+asserts the **full** pin count across a backslash continuation: gatk-sv writes its conda list across
+two physical lines, and a one-line parser saw 6 of 11 pins and still exited 0.
+
 ## Google Cloud
+
 
 ```bash
 gcloud auth login                                  # for gcloud itself
