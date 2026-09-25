@@ -1,7 +1,28 @@
 # 003 — Single-sample blockers: ConcatBaf, svtk `pkg_resources`, and an rc=141 SIGPIPE race that only large inputs hit
 
 **Session date:** 2026-09-25 (`date -u` at freeze: **17:06:19Z**). Branch of record: `mw_fix_single_sample_blocking`
-in the worktree `/Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking`; HEAD `04fa5142`, remote head identical.
+in the worktree `/Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking` (your checkout — the real path is
+`$GSVTK_GATK_SV_CHECKOUT`, see `kit/gsvtk-config show`); HEAD `04fa5142`, remote head identical.
+
+**Coordinates are placeholders here, deliberately.** `.gitignore` opens with "Real project / workspace /
+registry coordinates stay out of the repo", and `make audit` enforces it on the tracked file set — this
+doc failed that audit when it shipped, because at the time `make test` did not run the audit (it does
+now, which is how this class of leak would have been caught on push). So the project id, registry
+path, dev bucket, home paths, Terra submission/workflow UUIDs and the workspace *bucket* UUID are
+replaced by `<…>` placeholders, and every one of them is recoverable on the machine that ran this:
+
+| placeholder | what it is | where the real value lives |
+|---|---|---|
+| `<your-project>` | the GCP/Terra project | `kit/gsvtk-config show` → `GSVTK_PROJECT` |
+| `us.gcr.io/YOUR_PROJECT/YOUR_NAMESPACE/gatk-sv` | dev image repo | `GSVTK_IMAGE_REPO` |
+| `gs://<your-dev-bucket>/…` | dev scratch bucket | the bucket next to `GSVTK_PROJECT` (`gs://<project>-<namespace>/`) |
+| `<submission-running>`, `<workflow-running>` | the still-running single-sample submission | Terra UI → the `…-mw-fix966` workspace, newest submission; or `python terra/batch_status.py` with that workspace configured |
+| `<submission-failed>` | the `rc=141` submission that produced the finding | same workspace, the submission before it |
+| `gs://fc-<workspace-bucket-uuid>/…` | a workspace's private bucket | from the workspace's `bucketName` attribute in the Rawls API |
+
+Workspace **names** (`…-mw-fix966`, `…-Joint-Calling-Test`) are kept: the namespace is a shipped public
+default and the name is what you type to find the run again. UUIDs are not — they identify the objects,
+not the run.
 
 **Clock disagreement, recorded not resolved (§3.1):** `gh pr view 1 --repo talkowski-lab/gatk-sv-testkit` reports
 `mergedAt = 2026-09-23T19:27:52Z`, which **predates this session's start**. Both timestamps are given; neither was
@@ -19,7 +40,7 @@ found `rc=141` failures.
 
 | workstream | state at freeze | proof |
 |---|---|---|
-| A. `ConcatBaf` used `/gatk/gatk` inside `sv_pipeline_docker` | **verified fixed, twice, on Terra** | `call-ConcatBafCase/**/rc` = `0` in submission `84d5820a…`; Cloud Build `7ab2727d…` in-image test |
+| A. `ConcatBaf` used `/gatk/gatk` inside `sv_pipeline_docker` | **verified fixed, twice, on Terra** | `call-ConcatBafCase/**/rc` = `0` in submission `<submission-running>`; Cloud Build `7ab2727d…` in-image test |
 | B. `svtk` imported `pkg_resources` (removed in setuptools ≥ 82) | **verified fixed in image** | Cloud Build `3501413f…`: `RUN svtk -h` passes with `setuptools-84.0.0`, gates `svtk imports with pkg_resources unavailable` + `svtk package data present` |
 | C. single-sample `workspace.tsv.tmpl` would not render | **verified** | rendered `workspace.tsv` = 2 rows × 96 attrs, includes `workspace:cloud_sdk_docker` |
 | D. `CondenseReadCounts` died `rc=141` on **both** attempts | **reproduced in container AND verified fixed in the live Terra run** | see §2 |
@@ -65,8 +86,8 @@ the file rather than a copy:
 | item | value |
 |---|---|
 | workspace | `broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966` |
-| submission | `84d5820a-d8ab-4afd-a0d1-75cc09b5bbcd` |
-| workflow | `5354e616-efcf-4b86-83c3-2d9fa9528805` — **`Running`** at freeze, `outputs: {}`, `messages: []` |
+| submission | `<submission-running>` |
+| workflow | `<workflow-running>` — **`Running`** at freeze, `outputs: {}`, `messages: []` |
 | started | 2026-09-24T16:12Z (~25 h before freeze) |
 | rc tally | **433 files, all `0`, zero non-zero** — measured 15:40Z and again 17:05Z |
 | in flight | `BatchEvidenceMerging.SDtoBAF` (localization files present, no `rc`; took 342 min in the prior run) |
@@ -99,8 +120,9 @@ new objects appear under the submission prefix, not by assuming.
 4. **A `grep pkg_resources` hit in `src/svtk/svtk/__init__.py` is my docstring**, not code. No `pkg_resources`
    import remains in `src/` (`grep -rln pkg_resources src/ dockerfiles/` → only that docstring, a stale local
    `.pyc`, and the Dockerfile gate's deliberate probe).
-5. **The cross-workspace call-cache timeouts were self-inflicted**, not a pipeline defect: submission `3a824687…`
-   went out with `useCallCache=true`. The re-run used `false` and has had zero failures.
+5. **The cross-workspace call-cache timeouts were self-inflicted**, not a pipeline defect: submission
+   `<submission-failed>` went out with `useCallCache=true`. The re-run used `false` and has had zero
+   failures.
 
 ## 5. sv-shell: what carries and what does not (analysis only, verified by grep)
 
@@ -125,14 +147,14 @@ new objects appear under the submission prefix, not by assuming.
 - `gs://<your-dev-bucket>/gatk-sv/na12878-scoped-9f2ebe25/results/results.tgz` — **still present** (~27 GB, matched 1 object). Delete when the scoped-VM evidence is no longer needed.
 
 **Terminal / gone**
-- Submissions `3a824687…` (`Failed`, `$1.17`, the `rc=141` run) and `84d5820a…` (running). GCE `gsv-na12878-scoped`: **gone** (`gcloud compute instances list … | grep gsv` → no rows). Not billing.
+- Submissions `<submission-failed>` (`Failed`, `$1.17`, the `rc=141` run) and `<submission-running>` (running). GCE `gsv-na12878-scoped`: **gone** (`gcloud compute instances list … | grep gsv` → no rows). Not billing.
 
 **Not mine, untouched** — parallel worktrees/sessions: `wt/manta_tloc_autoresolve` (its own HEAD says "Handoff 002: PR #968"), `wt/jrc_args` (2 unpushed commits), `wt/tloc-pr` (branch never pushed), `wt/trio-denovo`, and untracked `GAP-REVIEW-manta-tloc.md` in the testkit checkout. Nothing here was staged, committed, or deleted by this session.
 
 ## 7. Resume here — paste-able, verify each line
 
 ```bash
-cd /Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking
+cd "$GSVTK_GATK_SV_CHECKOUT/wt/fix-ss-blocking"   # kit/config.sh resolves it; the placeholder legend is at the top
 
  (A) drop the two Dockstore commits, then force-push and re-check CI
  git rebase --onto 9f2ebe25 e5bbc402 mw_fix_single_sample_blocking
@@ -143,11 +165,14 @@ cd /Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking
  (B) Terra run: status, cost, and where it stands
  TOK=$(gcloud auth print-access-token)
  curl -s -H "Authorization: Bearer $TOK" \
-   "https://api.firecloud.org/api/workspaces/broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966/submissions/84d5820a-d8ab-4afd-a0d1-75cc09b5bbcd" \
+   "https://api.firecloud.org/api/workspaces/broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966/submissions/<submission-running>" \
    | python3 -c 'import json,sys; d=json.load(sys.stdin); w=d["workflows"][0]; print(d["status"], w["status"], len(w.get("outputs") or {}))'
 
  (C) task tally — growth here is the real liveness signal, not the status string
- B=gs://fc-<workspace-bucket-uuid>/submissions/84d5820a-d8ab-4afd-a0d1-75cc09b5bbcd/GATKSVPipelineSingleSample/5354e616-efcf-4b86-83c3-2d9fa9528805
+ WS_BUCKET=$(curl -s -H "Authorization: Bearer $TOK" \
+   "https://api.firecloud.org/api/workspaces/broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966" \
+   | python3 -c 'import json,sys; print(json.load(sys.stdin)["workspace"]["bucketName"])')   # -> fc-<uuid>
+ B=gs://$WS_BUCKET/submissions/<submission-running>/GATKSVPipelineSingleSample/<workflow-running>
  gsutil -u <your-project> cat $B/**/rc | sort | uniq -c
 
  (D) re-run the SIGPIPE regression test (needs a Linux bash ≥ 4 — macOS ships 3.2, no pipefail)
@@ -175,7 +200,8 @@ cd /Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking
 1. `rc=141` SIGPIPE-under-`pipefail` — see §2. `gsutil ls -d <dir>/*/` **listing files, not dirs**, is what hid the attempt layout; `-m -d` then died with `"ls" command does not support "file://" URLs`.
 2. `##[error]Readonly file modified: .github/.dockstore.yml` — readonly guard, §4.1.
 3. `scala.MatchError: gs://…1kg_ref_panel_v1.ped (of class cromwell.filesystems.gcs.GcsPath)` — Cromwell **Local backend** cannot localize a `GcsPath` input that way; scoped single-VM limitation, not a branch defect.
-4. `TimeoutException … waiting to copy gs://fc-<wbid8>-…/all_samples.RD.txt.gz` — cross-workspace call-cache copy from `useCallCache=true`.
+4. `TimeoutException … waiting to copy gs://fc-<another-workspace-bucket-uuid>/all_samples.RD.txt.gz` —
+   cross-workspace call-cache copy from `useCallCache=true`.
 5. `twatch.py status --diagnose` → `HTTP Error 405: Method Not Allowed`. Diagnosis had to come from the Cromwell `workflow.logs/workflow.<uuid>.log` object in GCS instead. **Still broken; worth a toolkit issue.**
 6. `Validation errors: Extra inputs: GenotypeBatch.training_vcf` — the rerun config bound a key that exists only on `mw_genotype_scale`.
 7. sv-shell image lineage: build succeeded, `clean_vcf.sh` had `--all-contigs`, verify still failed because `add_retro_del_filters.py` was inherited from a base image without it. Rebuild the base first.
@@ -186,7 +212,7 @@ cd /Users/you/IdeaProjects/gatk-sv/wt/fix-ss-blocking
 ## 10. Durable facts for standing instructions
 
 Deliberately **not** committed elsewhere: the `gatk-sv` checkout tracks no `CLAUDE.md`/`AGENTS.md` (adding one would
-land in PR #966), and `/Users/you/Work/genotypebatch_debug/CLAUDE.md` is a live pointer owned by a parallel
+land in PR #966), and `/Users/you/Work/<scratch-dir>/CLAUDE.md` is a live pointer owned by a parallel
 session. These facts are for the owner to place:
 
 - Editing `.github/.dockstore.yml` or `inputs/values/dockers.json` in a PR fails CI (`Verify`, `readonly_check.yaml`); only `gatk-sv-bot` is exempt.
@@ -198,7 +224,7 @@ session. These facts are for the owner to place:
 ## 11. Open items / next steps
 
 - [ ] **OI-1 (blocking the merge)** drop `4419315c` + `e5bbc402` from PR #966, force-push, confirm `Verify` passes. §7(A).
-- [ ] **OI-2** let `84d5820a…` finish; confirm `SDtoBAF rc=0` and workflow `Succeeded`; record final cost as a *measured* number (§7 B/C).
+- [ ] **OI-2** let `<submission-running>` finish; confirm `SDtoBAF rc=0` and workflow `Succeeded`; record final cost as a *measured* number (§7 B/C).
 - [ ] **OI-3** update the PR #966 body with the Terra evidence in §2/§3 — **and** the correction that the dockstore commits are out.
 - [ ] **OI-4** decide the sv-shell contig-scope gap: land PR #961's `add_retro_del_filters` change first, or a standalone PR. Until then sv-shell is not runnable from `main` (§5).
 - [ ] **OI-5** joint `10-GenotypeBatch` rerun: re-verify the seam is usable on testkit `main` (§7 E), then submit; restore `10-GenotypeBatch-rerun` afterwards.

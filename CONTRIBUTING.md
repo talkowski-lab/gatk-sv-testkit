@@ -7,7 +7,7 @@ make setup            # ./.venv with what the tools import
 make test && make audit
 ```
 
-`make test` is the offline gate and must pass with no credentials, no data and no network. Its six
+`make test` is the offline gate and must pass with no credentials, no data and no network. Its seven
 parts each exist because the previous one proved insufficient:
 
 | part | what it proves | why `--help` + `py_compile` were not enough |
@@ -17,6 +17,7 @@ parts each exist because the previous one proved insufficient:
 | `flake` | the pyflakes sweep (`flake8 --select=F`, nothing else): undefined names, imports that are not there, values computed and then dropped | the half of `NameError` that `undefmods` cannot see (bare names, not module attributes), and the "built the diagnostic, never used it" class — a check that silently stops checking still prints `ok` |
 | `helpsweep` | `--help` works on every tool with zero configuration | argument parsers are the only code path `--help` reaches |
 | `smoke` | the tools actually **run** end-to-end on hostile/empty fixtures | `--help` never reaches `main()`; the comparator that was dead on every real invocation passed all of the above |
+| `audit` | the publishable file set holds no credential shape and no value that is one of this machine's own coordinates | code that passes every check above still ships a doc that names your project, your bucket and your home path — handoff 003 did exactly that (9 hits) while `make test` was green, because the audit was a separate target and prose is not compiled |
 | `selftest` | the config layer, both checkers' parsing, the checkers against a real clone, `scripts/probe_fixes.py`, the shipped skill (`scripts/check_skill.py`) and the docs' own structure (`scripts/check_docs.py`) — with **positive controls** (blocks executed must equal blocks present; ≥ 12 stage calls compared; the probe tally must account for every probe; each new checker carries a control that must fail) | "exit code was acceptable" is satisfied by a checker that detects nothing |
 
 When you fix a defect that was reproduced, add the reproduction to
@@ -31,7 +32,8 @@ exists because the assertions used to live in a Makefile recipe where `$$($("$@"
 by make into nothing — bash received `out="( 2>&1)"`, no command ran, and all eight config
 assertions reported `ok` forever. Keep assertions in `scripts/selftest.sh`, never in a recipe.
 
-`make audit` fails if the publishable file set holds a credential shape (a service-account address,
+`make audit` (now one of the seven parts above, and still runnable on its own — `make audit V=1` shows
+what it read) fails if the publishable file set holds a credential shape (a service-account address,
 a private key, an absolute home path) **or any value that is one of this machine's own coordinates**
 — the project, Terra workspace, registry path or checkout path your own configuration resolves to,
 minus whatever resolves identically with no profile (those are shipped defaults, public by
@@ -39,6 +41,10 @@ construction). No file is exempt, and nobody's identifiers are shipped in the pa
 personal half is derived from the machine doing the publishing, so **CI grades the shapes and your
 own machine grades your own names** -- which is why you run `make audit` locally before pushing and
 not only in CI. Both run in CI for exactly that reason.
+
+One limit worth knowing before you trust a green gate: the audit scans the **git-tracked** set. A leak
+sitting in an untracked file passes `make test` and fails it one commit later, so `git add` first when
+the question is "is this ready to publish".
 
 ## The bar for a new tool
 

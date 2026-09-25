@@ -7,8 +7,10 @@ name: ci
 #      catch it (it happened: a --help path resolved a required key and died).
 #   2. nothing that identifies the private working directory this repo was built in is
 #      present in the publishable set (project ids, workspace buckets, people, machine
-#      paths). `make audit` is the last line of defence, so it runs on a clean checkout
-#      where the tracked set IS the public repo. Note what a clean checkout CANNOT do:
+#      paths). `make audit` runs twice on purpose: inside `make test`, so prose is graded on
+#      every push rather than when someone remembers, and again as its own step, because a
+#      leak should be a separate red line rather than a line inside a green gate. Note what
+#      a clean checkout CANNOT do:
 #      it has no profile, so the personal half of the audit (values derived from the
 #      machine's own resolved config) is empty here and only the credential/path SHAPES
 #      are graded. That is why CONTRIBUTING asks for `make audit` locally too, and why

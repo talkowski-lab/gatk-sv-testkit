@@ -147,7 +147,7 @@ members and pet service accounts.
 > pasting the inventory.
 
 ```bash
-make test                                 # offline: syntax, pyflakes, --help, real runs, selftests
+make test                                 # offline: syntax, pyflakes, --help, real runs, audit, selftests
 ./kit/gsvtk-config doctor                 # profile completeness
 python terra/recon.py                     # read-only: identity, billing, workspaces, baseline model
 docker/gatk-sv-build.sh --check <branch>  # read-only preflight against GCP

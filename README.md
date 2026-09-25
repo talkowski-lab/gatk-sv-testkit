@@ -85,7 +85,8 @@ cp testkit.env.example testkit.env  # then edit it: project + workspace are your
 
 make test                           # the offline gate: syntax, undefined-module refs, a pyflakes
                                     # bug sweep, `--help` on every CLI, real end-to-end invocations,
-                                    # self-tests + canary + probes for every confirmed defect
+                                    # the publish audit, self-tests + canary + probes for every
+                                    # confirmed defect
 ```
 
 `make test` runs with no credentials, no data and no network, and it is the gate this repo holds itself

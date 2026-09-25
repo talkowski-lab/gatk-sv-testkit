@@ -278,15 +278,19 @@ means this loop is blocked on this machine until you point it at a jar.
 
 ## 8. Before you change anything here: the offline gate
 
-`make test` must pass with **no credentials, no data, no network**, and its six parts each exist
+`make test` must pass with **no credentials, no data, no network**, and its seven parts each exist
 because the previous one proved insufficient — the comparator that was dead on every real invocation
 passed `py_compile` *and* the `--help` sweep, and shipped.
 
 ```
 $ make test
   ok    compare_batch_tables runs, finds nothing to compare, exits 1
+  ok    undef_module_refs runs against a real path
+audit: tally: hits=0 files=0
+audit: clean — no shape match and none of this machine's own coordinates appear in the publishable set.
+  ok    compare/make_fixtures.py writes the fixture pair
   ok    scripts/probe_fixes.py pins every confirmed defect with a control (13 ok, 0 skipped)
-selftest: 32 ok, 0 skipped, 0 failed
+selftest: 56 ok, 0 skipped, 0 failed
 
 make test: PASS (offline gate)
 ```
@@ -294,10 +298,13 @@ make test: PASS (offline gate)
 The `13` is a pinned count, not a coincidence: each of those probes reproduces a defect a review
 confirmed, then asserts a **positive control** proving the guarded path was reachable — because "the
 guard never fired" and "the guard could not have fired" print the same thing. That number going down is
-a failed gate. `make audit` is the separate last line of defence: it fails if the publishable file set
-holds a credential shape **or any value that is one of your own coordinates** — it derives those from
-your configuration rather than shipping anyone's names, so CI grades the shapes and your machine grades
-your names. Both run in CI.
+a failed gate. The `audit` part fails if the publishable file set holds a credential shape **or any
+value that is one of your own coordinates** — it derives those from your configuration rather than
+shipping anyone's names, so CI grades the shapes and your machine grades your names. It used to be a
+separate target, and a handoff doc shipped nine private coordinates while this gate was green: code is
+compiled, prose is not, so the audit moved inside. `make audit V=1` still runs it alone and prints what
+it read. Both run in CI, and one limit matters — the audit scans the **tracked** set, so stage before
+asking whether a change is publishable.
 
 Two things on a first run. Install the dev file alongside `make setup`
 (`.venv/bin/python -m pip install -r requirements-dev.txt`) — miniwdl and flake8 are dev tools, not

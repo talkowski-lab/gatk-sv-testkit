@@ -425,6 +425,15 @@ else
 fi
 rm -f "$A/audit.local.txt"
 
+# ------------------------------------------------------------------ the gate itself
+echo
+echo "the gate itself: what 'make test' claims to run is what it runs"
+# CONTRIBUTING.md and docs/quickstart.md both list the parts of `make test`, and the audit was not one
+# of them when a handoff doc shipped nine private coordinates on a green gate. Docs describing a gate
+# that changed shape are how that happened, so the composition is asserted here rather than assumed.
+check "make test runs the publish audit (the docs claim it; a leak shipped when it did not)" \
+    sh -c "grep -A 9 '^test:' Makefile | grep -q -- '--no-print-directory audit'"
+
 # --------------------------------------------------------------------------- comparators
 echo
 echo "comparators: every tool pinned to a synthetic pair whose differences are written down"
@@ -527,5 +536,15 @@ printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that can
 printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'
 
 echo
+# The selftest count in `make help` is a claim, not a comment: it read "32 selftests" through two
+# rounds of new assertions. This is checked, not hoped for -- and only on a run where nothing was
+# skipped, because a smaller number caused by a missing optional dependency is not a claim to fix.
+CLAIM="$(command grep -o '[0-9][0-9]* selftests' Makefile | command grep -o '[0-9][0-9]*' | head -1)"
+if [ "$skip" -eq 0 ] && [ -n "$CLAIM" ] && [ "$CLAIM" != "$ok" ]; then
+    fail=$((fail + 1))
+    printf '  FAIL  make help claims %s selftests and %s ran\n' "$CLAIM" "$ok"
+    printf '        the claim is documentation that rots silently; change the number in the Makefile,\n'
+    printf '        and only upward if what you added is an assertion (a probe you deleted is a finding)\n'
+fi
 printf 'selftest: %s ok, %s skipped, %s failed\n' "$ok" "$skip" "$fail"
 [ "$fail" -eq 0 ]

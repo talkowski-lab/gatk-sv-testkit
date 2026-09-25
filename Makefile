@@ -48,7 +48,9 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + 55 selftests; needs no config file, no credentials, no network. A missing"
+	@echo "              + publish audit + 56 selftests; needs no config file, no credentials, no"
+	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
+	@echo "              untracked file passes this gate and fails it one commit later. A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
 	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
@@ -90,6 +92,7 @@ test:
 	$(MAKE) --no-print-directory flake      || rc=1; \
 	$(MAKE) --no-print-directory helpsweep  || rc=1; \
 	$(MAKE) --no-print-directory smoke      || rc=1; \
+	$(MAKE) --no-print-directory audit      || rc=1; \
 	$(MAKE) --no-print-directory selftest   || rc=1; \
 	echo; \
 	if [ $$rc -eq 0 ]; then echo "make test: PASS (offline gate)"; \
