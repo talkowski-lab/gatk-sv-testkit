@@ -1,6 +1,6 @@
 # Static checks: catching it before a VM boots
 
-Four checkers, all local, all seconds, none needing data, docker, or a Terra account. They
+Seven checkers, all local, all seconds, none needing data, docker, or a Terra account. They
 exist because gatk-sv has classes of breakage that no existing CI sees:
 
 | Breakage | Why normal CI misses it | Checker |
@@ -8,10 +8,12 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 | A call site that never binds a required input | `miniwdl check` treats `IncompleteCall` as a warning and exits 0 | `wdl_gate.sh` |
 | A call site passing an input the callee never declared | typechecking does not compare call sites across files | `wdl_gate.sh` |
 | A renamed `sv_shell` JSON key with a reader left behind | `jq -r '.missing'` yields the string `null`, forwarded as `--flag null`, failing stages later | `svshell_contract_check.py`, `svshell_jq_plumbing_scan.py` |
+| A workflow-scope `write_*`, a `File` input only ever tested with `defined()`, a `pipefail` pipe whose reader exits early, or a command block that is not valid bash | to a WDL validator a command block is a string, and "this File is only tested for" is a localization fact, not a type error | `wdl_semantics.py` |
 | A shipped image whose jar predates the flags its WDL passes | the image is built from a pinned commit, not your branch | `image-check/` |
+| "what breaks if I change this file?" answered from memory | blast radius is a graph question, and neither CI nor `miniwdl check` answers reachability across imports and calls | `wdl_reach.py` |
 | A Terra method config binding an input the WDL at that ref does not declare | `wdl_gate.sh` compares call sites **inside** a WDL tree; nothing there knows about method configs, and `validate` asks Terra — which needs the ref published on Dockstore | `terra/batch_configs.py check --against <ref>` (below, and it is the pre-check of `create`/`validate`) |
 
-The fifth checker lives in `terra/` rather than `checks/` because it checks this repo's own config
+The last checker lives in `terra/` rather than `checks/` because it checks this repo's own config
 table against a WDL ref, not gatk-sv's source. It is still offline: `git archive` of `wdl/` from
 `GSVTK_GATK_SV_CHECKOUT`, parsed by miniwdl, no Terra call and no published ref. [comparing a
 head-to-head's configs to their ref](terra-head-to-head.md) has the findings it produces and the one
@@ -59,6 +61,118 @@ A rise in `INCOMPLETECALL` means a call site stopped binding something; a rise i
 value: against gatk-sv as it stands there are a few `IncompleteCall` warnings that are deliberate,
 so a raw nonzero is not a failure — *the change in the column* is. `--strict` makes nonzero the
 exit status when you want a hard gate.
+
+## `wdl_semantics.py` — does it RUN, or does it only typecheck?
+
+`wdl_gate.sh` asks about call bindings. Three gatk-sv branches each fixed a defect that it — and
+`miniwdl check`, and `womtool validate` — reported clean, because the defect was one layer down: in
+what the workflow *means*, and in what the rendered shell *is*. Measured on a real 118-file tree with
+one `)` deleted from a `command <<<` block:
+
+```
+$ miniwdl check CollectCoverage.wdl        # the mutated tree
+rc=0     # output byte-identical to the clean tree
+```
+
+Both validators treat a command block as a string. This checker reads the four things that are not
+strings, as counts per ref so that a branch shows up as a delta:
+
+```bash
+checks/wdl_semantics.py --dir "$GSVTK_GATK_SV_CHECKOUT"     # counts + findings
+checks/wdl_semantics.py --dir <fetched-ref-dir> --summary-only   # one line, for the gate
+checks/wdl_semantics.py --dir "$GSVTK_GATK_SV_CHECKOUT" --block CondenseReadCounts
+checks/wdl_semantics.py --selftest                         # the fixtures and their controls
+```
+
+| Rule | The defect it names | Why no validator sees it |
+|---|---|---|
+| `WRITE-SCOPE` | a workflow-scope `write_lines`/`write_tsv`/`write_json`/`write_map` | it typechecks; Cromwell on PAPIv2 just cannot materialize a workflow-level File, so the submission dies in seconds |
+| `DEFINED-ONLY` | a `File` input whose only appearance in the command is inside `defined(...)` | `defined()` is answered from the localization table, so the file is copied to the shard and never opened. Two whole-genome CRAMs measured $6.47 and two attempts |
+| `PIPEFAIL` | a pipe whose reader stops early (`head`, `grep -m`, `sed q`, an awk `exit`) in a task that armed `pipefail` | the producer gets SIGPIPE, rc is 141, and it only happens on a large input. macOS ships bash 3.2, which has no `pipefail` at all, so the laptop cannot reproduce it and reading the tree is the cheap half |
+| `SHELL-SYNTAX` | a command block `bash -n` will not parse | both WDL validators accept an unbalanced paren, because to them it is a string |
+
+Measured at gatk-sv `main` — and these are **upstream counts to diff, not findings against you**:
+
+```
+tree: .../gatk-sv   files=118 tasks=315 workflows=109   scan=9.3s (8 workers)
+  WRITE-SCOPE=0 DEFINED-ONLY=2 PIPEFAIL=3 SHELL-SYNTAX=2 LOAD-FAILURES=0
+
+PIPEFAIL — 6
+  ResolveCpxSv.wdl::GetSeCutoff:6  UNGUARDED (head)  $( awk -F '\t' ... $FILE | head -n1 )
+  TrainRDGenotyping.wdl::UpdateCutoff:24  UNGUARDED (head)  | sort -nr | head -n 1)
+  CollectCoverage.wdl::CondenseReadCounts:5  GUARDED (head)  counts_first_line=$(zcat X | head -n 1 || true)
+```
+
+That output cross-checks two independent reviews of this repo. `PIPEFAIL` names exactly the three
+residual sites one of them found by hand after triaging its own ten rows, and it credits the
+`|| true` ones as GUARDED instead of counting them. `DEFINED-ONLY` lands on the two `.idx` siblings,
+including the one that review flagged as "the same trap in cheaper clothing". `WRITE-SCOPE` is 0,
+which is the baseline the broken ref in the other review would have moved.
+
+Three things worth knowing before you trust or distrust a number:
+
+- **The renderer is the AST's own literal/placeholder split, not a regex.** `task.command.parts` is
+  the command as ordered literals and placeholders, so rendering is "join the literals, stub the
+  placeholders". A regex has to guess where `~{true='(' false=')'}` ends and invents a syntax error
+  nobody shipped.
+- **Stubbing with a word leaves 2 artifact rows at `main`** (both `TasksMakeCohortVcf`, where a
+  placeholder expands to a leading pipe). They stay, deliberately: the obvious fix — check a second
+  rendering with an *empty* stub and require both to fail — was measured and discards **60**
+  findings, every one of them an empty stub deleting the operand of `done <`, `if` or `>`. It removes
+  the two artifacts by removing the check. `SHELL-SYNTAX=2` versus a baseline of `2` is no change;
+  `3` is yours.
+- **`LOAD-FAILURES` is a rule, not a footnote.** A file miniwdl cannot parse contributes nothing to
+  any count, which is how both prototype scans in those reviews would have reported a smaller number
+  than the truth. Nonzero here means every count beside it is a partial answer, and the tool exits 2
+  rather than 0.
+
+Loading is 33 s of the 40 s scan (`bash -n` across all 315 blocks is 2.5 s), so the parse fans out
+per file: 9.3 s on 8 workers, falling back to serial if a process pool cannot start. A scan that
+refuses to run because it tried to be fast is worse than a slow one.
+
+`wdl_gate.sh` runs it once per ref and prints one `SEMANTICS` row beside the binding rows. At two
+refs it also prints what moved:
+
+```
+        SEMANTICS DELTA SHELL-SYNTAX   2 -> 3 (+1 vs baseline)
+```
+
+`--strict` fails on a **rise** and never on the baseline's own findings, because on gatk-sv today
+three of these four counts are legitimately nonzero.
+
+`--block TASK` prints one task's rendered command. It is what a branch's own regression test wants
+— grade the WDL, not a copy of the block — and it is the entry point for `image-check/` below, which
+is how you prove a real block survives in the image it will run in.
+
+## `wdl_reach.py` — the blast radius of a changed file
+
+Two reviews asked the same question from opposite ends and each hand-rolled the join: the manta memo
+needed `mantatloccheck.sh` ← `TinyResolve` ← `GatherBatchEvidence` (which task invokes this script, and
+what reaches that task), and the single-sample memo needed the reverse for `SVShell.wdl`. One tool
+answers both directions.
+
+```bash
+./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target Structs.wdl
+./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT"          --target MakeCohortVcf.wdl
+./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target mantatloccheck.sh
+```
+
+Edges come from the AST plus the literal command text: file→file `import`, workflow→`call`, and a task
+whose command block mentions a script name — which is the only way to connect a `.sh` edit to the WDLs
+that would run it. On gatk-sv `main` that graph is 118 files, 657 nodes, 1554 edges
+(`imports-outside=0 unresolved-calls=0` printed alongside, so a silently missing edge is visible):
+`--reverse --target Structs.wdl` reaches 116 files at depths 1-3, `--target MakeCohortVcf.wdl` reaches
+209 nodes including 39 scripts.
+
+An unknown target exits nonzero and says what it looked for
+(`no file, workflow, task or script of that name is in … (118 .wdl file(s) scanned …)`, plus the
+closest names), and a target that nothing reaches prints `NOT REACHED` with the scan count — never an
+empty table, which is the failure this repo names.
+
+**It is not in `make test`.** A full-tree parse costs ~34 s (miniwdl, whole tree), which is the right
+price for a question you ask deliberately and the wrong price for a gate that must run on every
+change. Its `--selftest` (4 tiny fixtures, chain resolved both directions, orphan named as one) *is*
+in the gate.
 
 ## `svshell_contract_check.py` — the rename that becomes `null`
 
@@ -169,7 +283,39 @@ however correct the driver is.
 > If a check dies mid-run, `gcloud compute instances delete <name>` — the scripts only clean up
 > instances they created.
 
+### `image-check/run_in_image.sh` — execute a script inside an image you named
+
+Two reviews that needed "does my branch's image actually run this?" hand-rolled a boot-a-VM driver,
+and both hit **harness** bugs rather than pipeline bugs: one runner printed `MISSING LOCAL IMAGE` and
+carried on, so both arms died `rc=1` with `records=0` — which reads exactly like the flag under test
+changed nothing (`docs/troubleshooting.md` carries that row). This is the generic version: name an
+image, name a script, get its stdout off the serial port.
+
+```bash
+checks/image-check/run_in_image.sh --dry-run \
+    --image $(./kit/gsvtk-config get IMAGE_REPO)/sv-shell:<branch>-<sha6> \
+    --probe scripts/test/test_sigpipe.sh
+```
+
+What it refuses **before** any compute exists, each verified by running it:
+
+| input | result |
+|---|---|
+| no `--image` | rc 2, prints how to derive a ref from `IMAGE_REPO` rather than guessing one |
+| `--image` containing whitespace | rc 2 — "a reference is one token". The build log prints an image *prefix* and *name* on separate lines; joining them with a space is how a nonexistent ref is born (`rc=125 … not found`) |
+| `--probe` pointing at a 0-byte file | rc 2 — booting for an empty script measures nothing. `bash -n` passes on an empty file, which is the same trap one layer down |
+| a non-empty probe | rc 0 under `--dry-run`: prints its byte count **and its non-comment byte count**, so a file that is all comments cannot pass as content |
+
+`--dry-run` prints the instance it would create, the assembled startup script, and validates that
+script (`bash -n`, marker present) — all of it with zero configuration and zero cloud calls. The
+other half is not proven here: this repo's gate is offline, so **no instance was created by any of
+this repo's checks**. What the live path adds is `gcloud compute instances create` with
+`--entrypoint bash`, the probe fed on stdin, and a poll for the `RUN_IN_IMAGE=<marker>` serial marker
+under a 25-minute ceiling. It does not power the instance off itself, for the reason in the lifecycle
+note above.
+
 ## Using them as gates
+
 
 Pre-submit, in this order (cheapest first, and each one can invalidate the ones after it):
 

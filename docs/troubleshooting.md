@@ -40,6 +40,12 @@ a statement about the VM's identity.
 | `N sub-workflow call(s) have no expanded tree below them -> cost is a FLOOR` | the saved tree was depth-capped, trimmed, or is an older file — `_missingSubWorkflows` was empty, so it *looked* complete | re-fetch with `batch_save_metadata.py`; treat the printed VM-minutes as a lower bound until it says `these are measurements` |
 | `N local files are named <x> with the object's size, so adoption cannot pick one` | two `--link-dir` captures both contain an object of that name and size | narrow `--link-dir` to one capture, or drop it and download. Guessing by glob order is how a stale table becomes a "baseline" input |
 | `!! NOT adopting <path>: crc32c:mismatch … -- downloading the object instead` | a same-name same-size local file is **not** the current baseline object | nothing to fix — the tool refused a wrong input. If you expected it to match, the local capture is stale |
+| `400 "The request content was malformed:\nunexpected json type"` | **two** unrelated causes, and the message names neither: `methodVersion` must be an **Int** on an agora ref, and real JSON list/int values in `inputs` (Rawls wants strings) | send `methodVersion` unquoted, and stringify every value in `inputs` |
+| `Validation errors: Invalid outputs: … -> Error while parsing the expr` | an inverted `outputs` map is **accepted at config creation** and only dies at submission; `invalidOutputs` reads 0 even for a name the workflow never declared | diff the `outputs` keys against the workflow's declared outputs before resubmitting — a `valid` from creation is not evidence |
+| `400 Entity type workspace is reserved and cannot be overwritten` | the `rootEntityType: workspace` dead end. Its two predecessor errors are `400 … you haven't passed one to the submission` and `500 AttributeEntityReference(workspace,…) not found` | use the collection's real root entity type (`sample` in a sample-per-row workspace), never `workspace` |
+| `500 AttributeEntityReference(workspace,…) not found` | the same dead end, arriving one step earlier | same: `rootEntityType` is not `workspace` |
+| `409 <config> already exists` on a retry | Rawls **persists a config whose method resolution failed**, after which `valid` reads `None` forever and `POST …/methodconfigs/validate` answers `405 supported methods: OPTIONS` | create it under a new name. Re-validating the stuck name cannot recover it |
+| `HTTP Error 405: Method Not Allowed` | a POST-only Rawls endpoint reached with GET — `…/methodconfigs/validate` is the usual one | POST it, or read `valid` off the submission record instead |
 
 ## Docker builds
 
@@ -53,6 +59,10 @@ a statement about the VM's identity.
 | `apt-get` refused / `Permission denied (publickey)` on first connect | cloud-init is still running | the persistent driver waits up to 30 × 10 s for SSH; if you hit the ceiling, the image or zone is having a day — retry, do not hand-hack the wait |
 | Image pushed but the pipeline used something else | you pushed to a path the pipeline reads, or tagged something already in use | always push to a namespace nothing reads (`GSVTK_IMAGE_NAMESPACE`), and tag `<branch>-<sha>` so a tag is never reused |
 | `disk-full` / build dies while copying the gatk jar | the jar is copied into the `sv-base` layer on purpose, to avoid a 12-minute `docker cp` on every task launch — so a too-small disk fails late | `--disk-size 200` |
+| `Job for docker0 …` / `rc=125` … `not found` | an image reference assembled from the build log's *prefix* and *name*, which the log prints separately — a space where the tag separator belongs | take the ref from one log line, never from two |
+| `error: branch '<under-test>' not found on github.com/broadinstitute/gatk-sv`, then `gsvtk: preflight failed; fix that before anything else` | `docker/gatk-sv-build.sh --check` refusing **before** a VM boots, because the branch under test is not pushed | push the branch. A refusal that names the cause while compute is still $0 is the preflight working, not a defect |
+| `##[error]Readonly file modified: .github/.dockstore.yml` (job `Verify`, `readonly_check.yaml`) | gatk-sv's own CI, not anything in this kit — only `gatk-sv-bot` is exempt | drop the `.github/` edit from the PR, and know that deleting those commits does **not** unpublish Dockstore versions already published |
+| a red `Test Images Build (3.8)` starting one minute after another developer's branch | shared build infra failing for someone else's change | before debugging yours, check whether the same job is red on an unrelated branch |
 
 ## Local replay
 
@@ -65,6 +75,8 @@ a statement about the VM's identity.
 | `du -sh staging` reports tens of GB that you did not download | hardlinks into an existing panel copy (`--link-dir`) | `stat -f '%l' <file>` before concluding what deleting will free |
 | Your second run overwrote the first, log included | `OUT` assigned after an `${OUT:-}` default, so the override was silently ignored | fixed in these scripts; if you copy one, keep a single `OUT=${OUT:-...}` line. `ls $OUT` after launching |
 | An interval-list step dies with a sort error | `-S` size limits on a big list | sort with an explicit buffer: `sort -k1,1 -k2,2n -S 512M` |
+| `invalid choice: 'inputs'` from miniwdl | the subcommand is `input_template` — and the list it prints is required-only, so a **defaulted** input looks unknown to it | `miniwdl input_template <wdl>`; read "not listed" as "has a default", not "does not exist" |
+| `[E::vcf_format] Invalid BCF, the INFO tag id=16 is too large` | a pysam version divergence, not a corrupt VCF: the production stack pins `pysam==0.15.4`, and a local 0.24 cannot write a header-`add_line`-added INFO tag through `resolve.py`'s `bcftools sort` stdin pipe | run that step inside the image before concluding the VCF is broken — this one cost a docker rebuild to prove |
 
 ## Configuration
 
@@ -89,6 +101,7 @@ not by use. Each now fails loudly instead:
 | `wdl_gate.sh --strict` said `no hard errors` | the workflow you named with `--wf` did not exist at that ref, so nothing was checked | named-but-absent is a failure that says nothing was checked |
 | `make selftest` printed a wall of `ok` | in a Makefile recipe, `$$($("$@") 2>&1)` is eaten by make — bash got `out="( 2>&1)"`, the command never ran, and `$?` was the substitution's success. Eight config assertions, including env > profile precedence, were permanently vacuous | assertions live in `scripts/selftest.sh` (no make escaping), and a **canary** asserts that a known-failing command is reported as failing — if the harness ever goes vacuous again, the gate fails on the canary |
 | a checker that detects nothing still passes the gate | `make test` only ran `--help` and `py_compile`, and selftests asserted "exit code was acceptable", which a blind checker satisfies | `make smoke` invokes the tools end-to-end; selftests require positive-control numbers (blocks executed == blocks present, ≥ 12 stage calls compared) |
+| the runner printed `MISSING LOCAL IMAGE` and carried on | both arms then die `rc=1` with `records=0`, which reads **exactly** like the flag under test changed nothing | stop and fix the image ref: an arm that never started is not a result. `checks/image-check/run_in_image.sh` refuses before booting anything — no `--image`, a 0-byte `--probe` script, or an `--image` containing a space (the build log prints a prefix and a name separately, and joining them with a space is how a wrong ref gets born) |
 
 ## When a tool here is wrong
 
