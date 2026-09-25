@@ -44,8 +44,12 @@ frozen baseline, so a local difference is attributable to your code and nothing 
 
    `replay/build_inputs.py` reads the captured task commands and outputs to reconstruct the
    inputs a successful run actually received, so you replay what ran rather than what you think
-   ran. Its `images.example.json` and `single_sample_extra_inputs.json` show the shapes it
-   expects.
+   ran. Every emitted key carries the prefix of **the root workflow of `--wdl`** — `SVShell.wdl`
+   gives `SVShell.`, `GATKSVPipelineSingleSample.wdl` gives that name — so one builder serves both
+   arms instead of memorizing one. What it does **not** do is translate renamed inputs: a captured
+   argument that the WDL you passed does not declare is reported under `task_args_not_in_wdl` and
+   left alone, because renaming is [`checks/svshell_contract_check.py`](../checks/svshell_contract_check.py)'s
+   job. `replay/images.example.json` shows the image-map shape it expects.
 
 3. **Room on disk.** The staged matrices are tens of GB. If you have a previous copy of the
    same panel, `--link-dir` hardlinks instead of downloading (and copies, saying so, when the

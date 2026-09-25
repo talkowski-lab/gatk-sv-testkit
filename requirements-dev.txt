@@ -5,6 +5,11 @@
 #
 # The gate SKIPS these instead of failing when they are absent, because a contributor
 # working only on the Terra side should not need a WDL analyzer to check in.
+#
+# The last two are NOT imported by any tool in this repo -- yet. They are the imports that two
+# review findings had to work around by building a SECOND interpreter, which is the same tax in a
+# different costume as a copied version pin: the tools work, the question gets answered by eye, and
+# nothing records what was missing. Naming them here is what makes the next one a `pip install`.
 
 miniwdl           # provides both the `miniwdl` CLI used by checks/wdl_gate.sh and the `WDL`
                   # module imported by replay/build_inputs.py. Both name the missing
@@ -16,6 +21,21 @@ flake8           # `make flake` runs ONLY its pyflakes checks (--select=F): unde
                  # one -- no line length, no whitespace rules, nothing to reformat.
                  # `make setup` does not install this, so `make flake` SKIPs with this file named;
                  # CI installs it, which is where the sweep is actually enforced.
+
+jinja2           # what gatk-sv's own renderer imports (`scripts/inputs/build_inputs.py` over
+                 # `inputs/templates/**`). Nothing here imports it, so the plainest question about a
+                 # shipped template -- does the single-sample workspace template render, and how many
+                 # rows x attributes? -- could not be asked of this venv: `./.venv/bin/python -c
+                 # "import jinja2"` is `ModuleNotFoundError: No module named 'jinja2'` (measured in
+                 # ./.venv at the time of writing), and the review that hit it had to build another
+                 # interpreter to render the template it was asking about.
+
+PyYAML           # provides `yaml`, the difference between parsing `.github/.dockstore.yml` and
+                 # text-inspecting it. That file decides which gatk-sv workflows Dockstore publishes,
+                 # and it is read with grep today only because `./.venv/bin/python -c "import yaml"`
+                 # is `ModuleNotFoundError: No module named 'yaml'` (measured the same way). A
+                 # `branches:`/`name:` list checked by eye is a check that cannot say how many entries
+                 # it saw.
 
 # Not pip-installable, and therefore not listed here either:
 #   womtool.jar  - set WOMTOOL_JAR=/path/to/womtool.jar for terra/batch_check_inputs.py

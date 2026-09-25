@@ -40,7 +40,10 @@ variants and the timeline of what failed when. Those are the measurements this a
 record, and sandblanking them would leave prose with no evidence. Re-derive any of them with
 `terra/batch_cost.py` against your own saved metadata rather than trusting the numbers below.
 
-One real `gs://` path is also left intact, in `replay/single_sample_extra_inputs.json`: the reference
+One real `gs://` path is also left intact, in `single_sample_extra_inputs.json` next to this README (it
+used to sit in `replay/`, which was wrong: its only reader is the archived driver below it, and it is
+not an input to any current tool — `replay/build_inputs.py` builds its keys from a WDL and a captured
+run, never from a static list): the reference
 panel's BAF object, `gs://gatk-sv-ref-panel-1kg-v1-1/submissions/…/cacheCopy/all_samples.baf.txt.gz`.
 It is a **public** bucket, that object exists only at that Cromwell-derived path (verified with
 `gsutil ls`/`gsutil stat`, which is also why the file is a working example rather than a template), and

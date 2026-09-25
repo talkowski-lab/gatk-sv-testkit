@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
-"""Build a replayable SVShell input JSON from a captured Cromwell `script` dump.
+"""Build a replayable input JSON from a captured Cromwell `script` dump.
 
 Source of truth: the Cromwell-generated `script` left in the workspace bucket at
   <bucket>/submissions/<subId>/SVShell/<wfId>/call-RunSVShell/script
 which contains the fully-substituted `jq --arg NAME "value" ...` list, i.e. the exact
 task-input set of that run. That is better evidence than a method config: it is what the
 run actually used, and it survives Terra stripping workflow metadata.
+The prefix is whatever `--wdl`'s root workflow declares (SVShell.wdl -> `SVShell.`,
+GATKSVPipelineSingleSample.wdl -> that name), because a builder that hardcodes one workflow's
+name cannot build the other workflow's inputs -- and the single-sample arm of a replay is exactly
+the one that needs it (GAP-REVIEW-single-sample-blocking.md T19).
 
 Layout
   parse that list -> {name: value}
   un-localize /mnt/disks/cromwell_root/<b>/<p>  ->  gs://<b>/<p>
-  load the target WDL with miniwdl -> its declared workflow inputs + types + optionality
+  load the target WDL with miniwdl -> its root workflow's name, declared inputs, types,
+                                      optionality
   join by name, then classify every declared input:
       RECOVERED   literal came from the captured script
       DOCKER      supplied per-arm from --images
       DEFAULTED   optional in the WDL, so left unset (WDL default applies)
       UNRESOLVED  required and NOT in the captured script  -> written to unresolved.json, never guessed
 
-Then emit one JSON per arm, with the #961 key translation applied to the arm that uses the
-new WDL: `genotyping_rd_table` is replaced by `genotyping_rd_depth_table` +
-`genotyping_rd_pesr_table`. For a plumbing regression we point both at the SAME single table
-he used -- that keeps the comparison byte-fair; a scientific comparison would retrain instead.
+A captured argument that is NOT a declared input of the WDL you passed is reported under
+`task_args_not_in_wdl` and nothing else. That is where an upstream rename shows up, and it is
+reported rather than translated: this file used to carry a private copy of gatk-sv's #961 rename
+(`genotyping_rd_table` -> `genotyping_rd_depth_table` + `genotyping_rd_pesr_table`) behind a
+`--translate-rd-keys` flag, which hid the rename in the one place a reader would never look and
+duplicated a check that `checks/svshell_contract_check.py` already owns (its docstring names that
+exact rename as the bug class). A generic input builder is not where a past upstream rename gets
+memorized.
 
 Read-only w.r.t. Terra: it only reads the WDL and writes local files.
 
@@ -52,11 +61,6 @@ except ImportError:  # pragma: no cover
 LOCAL_PREFIX = '/mnt/disks/cromwell_root/'
 ARG_RE = re.compile(r'--arg(json)?\s+([A-Za-z0-9_.]+)\s+("(?:[^"\\]|\\.)*"|.+?)(?=\s*\\?\n|\s+--arg|\s*$)')
 
-# What renaming the RD-table inputs did to SVShell's input contract -- the class of
-# change that is invisible to a WDL typecheck and visible only to a contract check.
-RD_TABLE_OLD = 'genotyping_rd_table'
-RD_TABLE_NEW = ['genotyping_rd_depth_table', 'genotyping_rd_pesr_table']
-
 
 def unlocalize(v: str) -> str:
     """Cromwell stages gs:// objects under /mnt/disks/cromwell_root/<bucket>/<path>."""
@@ -79,8 +83,14 @@ def parse_script(path: pathlib.Path) -> dict:
     return found
 
 
-def wdl_inputs(wdl_path: pathlib.Path) -> dict:
-    """Declared workflow-level inputs of workflow SVShell: name -> {type, optional}."""
+def wdl_inputs(wdl_path: pathlib.Path) -> tuple[str, dict]:
+    """(prefix, declared inputs) of `wdl_path`'s root workflow: prefix -> {name: {type, optional}}.
+
+    The prefix is the root workflow's own name plus a dot, taken from the document that was loaded,
+    not from a string in this file. Five hardcoded `SVShell.` prefixes meant a single-sample WDL
+    produced `SVShell.`-keyed JSON that no single-sample submission could read -- and it failed
+    quietly, because every key is a string to JSON.
+    """
     doc = WDL.load(str(wdl_path))
     wf = doc.workflow
     if wf is None:
@@ -88,7 +98,7 @@ def wdl_inputs(wdl_path: pathlib.Path) -> dict:
     out = {}
     for dec in wf.inputs:
         out[dec.name] = {'type': str(dec.type), 'optional': bool(getattr(dec.type, 'optional', False))}
-    return out
+    return f'{wf.name}.', out
 
 
 def coerce(wdl_type: str, value: str):
@@ -110,12 +120,12 @@ def coerce(wdl_type: str, value: str):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--script', required=True, type=pathlib.Path)
-    ap.add_argument('--wdl', required=True, type=pathlib.Path, help='SVShell.wdl of the arm being built')
+    ap.add_argument('--wdl', required=True, type=pathlib.Path,
+                    help='the arm\'s root WDL; its workflow name is the prefix every emitted key '
+                         'carries, and its declared inputs are what gets classified')
     ap.add_argument('--images', required=True, type=pathlib.Path, help='JSON map of docker input -> image')
     ap.add_argument('--out-dir', required=True, type=pathlib.Path)
     ap.add_argument('--arm', required=True)
-    ap.add_argument('--translate-rd-keys', action='store_true',
-                    help='apply the #961 genotyping_rd_table -> {depth,pesr} split (arms on the new WDL)')
     ap.add_argument('--set', action='append', default=[], metavar='NAME=JSON',
                     help='value recovered by other means (evidence, not guesswork); recorded in the report')
     ap.add_argument('--set-note', action='append', default=[], metavar='NAME=TEXT',
@@ -131,14 +141,15 @@ def main() -> int:
             "  (docs/setup.md)")
 
     recovered = parse_script(a.script)
-    declared = wdl_inputs(a.wdl)
+    prefix, declared = wdl_inputs(a.wdl)
     images = json.loads(a.images.read_text())
     out_dir = a.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'  recovered from script : {len(recovered)} task inputs')
     print(f'  declared in WDL       : {len(declared)} workflow inputs '
-          f'({sum(1 for d in declared.values() if not d["optional"])} required)')
+          f'({sum(1 for d in declared.values() if not d["optional"])} required) '
+          f'of {prefix[:-1]} -> keys are prefixed "{prefix}"')
 
     # operator-supplied values must carry their evidence, or they are guesses
     supplied, ev = {}, {}
@@ -156,11 +167,11 @@ def main() -> int:
     for name, spec in declared.items():
         t = spec['type']
         if name in images and ('docker' in name.lower() or 'image' in name.lower()):
-            inputs[f'SVShell.{name}'] = images[name]
+            inputs[f'{prefix}{name}'] = images[name]
             notes[name] = 'DOCKER'
             continue
         if name in supplied:
-            inputs[f'SVShell.{name}'] = supplied[name]
+            inputs[f'{prefix}{name}'] = supplied[name]
             notes[name] = f'EVIDENCED ({ev[name][:90]})'
             continue
         if name in recovered:
@@ -171,33 +182,27 @@ def main() -> int:
                 notes[name] = 'OMITTED (empty in the captured run; passing "" would make defined() true)'
                 continue
             try:
-                inputs[f'SVShell.{name}'] = (json.loads(raw) if kind == 'json' else coerce(t, raw))
+                inputs[f'{prefix}{name}'] = (json.loads(raw) if kind == 'json' else coerce(t, raw))
                 notes[name] = 'RECOVERED'
             except Exception as e:  # keep going; report it
                 unresolved.append({'input': name, 'type': t, 'why': f'coercion failed: {e}', 'raw': raw})
-            continue
-        # the old single RD table can feed both new keys when asked
-        if a.translate_rd_keys and name in RD_TABLE_NEW and RD_TABLE_OLD in recovered:
-            _, raw = recovered[RD_TABLE_OLD]
-            inputs[f'SVShell.{name}'] = coerce(t, raw)
-            notes[name] = f'RECOVERED (translated from {RD_TABLE_OLD})'
             continue
         if spec['optional']:
             notes[name] = 'DEFAULTED'
             continue
         if name in images:  # docker declared with a non-matching name
-            inputs[f'SVShell.{name}'] = images[name]
+            inputs[f'{prefix}{name}'] = images[name]
             notes[name] = 'DOCKER'
             continue
         unresolved.append({'input': name, 'type': t, 'why': 'required but absent from the captured run'})
 
-    leftovers = sorted(set(recovered) - set(declared) - {RD_TABLE_OLD})
+    leftovers = sorted(set(recovered) - set(declared))
     payload = dict(sorted(inputs.items()))
     json.dump(payload, (out_dir / f'{a.arm}.inputs.json').open('w'), indent=1, sort_keys=True)
 
     req = {k for k, v in declared.items() if not v['optional']}
     print(f'\n  per-arm classification ({a.arm}):')
-    for tag in ('RECOVERED', 'RECOVERED (translated from genotyping_rd_table)', 'DOCKER', 'DEFAULTED'):
+    for tag in ('RECOVERED', 'DOCKER', 'DEFAULTED'):
         n = sum(1 for v in notes.values() if v == tag)
         if n:
             print(f'    {tag:<48} {n}')
@@ -211,7 +216,7 @@ def main() -> int:
               'target': {'namespace': a.namespace, 'workspace': a.workspace},
               'unresolved_required': unresolved,
               'task_args_not_in_wdl': leftovers,
-              'required_inputs_missing': sorted(f'SVShell.{n}' for n in req if f'SVShell.{n}' not in payload),
+              'required_inputs_missing': sorted(f'{prefix}{n}' for n in req if f'{prefix}{n}' not in payload),
               'images_used': images, 'operator_supplied': {k: {'value': v, 'evidence': ev[k]} for k, v in supplied.items()}}
     json.dump(report, (out_dir / f'{a.arm}.report.json').open('w'), indent=1)
     if unresolved:
