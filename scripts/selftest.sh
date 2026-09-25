@@ -257,11 +257,22 @@ probecount() {
 }
 
 echo
-echo "selftest: the two sv_shell checkers parse what they claim to parse"
+echo "selftest: the checkers parse what they claim to parse"
 check "svshell_jq_plumbing_scan finds every block shape and counts its own coverage" \
     "$PY" checks/svshell_jq_plumbing_scan.py --selftest
 check "svshell_contract_check sees bare/quoted keys, both quote styles and every stage call" \
     "$PY" checks/svshell_contract_check.py --selftest
+# The WDL semantics rules are 4 rules x (a bad case + a control). If miniwdl is absent the tool
+# cannot parse anything, and a scan that parsed nothing reports "no findings" -- so this is a SKIP
+# that says what to install, never an ok. Same rule the probe tally follows.
+if "$PY" -c 'import WDL' >/dev/null 2>&1; then
+    check "wdl_semantics fires on each of its four rules and stays silent on each control" \
+        "$PY" checks/wdl_semantics.py --selftest
+else
+    echo "  SKIP  wdl_semantics --selftest: this interpreter cannot import WDL."
+    echo "        Install miniwdl (make setup, or $PY -m pip install miniwdl) to run it."
+    skip=$((skip + 1))
+fi
 
 echo
 echo "selftest: checkers and fetchers, against a local gatk-sv clone if present"
@@ -286,6 +297,21 @@ else
     printf '        its findings are a list to DIFF against a base ref, not a verdict\n'
     check "fetch_wdl --list materializes a ref's file list offline (git archive)" \
         "$PY" scripts/fetch_wdl.py --repo "$CK" --ref HEAD --list
+    # The positive control for the semantics layer on a REAL tree: the counts are not pinned (they
+    # belong to upstream and move when upstream moves), but the scan must read the whole tree and
+    # must not lose a file to a parse error -- LOAD-FAILURES!=0 makes every count a partial answer.
+    if "$PY" -c 'import WDL' >/dev/null 2>&1; then
+        semsum="$("$PY" checks/wdl_semantics.py --dir "$CK" --summary-only 2>/dev/null)"
+        if printf '%s' "$semsum" | grep -qE '^WRITE-SCOPE=[0-9]+ DEFINED-ONLY=[0-9]+ PIPEFAIL=[0-9]+ SHELL-SYNTAX=[0-9]+ LOAD-FAILURES=0$'; then
+            ok=$((ok + 1)); printf '  ok    wdl_semantics scans real gatk-sv without losing a file\n'
+            printf '        %s\n        (these are upstream counts: diff two refs, never read one)\n' "$semsum"
+        else
+            fail=$((fail + 1)); printf '  FAIL  wdl_semantics on the real clone: %s\n' "${semsum:-no output}"
+        fi
+    else
+        echo "  SKIP  wdl_semantics against the clone: no WDL module for this interpreter"
+        skip=$((skip + 1))
+    fi
 fi
 
 echo

@@ -18,6 +18,12 @@
 #   checks/wdl_gate.sh --wf SVShell --wf ResolveCpxSvGenotyping HEAD
 #   checks/wdl_gate.sh --strict HEAD        # nonzero exit if anything is unlaunchable
 #
+# Beside the bindings, each ref also gets a SEMANTICS row from checks/wdl_semantics.py: the four
+# things that make a task RUN rather than typecheck (workflow-scope write_*, File inputs only ever
+# tested with defined(), pipes whose reader exits early, and `bash -n` on the rendered command).
+# Those counts are NOT zero on gatk-sv `main` and are not meant to be: two refs print a DELTA line
+# for anything that moved, and --strict fails on a rise, never on the baseline's own findings.
+#
 # Needs miniwdl (pip install miniwdl, or make setup) and a local gatk-sv clone. Both are
 # checked up front, with the fix printed rather than a stack trace. miniwdl is resolved as
 # $MINIWDL, then PATH, then the bin next to the interpreter, then ./.venv/bin -- because
@@ -43,7 +49,7 @@ while [ $# -gt 0 ]; do
         --wf|--workflow) WFS+=("$2"); shift 2;;
         --strict)        STRICT=1; shift;;
         --miniwdl)       MINIWDL="$2"; shift 2;;
-        -h|--help)       sed -n "2,25p" "$0" | sed "s/^# \{0,1\}//"; exit 0;;
+        -h|--help)       sed -n "2,31p" "$0" | sed "s/^# \{0,1\}//"; exit 0;;
         -*)              echo "unknown flag: $1 (see --help)" >&2; exit 2;;
         *)               REFS+=("$1"); shift;;
     esac
@@ -69,9 +75,21 @@ if [ ! -x "$MINIWDL" ] && ! command -v "$MINIWDL" >/dev/null 2>&1; then
 fi
 [ -n "${GSVTK_GATK_SV_CHECKOUT:-}" ] || { echo "GSVTK_GATK_SV_CHECKOUT is unset: which gatk-sv clone are we gating?" >&2; exit 4; }
 
+# The semantics scan needs the WDL *module*, not the `miniwdl` command, and those can live in
+# different environments: miniwdl resolved from a user install and an interpreter that never saw it.
+# So ask each candidate the question rather than assuming the CLI's environment is the one to run in.
+# An empty SEM_PY is not a silent skip: it prints a SKIPPED row and fails the gate, because "the
+# guard never fired" and "the guard could not fire" otherwise print the same thing.
+SEM_PY=""
+for _cand in "${GSVTK_PYTHON:-}" "$ROOT/.venv/bin/python" "$(dirname "$MINIWDL")/python3" python3; do
+    [ -n "$_cand" ] && "$_cand" -c 'import WDL' >/dev/null 2>&1 && { SEM_PY="$_cand"; break; }
+done
+
 OUT="$(gsvtk_work wdl-gate)"
 status=0
-printf '%-30s %-16s %-6s %-16s %s\n' WORKFLOW REF EXIT INCOMPLETECALL STALE-BINDINGS
+delta_bad=0
+SEM_LINES=()
+printf '%-30s %-26s %-6s %-16s %s\n' WORKFLOW REF EXIT INCOMPLETECALL STALE-BINDINGS
 for ref in "${REFS[@]}"; do
     # A ref is user input that becomes a directory name under a `rm -rf`. `.` and `..` are
     # legal-ish git spellings and would point that wipe at the cache parent -- into the work
@@ -79,14 +97,14 @@ for ref in "${REFS[@]}"; do
     # child of the cache before removing anything.
     case "$ref" in
       ""|"."|".."|*..*)
-        printf '%-30s %-16s %s\n' "(ref)" "${ref:-(empty)}" \
+        printf '%-30s %-26s %s\n' "(ref)" "${ref:-(empty)}" \
                "REJECTED — name a real ref (a branch, tag or sha), not '.' or '..'"
         status=1; continue;;
     esac
     dir="$OUT/${ref//\//-}"
     case "$dir" in "$OUT"/*) rm -rf "$dir" ;; esac
     "$GSVTK_PYTHON" "$ROOT/scripts/fetch_wdl.py" --ref "$ref" --dest "$dir" >/dev/null || {
-        printf '%-30s %-16s %s\n' "(fetch)" "$ref" "FAILED — is $ref a real ref in ${GSVTK_GATK_SV_CHECKOUT}?"
+        printf '%-30s %-26s %s\n' "(fetch)" "$ref" "FAILED — is $ref a real ref in ${GSVTK_GATK_SV_CHECKOUT}?"
         status=1; continue
     }
     sha=$(sed -n 's/^sha=//p' "$dir/.provenance" 2>/dev/null | cut -c1-8)
@@ -96,7 +114,7 @@ for ref in "${REFS[@]}"; do
         # code even under --strict -- so the gate certified "no hard errors" having checked
         # nothing, which is the exact shape of wrong answer this script exists to catch.
         if [ ! -f "$dir/$wf.wdl" ]; then
-            printf '%-30s %-16s %s\n' "$wf" "$ref" "ABSENT at $sha"
+            printf '%-30s %-26s %s\n' "$wf" "$ref" "ABSENT at $sha"
             status=1
             echo "        nothing was checked for $wf at $ref: wrong name, or it did not exist at"
             echo "        that ref. This is a failure, not a pass."
@@ -106,22 +124,73 @@ for ref in "${REFS[@]}"; do
         ( cd "$dir" && "$MINIWDL" check "$wf.wdl" >"$log" 2>&1 ); rc=$?
         inc=$(grep -c "IncompleteCall" "$log" 2>/dev/null || true)
         stale=$(grep -oE "No such input [A-Za-z0-9_]+" "$log" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-        printf '%-30s %-16s %-6s %-16s %s\n' "$wf" "${ref##*/}@$sha" "$rc" "$inc" "$stale"
+        printf '%-30s %-26s %-6s %-16s %s\n' "$wf" "${ref##*/}@$sha" "$rc" "$inc" "$stale"
         grep -oE "No such input [A-Za-z0-9_]+" "$log" 2>/dev/null | sort -u | sed 's/^/        stale binding: /'
         if [ "$rc" -ne 0 ] || { [ "$STRICT" -eq 1 ] && { [ "${inc:-0}" -ne 0 ] || [ "${stale:-0}" -ne 0 ]; }; }; then
             status=1
             [ "$rc" -ne 0 ] && echo "        hard error — full report: $log"
         fi
     done
+
+    # One SEMANTICS row per ref, not per workflow: these four rules read every WDL in the tree, and
+    # a per-workflow row would imply the scan followed imports from one entrypoint, which it does not.
+    refsha="${ref##*/}@$sha"
+    if [ -z "$SEM_PY" ]; then
+        printf '%-30s %-26s %s\n' SEMANTICS "$refsha" \
+               "SKIPPED — no interpreter here imports WDL (make setup, or pip install miniwdl)"
+        echo "        nothing was checked by the semantics layer for $ref. This is a failure, not a pass."
+        status=1
+        continue
+    fi
+    sem="$("$SEM_PY" "$HERE/wdl_semantics.py" --dir "$dir" --summary-only 2>/dev/null)"; semrc=$?
+    if [ -z "${sem//[^0-9= ]/}" ]; then
+        printf '%-30s %-26s %s\n' SEMANTICS "$refsha" "FAILED (exit $semrc) — run: $SEM_PY $HERE/wdl_semantics.py --dir $dir"
+        status=1; continue
+    fi
+    printf '%-30s %-26s %s\n' SEMANTICS "$refsha" "$sem"
+    SEM_LINES+=("$sem")
+    case " $sem " in *" LOAD-FAILURES=0 "*) ;; *)
+        echo "        LOAD-FAILURES: miniwdl could not parse at least one file, so every count on this"
+        echo "        row is a partial answer. Full list: $SEM_PY $HERE/wdl_semantics.py --dir $dir"
+        status=1;;
+    esac
 done
 
+# Two refs is the whole point: the tree already carries findings (some deliberate, some inherited),
+# so the question is never "is it zero" but "did you move it". Only a RISE is a finding; a fall is a
+# fix, and a row that did not move says nothing and prints nothing.
+if [ ${#SEM_LINES[@]} -ge 2 ]; then
+    base_line="${SEM_LINES[0]}"; head_line="${SEM_LINES[$((${#SEM_LINES[@]} - 1))]}"
+    for kv in $head_line; do
+        k="${kv%%=*}"; want="${kv##*=}"
+        base=""
+        # Match the KEY, not a prefix of the line. The first version asked sed to strip `^$k=` and
+        # took whatever was left, so for `WRITE-SCOPE` it captured `0 DEFINED-ONLY=2 PIPEFAIL=3 ...`
+        # and the `((want - base))` below then evaluated that as arithmetic — which in bash 3.2 reads
+        # `DEFINED-ONLY` as a subtraction of two unset names and dies with "DEFINED: unbound
+        # variable". A field boundary has to be a boundary, not a substring.
+        for bk in $base_line; do
+            [ "${bk%%=*}" = "$k" ] && base="${bk##*=}"
+        done
+        case "$base" in ''|*[!0-9]*) continue;; esac     # absent or not a count: not a delta
+        case "$want" in ''|*[!0-9]*) continue;; esac
+        [ "$base" = "$want" ] && continue
+        printf '        SEMANTICS DELTA %-14s %s -> %s (%+d vs baseline)\n' "$k" "$base" "$want" "$((want - base))"
+        [ "$want" -gt "$base" ] && delta_bad=1
+    done
+fi
+
+if [ "$status" -eq 0 ] && [ "$STRICT" -eq 1 ] && [ "$delta_bad" -eq 1 ]; then
+    status=1
+fi
+
 if [ "$status" -eq 0 ] && [ "$STRICT" -eq 1 ]; then
-    echo "no hard errors, and --strict is satisfied: no IncompleteCall, no stale binding, and"
-    echo "every workflow named was actually present at the ref given."
+    echo "no hard errors, and --strict is satisfied: no IncompleteCall, no stale binding, no rise in"
+    echo "any SEMANTICS count, and every workflow named was actually present at the ref given."
 elif [ "$status" -eq 0 ]; then
-    echo "no hard errors. Re-run with --strict to treat IncompleteCall / stale bindings as failure"
-    echo "(today's gatk-sv carries a few IncompleteCall warnings on purpose, so --strict is a"
-    echo " diff-against-baseline decision, not a default)."
+    echo "no hard errors. Re-run with --strict to treat IncompleteCall / stale bindings / a rise in"
+    echo "the SEMANTICS counts as failure (today's gatk-sv carries a few of each on purpose, so"
+    echo " --strict is a diff-against-baseline decision, not a default)."
 else
     echo "gate FAILED: see the rows above; rc=2 is a hard error, IncompleteCall means a required"
     echo "             input is never bound (unlaunchable), stale binding means the callee has"
