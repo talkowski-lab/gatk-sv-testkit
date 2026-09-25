@@ -78,6 +78,7 @@ Genotyping module today — generalising them to any module is
 git clone https://github.com/talkowski-lab/gatk-sv-testkit.git
 cd gatk-sv-testkit
 make setup                          # .venv with the python dependencies
+.venv/bin/python -m pip install -r requirements-dev.txt   # miniwdl + flake8: the FULL gate
 
 cp testkit.env.example testkit.env  # then edit it: project + workspace are yours to name
 ./kit/gsvtk-config doctor           # tells you exactly what is still missing
@@ -90,10 +91,13 @@ make test                           # the offline gate: syntax, undefined-module
 `make test` runs with no credentials, no data and no network, and it is the gate this repo holds itself
 to. Its probes are worth understanding: each one reproduces a defect a review confirmed and then proves
 the guarded path was reachable, so "the guard never fired" cannot be mistaken for "the guard worked".
-The probe count is pinned — if a probe disappears, the gate fails. One known gap, recorded rather than
-hidden: a probe *skipped* for a missing dependency still satisfies that count
-([docs/handoff/002-module-profiles-and-quickstart.md](docs/handoff/002-module-profiles-and-quickstart.md),
-§4), so `ok` counts matter more than the pass/fail line.
+The probe count is pinned, and `WANT` counts probes that must **run**: one that disappears fails the
+gate, and so does one that never ran because its dependency is missing — the SKIP names the file to
+install, and the gate refuses to pass on a smaller number. That is a published correction, not the
+original behaviour: an earlier version of the counter added the skip tally to the running tally, so
+"3 ok, 5 skipped" passed as 8, and handoff §4 recorded the gap instead of closing it
+([docs/handoff/002-module-profiles-and-quickstart.md](docs/handoff/002-module-profiles-and-quickstart.md)).
+`ok` counts still matter more than the pass/fail line.
 
 Then pick a loop. The guided tour of all four, with the real output each step prints, is
 [docs/quickstart.md](docs/quickstart.md) — every command in it runs with no credentials and no data.

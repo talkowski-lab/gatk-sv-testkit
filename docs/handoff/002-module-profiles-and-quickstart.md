@@ -68,15 +68,24 @@ the fix cannot suppress findings).
 
 Both were reported to the user; neither was authorized, and neither has a probe.
 
-1. **`scripts/selftest.sh:204` counts SKIPPED probes toward the pinned count** — `if [ $((run_n +
-   skip_n)) -lt "$want" ]`, while its own comment at `:186-188` claims a probe "quietly skipped for a
+1. **`scripts/selftest.sh:204` counts SKIPPED probes toward the pinned count** — **FIXED later in this
+   session** at the user's request; the text below is the original finding, kept as it was written. The
+   comparison was `if [ $((run_n + skip_n)) -lt "$want" ]`, while its own comment at `:186-188` claimed a probe "quietly skipped for a
    missing dependency lowers it" and that "'8 ok' versus '3 ok, 5 skipped' is the difference between a
    gate and a rumour". The code counts a skip as accounted-for. This is load-bearing for the design
    doc's §5/§7: CI checks out **only this repo** (`.github/workflows/ci.yml` installs both requirements
    files, so miniwdl IS present, but nothing sets `GSVTK_GATK_SV_CHECKOUT`), so any clone-backed
    per-module probe satisfies the count by skipping.
-   *Why not fixed:* the fix changes which probes must *run* in CI, and that is a design decision about
-   CI's shape, not a bug fix. It needs the lock-sidecar decision in the design doc §5 made first.
+   *How it was closed:* `probecount` now compares `run_n` alone against `want` and prints which file to
+   install. The CI-shape worry dissolved on contact with the workflow: `ci.yml` installs **both**
+   requirement files, so CI already runs 13/13 and requiring all of them to *run* costs it nothing. What
+   actually changed is the fresh-clone path, where the opposite half of the same bug lived: a probe that
+   needed an optional tool failed outright instead of skipping, so `make setup` (runtime requirements only
+   — miniwdl is a dev requirement) was enough to make `make test` red. That probe now SKIPs naming
+   `requirements-dev.txt`, and the counter refuses to pass on the smaller number. Verified both directions
+   in a throwaway clone of the pushed repo: without the dev file the gate fails with the remedy printed;
+   with it, `make test` PASS, 0 failed. `docs/setup.md` gained a section, `make setup` and `make help`
+   gained the line.
 2. **`checks/wdl_gate.sh:18`'s documented example names a workflow that does not exist at `main`** —
    `--wf ResolveCpxSvGenotyping`; `git -C <checkout> cat-file -e main:wdl/ResolveCpxSvGenotyping.wdl`
    fails, and this script is written to report `ABSENT at <sha>` + exit 1 for exactly that. Violates
@@ -195,8 +204,9 @@ design doc (step 0 was explicitly scoped as the only code change authorized); de
 over 83 tracked files, which is the first time the two new docs were inside the publishable set.
 
 **Needs the user's decision, not mine:** (i) whether the two new docs should be restructured after they
-are read (they are committed but unread by the user), (ii) §11 q5, (iii) whether to fix the
-`selftest.sh` skip-counting, which reshapes CI, (iv) whether to fold the three review reports into the
+are read (they are committed but unread by the user), (ii) §11 q5, (iii) ~~whether to fix the
+`selftest.sh` skip-counting~~ — decided and done later in the session, and it did not reshape CI (§4.1),
+(iv) whether to fold the three review reports into the
 repo (paths in §9; they are retention-managed session artifacts, so copy them in if they matter).
 
 ## 9. Artifact paths
@@ -259,9 +269,8 @@ tree that moves daily, which is what §10 is for.
 2. The two new docs are committed but **unread** by the user (~875 lines). Ask before restructuring
    them; the fix + probe landed as its own commit precisely so it could ship independently of them.
 3. The one decision blocking all design work: **JSON vs `KEY=value`** (design doc §11 q5).
-4. Then the two open defects in §4, in this order: the `wdl_gate.sh:18` example (one line, zero risk),
-   then `selftest.sh:204` (needs the CI-shape decision — it is what lets a skipped probe certify a
-   per-module gate in CI).
+4. Of §4's two open defects, `selftest.sh`'s probe counter is **done**. One remains: the
+   `wdl_gate.sh:18` example naming a workflow absent at `main` — one line, zero risk, never run.
 5. Only then design step 1 (golden capture, before moving any data).
 
 ## 13. What good looks like — closing ledger
@@ -277,5 +286,6 @@ tree that moves daily, which is what §10 is for.
 | …and the fix is pinned so it cannot regress | pinned count 12→13; probe falsified by reverting the fix | **CONFIRMED** |
 | A human-readable quickstart showcasing core functionality exists | `docs/quickstart.md`, 326 lines, every command run here, audit-pattern clean | **CONFIRMED** (as an artifact) |
 | The user is satisfied with the quickstart | they replied only `commit`, with no comment on the tour's content | **PENDING** — acceptance of the commits is not the same as the tour being read or found useful |
-| Anything was committed / pushed | four commits + push, performed as the handoff step, not during the session | **CONFIRMED at push time, PENDING re-verification** — run `git log origin/main..HEAD` (empty) and re-read the remote before believing it |
-| §4's two open defects fixed | none | **PENDING** — out of the authorized scope; both documented with reproductions |
+| Anything was committed / pushed | four commits + push, then the history squashed to one commit at the user's request (`0cc2d07` → `cdb6444`, force-push) | **CONFIRMED against the remote**, not from the local view: a fresh clone of the pushed URL has 1 commit, the old head is not in it, and every blob and message greps clean for every coordinate the old blocklist named. Limits in [methodology.md](../methodology.md): clones/forks taken beforehand keep the old objects, and a host may still serve a dereferenced SHA by other means |
+| A skipped probe no longer satisfies the pinned count | `probecount` compares `run_n` alone; falsified in both directions in a throwaway clone — no dev requirements: gate FAILS with the remedy printed; with them: PASS, 0 failed | **CONFIRMED** |
+| §4's two open defects fixed | one at the time of writing, the probe counter later | **PARTLY CONFIRMED** — `check_maps` fixed + pinned, `selftest.sh` counter fixed + verified. One stands: `wdl_gate.sh:18`'s example names a workflow absent at `main` |

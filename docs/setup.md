@@ -32,6 +32,29 @@ Extras you opt into:
 | paired profiling | [`gatk-sv-profile`](https://github.com/broadinstitute/gatk-sv-profile) | `pip install -e <checkout>`, then `export PROFILE_BIN=...` |
 | local replay | JDK 17+, a built GATK jar | see [local replay](local-replay.md) |
 
+## The offline gate wants the dev file too
+
+`make setup` installs `requirements.txt` and nothing else, and that file is what a tool **imports**.
+miniwdl and flake8 are not imports — they are dev tools, so they live in `requirements-dev.txt`. For
+a fresh clone that means:
+
+```bash
+make setup && .venv/bin/python -m pip install -r requirements-dev.txt
+make test
+```
+
+Without the dev file the gate does **not** quietly shrink. A probe whose dependency is missing prints
+the reason and the file to install (`SKIP miniwdl_resolver needs miniwdl (pip install -r
+requirements-dev.txt)`), and the pinned probe count then **fails** rather than passing on a smaller
+ticket: `WANT` counts probes that must *run*, and a skipped probe proves nothing. An earlier version
+of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8 — the record is in
+[handoff 002](handoff/002-module-profiles-and-quickstart.md), the fix is in `scripts/selftest.sh`.
+
+What stays skipped even with both files: the three clone-backed checks, until `GATK_SV` points at a
+gatk-sv checkout ([Configure](#configure)). Those are checks, not probes, so they do not touch the
+pinned count. CI installs both files, which is why CI is where the gate is enforced; on a laptop the
+coverage is a choice you make with your eyes open.
+
 ## Google Cloud
 
 ```bash

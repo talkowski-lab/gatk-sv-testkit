@@ -9,7 +9,8 @@
 > what replaced it — published rather than reworded away, per
 > [methodology.md](methodology.md). Three shipped defects surfaced during that review and are listed
 > in §12 with their reproductions, because they are real whether or not this design is ever built.
-> The first is now **fixed and pinned by a probe**; the other two stand.
+> Two of the three are now **fixed and pinned** (§12 records both fixes); the third — a
+> `wdl_gate.sh` example naming a workflow absent at `main` — still stands.
 
 The question this answers: **how does this toolkit support a module other than genotyping without
 becoming either a pile of per-module flags or a second copy of gatk-sv?**
@@ -250,7 +251,12 @@ requirements files — so miniwdl *is* there — but never sets a checkout), and
 convention a missing dependency is a SKIP, not a FAIL (`preflight` prints "pre-check SKIPPED" and
 returns). A profile could go stale while `make test` prints PASS. Worse, `scripts/selftest.sh:204`
 satisfies its pinned probe count with `run_n + skip_n`, so a probe that always skips keeps the tally
-green (its own comment at `:186-188` claims the opposite — see §12).
+green (its own comment at `:186-188` claimed the opposite).
+
+That second half is now **fixed**: the counter compares `run_n` alone against `want` and prints the
+dependency to install, so a skipped probe fails the gate instead of certifying it. It removes one of the
+two arguments for a lock file, not both — CI still has no gatk-sv checkout, so the WDL-facing half of a
+profile cannot be graded there at all, and that is what the sidecar is for.
 
 So grading splits in two, following `fetch_wdl.py`'s `.provenance` precedent (a grader-written
 **sibling** file, read by consumers at `wdl_gate.sh:92`):
@@ -489,11 +495,14 @@ reproduction; 1 is fixed, 2 and 3 are not.
    `create`/`validate` refusing by crashing rather than reporting. **Fixed**, with a
    `nested_bindings` probe that was itself falsified (revert the fix → the probe fails with that
    `AttributeError`). See §9 step 0.
-2. **A probe that always skips satisfies the pinned count** — `scripts/selftest.sh:204` compares
-   `run_n + skip_n` against `want`, while the comment at `:186-188` says a probe "quietly skipped for
-   a missing dependency lowers it" and that "'8 ok' versus '3 ok, 5 skipped' is the difference between
-   a gate and a rumour". The code counts skipped as accounted-for. Either the comment overstates or the
-   tally is the wrong instrument; §7's per-module probe row depends on which.
+2. **A probe that always skips satisfies the pinned count** — **fixed**, published rather than deleted.
+   The claim was true as written: `scripts/selftest.sh` compared `run_n + skip_n` against `want` while its
+   own comment said a probe "quietly skipped for a missing dependency lowers it", and that "'8 ok' versus
+   '3 ok, 5 skipped' is the difference between a gate and a rumour". The code now counts runs only, and the
+   probe that exposed this in a fresh clone (`miniwdl_resolver` — miniwdl is a *dev* requirement, so
+   `make setup` alone cannot have installed it) SKIPs naming `requirements-dev.txt` instead of failing over
+   an absent tool. Consequence for this design: a per-module probe no longer needs a lock to be *counted*,
+   but still needs one to be *graded*, because CI has no checkout to grade against.
 3. **`checks/wdl_gate.sh`'s documented example names a workflow that does not exist at `main`** —
    `--wf ResolveCpxSvGenotyping` (`:18`); `git cat-file -e main:wdl/ResolveCpxSvGenotyping.wdl` fails,
    and this script is written to report `ABSENT` and exit 1 for exactly that. CONTRIBUTING's "never
@@ -527,6 +536,15 @@ claims re-verified here rather than accepted; two numbers did not reproduce and 
 §8's non-goals, which all three reviewers called the strongest part — including the
 `svshell_contract_check` refusal, which the code confirms is machinery not config; and §10's posture
 of listing what gets newly breakable (rev 1 just omitted the biggest one).
+
+### Round 2: what closed while the format decision waited
+
+Two of the defects the review round confirmed are now closed, and neither changes what this design is
+for. `check_maps` no longer crashes on a call-site binding (13th probe `nested_bindings`, positive
+controls for both arms). The probe counter no longer lets a *skip* satisfy its pinned count, which leaves
+§5's lock sidecar justified by **content** grading rather than by counting — the CI-has-no-checkout half
+of that argument is untouched. Everything from §9 down is still unbuilt, and §11's q5 (profile format) is
+still the decision that gates it.
 
 ## 14. Reviewing this doc
 

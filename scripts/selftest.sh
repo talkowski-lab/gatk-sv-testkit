@@ -186,6 +186,12 @@ check "show names the profile file a value came from" \
 # The count is the positive control: a probe that is deleted, renamed, or quietly skipped for a
 # missing dependency lowers it, and "8 ok" versus "3 ok, 5 skipped" is the difference between a
 # gate and a rumour. Exit status alone cannot see that (0 failures with 3 probes looks green).
+#
+# WANT counts probes that must RUN. A SKIP does not satisfy it. An earlier version of this function
+# compared (run_n + skip_n) against WANT, so the sentence above described intent rather than
+# behaviour: "3 ok, 5 skipped" passed as 8, and every clone-backed probe -- the ones that need a real
+# gatk-sv checkout -- could certify a per-module gate by not running. The failure now names the
+# dependency remedy, because a SKIP without a remedy is only a smaller lie.
 probecount() {
     local desc="$1" want="$2"; shift 2
     local out rc tally run_n skip_n fail_n
@@ -200,10 +206,12 @@ probecount() {
     if [ "$fail_n" != "0" ]; then
         fail=$((fail + 1)); printf '  FAIL  %s: %s probe(s) FAILED\n' "$desc" "$fail_n"
         printf '%s\n' "$out" | grep -E '^  (FAIL|SKIP)' | head -6 | sed 's/^/          /'
-    elif [ $((run_n + skip_n)) -lt "$want" ]; then
+    elif [ "$run_n" -lt "$want" ]; then
         fail=$((fail + 1))
-        printf '  FAIL  %s: accounted for %s of >=%s probes (one vanished or was skipped)\n' \
-               "$desc" "$((run_n + skip_n))" "$want"
+        printf '  FAIL  %s: only %s of >=%s probes RAN (%s skipped) -- a skipped probe proves nothing\n' \
+               "$desc" "$run_n" "$want" "$skip_n"
+        printf '        the SKIP lines above name what is missing. requirements.txt covers the Terra\n'
+        printf '        calls; requirements-dev.txt adds miniwdl and flake8 (docs/setup.md)\n'
         printf '%s\n' "$out" | grep -E '^  (ok|SKIP|FAIL)' | head -8 | sed 's/^/          /'
     else
         ok=$((ok + 1))

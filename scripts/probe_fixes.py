@@ -130,7 +130,17 @@ def have(dep: str) -> bool:
 
 
 class Skip(Exception):
-    """A probe whose optional dependency is not installed (not a failure)."""
+    """A probe whose optional dependency is not installed (not a failure).
+
+    The remedy travels with the reason instead of being hard-coded in the printer: most optional
+    imports come from `requirements.txt`, but miniwdl and flake8 come from `requirements-dev.txt`,
+    and telling someone to run `make setup` when they need the dev file is how a SKIP turns into a
+    mystery.
+    """
+
+    def __init__(self, reason, remedy="make setup / pip install -r requirements.txt"):
+        super().__init__(reason)
+        self.remedy = remedy
 
 
 # ---------------------------------------------------------------- Terra recorder
@@ -409,6 +419,13 @@ def probe_miniwdl_resolver() -> str:
 
     This is the shape that broke: `.venv/bin/python terra/wdl_flat.py --check` in a shell that
     never activated the venv, where `command -v miniwdl` / `shutil.which` see nothing.
+
+    The synthetic control (a fake `.venv/bin/miniwdl`, with `sys.executable` pointed at a sibling of
+    the interpreter) is the defect pin, and it needs NOTHING installed -- which is what makes this
+    probe worth keeping. Only the last section asks the resolver to find a REAL miniwdl, and when this
+    machine has none anywhere the honest answer is SKIP naming the file to install: a fresh clone
+    following the README runs `make setup`, which installs runtime requirements only, so miniwdl is
+    absent by construction -- and the README's own path came back red over an optional tool.
     """
     fake = tmpdir("fake_repo/.venv/bin")
     fake.mkdir(parents=True, exist_ok=True)
@@ -442,6 +459,10 @@ def probe_miniwdl_resolver() -> str:
                          capture_output=True, text=True)
     if cli.returncode != 0:
         raise AssertionError(f"`gsvtk-config miniwdl` exited {cli.returncode}: {cli.stderr[:120]}")
+    if not cli.stdout.strip():
+        # "not installed anywhere" is a correct answer, and not the defect this probe pins. Every
+        # assertion above (venv sibling, absent -> '', override wins) ran before this line.
+        raise Skip("miniwdl", remedy="pip install -r requirements-dev.txt")
     if not os.access(cli.stdout.strip(), os.X_OK):
         raise AssertionError(f"the CLI resolver printed a non-executable: {cli.stdout!r}")
     return f"venv sibling resolved, absent -> '' , override honoured; CLI -> {cli.stdout.strip()}"
@@ -1253,7 +1274,8 @@ def main() -> int:
                 print(f"  ok    {name:20s} {detail}")
             except Skip as e:
                 skip += 1
-                print(f"  SKIP  {name:20s} needs {e} (make setup / pip install -r requirements.txt)")
+                print(f"  SKIP  {name:20s} needs {e} "
+                      f"({getattr(e, 'remedy', 'requirements.txt')})")
             except SystemExit as e:                       # the kit's own sys.exit on a missing dep,
                 m = str(e).strip()                        # from an import find_spec() swore was there
                 if "missing dependency" in m:

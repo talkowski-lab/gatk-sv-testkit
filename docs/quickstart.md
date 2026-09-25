@@ -275,7 +275,7 @@ passed `py_compile` *and* the `--help` sweep, and shipped.
 $ make test
   ok    compare_batch_tables runs, finds nothing to compare, exits 1
   ok    scripts/probe_fixes.py pins every confirmed defect with a control (13 ok, 0 skipped)
-selftest: 29 ok, 0 skipped, 0 failed
+selftest: 32 ok, 0 skipped, 0 failed
 
 make test: PASS (offline gate)
 ```
@@ -287,6 +287,14 @@ a failed gate. `make audit` is the separate last line of defence: it fails if th
 holds a credential shape **or any value that is one of your own coordinates** — it derives those from
 your configuration rather than shipping anyone's names, so CI grades the shapes and your machine grades
 your names. Both run in CI.
+
+Two things on a first run. Install the dev file alongside `make setup`
+(`.venv/bin/python -m pip install -r requirements-dev.txt`) — miniwdl and flake8 are dev tools, not
+imports, so `make setup` alone cannot install them. And read the `ok` count, not the pass/fail line: a
+probe whose tool is missing prints `SKIP ... needs miniwdl (pip install -r requirements-dev.txt)` and the
+pinned count then **fails** rather than passing on twelve. A skipped probe proves nothing. That is a
+correction, not the original behaviour — the counter used to add skips to the tally, so "3 ok, 5 skipped"
+passed as 8.
 
 If a defect you just reproduced is fixed here, it belongs in `scripts/probe_fixes.py` — one function,
 one `PROBES` entry, and the count raised in `scripts/selftest.sh`.

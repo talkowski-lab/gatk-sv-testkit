@@ -42,10 +42,12 @@ HELP_SH      := checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_com
 help:
 	@echo "gatk-sv-testkit — make targets"
 	@echo
-	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent)"
+	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
+	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              needs no config file, no credentials, no network; SKIPs tools whose"
-	@echo "              optional dependency is missing and says which"
+	@echo "              + 32 selftests; needs no config file, no credentials, no network. A missing"
+	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
+	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
 	@echo "  lint        alias of syntax: no STYLE checker on purpose (no whitespace opinions)"
 	@echo "  flake       pyflakes bug sweep (undefined names, dead values); SKIPs if flake8 absent"
@@ -69,7 +71,10 @@ setup:
 	.venv/bin/python -m pip install --quiet -r requirements.txt; \
 	echo; \
 	echo "installed. Activate it with:"; \
-	echo "    source .venv/bin/activate"
+	echo "    source .venv/bin/activate"; \
+	echo; \
+	echo "make test also wants the dev tools — without them probes SKIP and the pinned count fails:"; \
+	echo "    .venv/bin/python -m pip install -r requirements-dev.txt"
 
 # ---------------------------------------------------------------------- test
 # Every phase is runnable alone and prints its own tally. All of them run even when one fails,
