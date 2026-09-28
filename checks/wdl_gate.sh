@@ -142,7 +142,8 @@ for ref in "${REFS[@]}"; do
         status=1
         continue
     fi
-    sem="$("$SEM_PY" "$HERE/wdl_semantics.py" --dir "$dir" --summary-only 2>/dev/null)"; semrc=$?
+    sem="$("$SEM_PY" "$HERE/wdl_semantics.py" --dir "$dir" --summary-only \
+        --jobs "${GSVTK_SEMANTICS_JOBS:-0}" 2>/dev/null)"; semrc=$?
     if [ -z "${sem//[^0-9= ]/}" ]; then
         printf '%-30s %-26s %s\n' SEMANTICS "$refsha" "FAILED (exit $semrc) — run: $SEM_PY $HERE/wdl_semantics.py --dir $dir"
         status=1; continue

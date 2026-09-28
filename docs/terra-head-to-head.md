@@ -243,8 +243,9 @@ and comparing to a production baseline mixes three variables at once.
 To ask "did my code change the output", leave one variable: same WDL ref on both arms, same frozen
 inputs, `sv_pipeline_docker` = the shipped image on one arm and your commit-pinned build on the
 other. That is two submissions of one step, and the config machinery above is what makes them
-identical apart from one line. Price it after the fact with `batch_cost.py --costs` rather than
-guessing beforehand.
+identical apart from one line. Price it after the fact with `terra/batch_cost.py` over the metadata
+`batch_save_metadata.py` left behind (`--groups 10-baseline` adds a call-group roll-up, `--json` writes
+the artifact) rather than guessing beforehand.
 
 Two ways that design degenerates silently, both cheap to avoid:
 

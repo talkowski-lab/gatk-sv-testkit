@@ -84,6 +84,12 @@ checks/wdl_semantics.py --dir "$GSVTK_GATK_SV_CHECKOUT" --block CondenseReadCoun
 checks/wdl_semantics.py --selftest                         # the fixtures and their controls
 ```
 
+The scan parses the whole tree in parallel (`--jobs`, default `min(8, cpus)` workers, each holding a
+few hundred MB of AST). `GSVTK_SEMANTICS_JOBS=1` caps both this and the gate's real-tree row to one
+worker — use it on a machine already deep in swap, which is the situation that got the knob written:
+a full gate was started while a forgotten backgrounded one was still parsing, and 27 GB ended up in the
+page compressor.
+
 | Rule | The defect it names | Why no validator sees it |
 |---|---|---|
 | `WRITE-SCOPE` | a workflow-scope `write_lines`/`write_tsv`/`write_json`/`write_map` | it typechecks; Cromwell on PAPIv2 just cannot materialize a workflow-level File, so the submission dies in seconds |
