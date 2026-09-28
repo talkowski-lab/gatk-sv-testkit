@@ -320,8 +320,15 @@ def list_layout(dir_uri: str, run=subprocess.run) -> dict:
     """
     if not dir_uri:
         return {"error": "no call directory in the metadata record (no callRoot, no log path)"}
-    cmd = (["gsutil", "-m", "ls", dir_uri.rstrip("/") + "/*"] if dir_uri.startswith("gs://")
-           else ["ls", dir_uri])
+    # `file://` is how a Cromwell dump on disk points at its execution dir (Cromwell prints local roots
+    # that way, and read_object already strips the scheme). Handing the URI to `ls` verbatim made every
+    # such dump fail the layout step -- rc, stderr and script printed fine, then the run exited 1 on
+    # "could not read: the layout listing", which reads like a broken artifact and is a broken parser.
+    local = dir_uri[len("file://"):] if dir_uri.startswith("file://") else dir_uri
+    if not local.startswith("://") and "://" not in local:
+        cmd = ["ls", local]
+    else:
+        cmd = ["gsutil", "-m", "ls", dir_uri.rstrip("/") + "/*"]
     try:
         proc = run(cmd, capture_output=True, text=True, timeout=120)
     except FileNotFoundError:
@@ -819,6 +826,16 @@ def selftest() -> int:
         ck("a withheld stdout is NOT counted as a failure (only what the page tried to show can be "
            "unreadable — counting it made every real PAPI record exit 1)",
            run_main("--metadata", meta_path2, "--task", "Empty", "--no-scratch")[0] == 0)
+        meta_file = os.path.join(d, "meta_file.json")
+        with open(meta_file, "w") as fh:
+            json.dump({"status": "Succeeded", "workflowName": "WF", "calls": {"Foo": [
+                {"shardIndex": 0, "attempt": 2, "executionStatus": "Done",
+                 "callRoot": "file://" + att2 + "/"}]}}, fh)
+        rc_file, out_file = run_main("--metadata", meta_file, "--task", "Foo", "--no-scratch")
+        ck("a `file://` callRoot (how Cromwell prints a local execution root) lists its layout and "
+           "reads — the scheme must not reach `ls` and turn a good dump into exit 1",
+           rc_file == 0 and "rc: 10" in out_file and "could not read" not in out_file,
+           f"rc={rc_file}")
         rc_miss, out_miss = run_main("--metadata", meta_path, "--task", "Nope", "--no-scratch")
         ck("a call name this metadata does not declare exits 1 and names what IS declared",
            rc_miss == 1 and "not in this metadata" in out_miss and "Foo" in out_miss)
