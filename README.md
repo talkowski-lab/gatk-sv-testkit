@@ -2,18 +2,72 @@
 
 [![ci](https://github.com/talkowski-lab/gatk-sv-testkit/actions/workflows/ci.yml/badge.svg)](https://github.com/talkowski-lab/gatk-sv-testkit/actions/workflows/ci.yml)
 
-[GATK-SV](https://github.com/broadinstitute/gatk-sv) carries structural-variant calling from raw reads
-to a whole cohort, in one pipeline. This repo is a set of tools that sit around it: static checks, a
-docker build harness, and comparison tools for what comes out.
+[GATK-SV](https://github.com/broadinstitute/gatk-sv) is a pipeline that calls structural variants from
+raw reads, across a whole cohort. This repo is a toolbox that sits next to it. It does not call variants,
+and it does not host your data.
 
-It exists because checking a change in that pipeline usually means launching it and waiting. The waits
-are familiar: hours of VM time; a docker build that Apple Silicon cannot run natively; and, in the
-`src/sv_shell` layer, which gatk-sv's CI does not cover, a renamed JSON key that first shows itself
-several stages into a live run. Each tool here answers one of those questions somewhere cheaper. A full
-run is still the real test, and none of this replaces it.
+The reason it exists is waiting. Checking one change in that pipeline usually means launching it and
+waiting: hours of VM time, a docker image your laptop cannot build, or a renamed JSON key that shows
+itself five stages into a live run, after you have already paid for the machines. Every tool here answers
+one of those questions somewhere cheaper. A real run is still the real test, and nothing here replaces it.
 
-The static checks are the fast end: no credentials, no data, no docker. Captured 2026-09-28, not a
-mockup:
+> [!NOTE]
+> Nothing in this repo is part of GATK-SV, endorsed by the Broad Institute, or needed to run the pipeline.
+
+## The four jobs
+
+| Job | Without these tools | With them |
+|---|---|---|
+| Build a docker image from a branch | Install Docker Desktop, or run the manual build on a VM by hand. One to three hours. Apple Silicon cannot build `linux/amd64` locally at all. | `docker/gatk-sv-build.sh <branch>` boots one temporary x86_64 VM, builds, pushes, and deletes itself. No Docker on your laptop. [Docker builds](docs/docker-builds.md) |
+| Compare a branch against a real run | Run the whole pipeline twice and hope the inputs matched. | Freeze one run's inputs, re-run only the stage you changed, and diff the tables and VCFs that come out. [Terra head-to-head](docs/terra-head-to-head.md) |
+| Test a genotyper change with no cloud spend | Not possible without a Terra run. | Pull that run's exact frozen inputs and run the real trainer locally, against a jar you built. [Local replay](docs/local-replay.md) |
+| Find a WDL or `sv_shell` break before submitting | Discover it mid-submission, once the VMs have booted. | Static checks, in seconds: no data, no Docker, no network. [Static checks](docs/static-checks.md) |
+
+A session usually runs in that order: change a WDL, run the two static checks, build the image, re-run
+the one stage you changed, diff the results, and write down the command behind every number.
+[docs/quickstart.md](docs/quickstart.md) walks through all four jobs with the real output of each step,
+and nothing in it spends money.
+
+## Getting started
+
+### What you need
+
+Python 3.9 or newer. The rest depends on which job you want, and every tool names what it is missing.
+
+- Static checks and the config tools: nothing else.
+- The WDL checks: `miniwdl`, from `requirements-dev.txt`.
+- The Terra tools: `firecloud` (that is fiss; the PyPI name is not `fiss`) and `google-auth`, plus
+  `gcloud auth application-default login`.
+- Docker builds and probes: `gcloud`, and permission for a VM to push to your registry.
+- Local replay: JDK 17 or newer, and a GATK jar you built.
+- Comparing profile tables: `numpy` and `pandas`, plus `bcftools` or `pysam` for some.
+
+Credentials and the full table are in [docs/setup.md](docs/setup.md).
+
+### Install
+
+```bash
+git clone https://github.com/talkowski-lab/gatk-sv-testkit.git
+cd gatk-sv-testkit
+make setup                                             # a virtualenv with what the tools import
+.venv/bin/python -m pip install -r requirements-dev.txt   # and the dev tools: miniwdl and flake8
+cp testkit.env.example testkit.env                     # then edit it: your project, your workspace
+./kit/gsvtk-config doctor                              # prints what is still missing
+```
+
+Do not skip the second install line. `make setup` installs only what the tools import, so without the dev
+file the test gate further down quietly covers less than it claims to.
+
+### Try it
+
+The fastest end of the toolbox. It needs `miniwdl`, which the dev install above provides, and a checkout
+of gatk-sv for the WDLs, pointed at by `GSVTK_GATK_SV_CHECKOUT`. Nothing in it touches the cloud:
+
+```bash
+checks/wdl_gate.sh origin/main
+```
+
+Real output, captured 2026-09-28, not a mockup:
 
 ```text
 $ checks/wdl_gate.sh origin/main
@@ -28,214 +82,67 @@ the SEMANTICS counts as failure (today's gatk-sv carries a few of each on purpos
  --strict is a diff-against-baseline decision, not a default).
 ```
 
-35 seconds on a laptop against gatk-sv `main`, working WDLs fetched from a checkout. Give it your branch
-as the second argument and the same command prints the change in those counts against the base ref.
-
-> [!NOTE]
-> Nothing here is part of GATK-SV, endorsed by the Broad Institute, or required to run the pipeline. It
-> is a developer's toolbox *around* it.
-
-## Contents
-
-* [What you can do with it](#what-you-can-do-with-it)
-* [A normal session](#a-normal-session)
-* [What it is not](#what-it-is-not)
-* [The four loops it shortens](#the-four-loops-it-shortens)
-* [Getting Started](#getting-started)
-  * [Prerequisites](#prerequisites)
-  * [Installing](#installing)
-  * [Configuration](#configuration)
-  * [Things worth knowing before you start](#things-worth-knowing-before-you-start)
-  * [What is here](#what-is-here)
-* [Running the tests](#running-the-tests)
-  * [End to end tests](#end-to-end-tests)
-  * [Coding style tests](#coding-style-tests)
-* [Costs](#costs)
-* [Built With](#built-with)
-* [Contributing](#contributing)
-* [License](#license)
-* [Acknowledgments](#acknowledgments)
-
-## What you can do with it
-
-* A workflow can pass `miniwdl check` and still be unlaunchable, because a call site never passes a
-  required input, or passes one the callee deleted. `checks/wdl_gate.sh` turns both into counts you can
-  diff between two refs. The `src/sv_shell` layer has the same delay built in: rename a key there and
-  `jq` hands the *string* `"null"` to a module several stages later, after you have paid for the VMs.
-  `checks/svshell_contract_check.py` finds it before you submit anything.
-* The comparators give a verdict per column: `MATCH`, `DELTA`, `MISSING`, and `STRATEGY` for a value
-  that changed *on purpose*, where comparing raw means would tell you nothing. Point one at empty
-  directories and it reports that it compared nothing and exits nonzero, because an empty table that
-  reads like "no differences" is the failure this repo has been caught by more than once. The comparator
-  docs also list the traps that already cost someone an analysis, like two quality fields that measure
-  the same thing on different scales, where "the new pipeline lost 90% of the signal" was really a 10×
-  unit change ([docs/comparators.md](docs/comparators.md)).
-* `--check` and `--dry-run` on the build script cost nothing and tell you whether the build would even
-  start. The build itself runs on a throwaway x86_64 VM: it streams the log, pushes, and deletes the VM
-  on success. Your laptop needs no Docker.
-* A method-config map can match one branch's WDL and not the branch you are actually testing, and the
-  cloud rejects the whole config at submission, after it sat in your workspace looking fine.
-  `terra/batch_configs.py check --against main` does that comparison offline, in seconds, against your
-  own checkout.
-* You can run the real trainer locally on a real run's exact inputs, with a jar you built yourself. No
-  cloud, no data movement, nothing to rent.
-* `show` and `doctor` print every setting with where it came from: environment, profile file, derived,
-  or default. The two settings that decide whose bill it is and whose workspace gets written have no
-  default at all. The tools stop and name the missing key.
-* The repo ships the skill that drives it, and the wrapper dispatches read-only modes only, so an agent
-  cannot reach a POST or a VM by accident.
-
-## A normal session
-
-Change a WDL or a shell script → run the two static checks → build the image → run the same pipeline step
-before and after → diff the tables and VCFs → write up the result with the command that produced it, so
-somebody else can run it too.
-
-## What it is not
-
-It does not call variants; that is gatk-sv. It does not host your data. It will not quote you a price
-either: costs are given as machine type and wall-clock, because your billing account and discounts are
-not something this repo can see. Its findings need triage before they mean anything. Run against gatk-sv
-as it stands, the static checks report several unsupplied reads and a handful of `IncompleteCall`
-warnings *on purpose*, so what you want is the **diff** against the ref you are changing
-([docs/static-checks.md](docs/static-checks.md)). The run-the-pipeline tools are also written around the
-Genotyping module. Making them work for any module is
-[docs/module-profiles.md](docs/module-profiles.md), which is a proposal and has not been built.
-
-## The four loops it shortens
-
-| Loop | Without this | With this | Docs |
-|---|---|---|---|
-| **Build a docker image from a branch** | Install Docker Desktop, or hand-run the manual build on a VM; ~1-3 h; Apple Silicon cannot build `linux/amd64` locally at all | `docker/gatk-sv-build.sh <branch>`: one throwaway x86_64 GCE VM, no local Docker, streams the log, deletes itself | [docker builds](docs/docker-builds.md) |
-| **Compare a branch against a real baseline run** | Re-run the whole pipeline twice and hope the inputs matched | Freeze one baseline's inputs, run only the changed stage, diff the tables and VCFs that came out | [Terra head-to-head](docs/terra-head-to-head.md) |
-| **Test a genotyper change without any cloud spend** | Not possible without a Terra run | `terra/stage_inputs.py` pulls the exact frozen inputs; a locally built GATK jar runs the real trainer on them | [local replay](docs/local-replay.md) |
-| **Catch a WDL / `sv_shell` break before submitting** | Discover it mid-submission, after VMs booted | `checks/` is static: seconds, no data, no docker, no network. `wdl_gate.sh` asks whether the call bindings are right; `wdl_semantics.py` asks whether the workflow would RUN at all (both diff against a base ref). `image-check/` is the deliberate exception: it asks a shipped image | [static checks](docs/static-checks.md) |
-
-## Getting Started
-
-### Prerequisites
-
-Python 3.9 or newer, and `make setup` gives you a venv with what the tools import. Most of what follows
-is optional and each tool says what it is missing; the full page is
-[docs/setup.md](docs/setup.md).
-
-| You want to | Also needs |
-|---|---|
-| run anything in `checks/` or `kit/` | nothing beyond the standard library |
-| run the WDL checks or rebuild an input JSON | `miniwdl`, from `requirements-dev.txt` |
-| use the `terra/` tools | `firecloud` (that **is** fiss; the PyPI name is not `fiss`) and `google-auth`, plus `gcloud auth application-default login` |
-| fetch or stage `gs://` objects | `gsutil`, under the same credentials |
-| build or probe docker images | `gcloud`, and IAM that lets a VM push to your registry |
-| run the plumbing scan | `jq` on `PATH` |
-| compare profile tables | `numpy`, `pandas`; `bcftools` or `pysam` for some |
-| replay a trainer locally | JDK 17+ and a GATK jar you built |
-
-### Installing
+35 seconds on a laptop, reading the WDLs from your own gatk-sv checkout. The checker counts two things a
+passing `miniwdl check` cannot see: an input that some call site never supplies, and an input the callee
+no longer accepts. Today's gatk-sv has a few of both, so the useful number is the difference between two
+refs rather than the absolute count:
 
 ```bash
-git clone https://github.com/talkowski-lab/gatk-sv-testkit.git
-cd gatk-sv-testkit
-make setup                          # .venv with the python dependencies
-.venv/bin/python -m pip install -r requirements-dev.txt   # miniwdl + flake8: the FULL gate
-
-cp testkit.env.example testkit.env  # then edit it: project + workspace are yours to name
-./kit/gsvtk-config doctor           # tells you exactly what is still missing
-```
-
-Install the dev file alongside `make setup`. miniwdl and flake8 are dev tools rather than imports, so
-`make setup` alone cannot install them, and without them the gate quietly covers less than it claims.
-
-Then pick a loop. [docs/quickstart.md](docs/quickstart.md) walks through all four and prints the real
-output of each step; nothing in it spends money. The two most common first runs:
-
-```bash
-# build a branch's sv-pipeline image on a throwaway x86 VM, no local Docker
-docker/gatk-sv-build.sh --dry-run my-branch    # shows what it would do, touches nothing
-docker/gatk-sv-build.sh my-branch              # ~1-3 h, streams the build log
-
-# is my branch's WDL actually launchable? (refs are in your gatk-sv checkout; needs miniwdl,
-# takes seconds)
 checks/wdl_gate.sh origin/main my-branch
 ```
 
-### Configuration
+## Configuration
 
-One profile, read by every tool, resolved in one place (`kit/gsvtk-config`):
+One file, `testkit.env`, read by every tool through `kit/gsvtk-config`. Precedence:
 
 ```
 environment variable  >  testkit.env  >  derived  >  built-in default
 ```
 
-Two values have **no default at all**: the GCP project and the Terra workspace. They decide whose money
-is spent and whose workspace gets written to, so the tools stop and name the missing key rather than
-guess. See [docs/config.md](docs/config.md).
+Two keys have no default at all: your GCP project and your Terra workspace. They decide whose bill this is
+and whose workspace gets written to, so the tools stop and name the missing key instead of guessing. Run
+`./kit/gsvtk-config show` to print every value with where it came from. Details in
+[docs/config.md](docs/config.md).
 
-Scratch output (staged inputs, replay runs, frozen manifests, fetched callsets, tens of GB) goes under
-`GSVTK_WORK` and is gitignored. Nothing the tools produce is committed.
+Scratch output, which for some jobs runs to tens of gigabytes, goes under `GSVTK_WORK` and is gitignored.
+Nothing the tools produce gets committed.
 
-### Things worth knowing before you start
+## Three things worth knowing early
 
-- **The skill ships with the repo.** `.pi/skills/gatk-sv-testkit/` is a
-  [pi](https://github.com/badlogic/pi-mono) skill, and any other harness that reads `.pi/skills/` can use
-  it too. It covers how to locate a checkout, which loop answers which question, and what is safe to run
-  unattended. Its wrapper dispatches **only** read-only modes: `submit`, `create`, `copy`,
-  `attrs --write`, `fetch`, `profile` are refused before anything else runs. `make selftest` runs
-  `scripts/check_skill.py`, which *executes* those refusals and compares the result to what the prose
-  claims, so "submit is refused" stays something that gets checked.
-- **Read-only by default.** Mutating helpers in `terra/` need `confirm=True`. The ones that start compute
-  also refuse without `--confirm` on the command line, and the ones that write to Terra refuse the shared
-  baseline workspace unless you name `--allow-shared-target`. Recon, status, cost, fetch, all of
-  `checks/` and all of `compare/` write nothing outside `$GSVTK_WORK`. That is still a write, though:
-  recon dumps eight JSONs there, and `recon/*.json` is an inventory of your workspace.
-- **Pick a push target that nothing reads.** The image-registry default is derived from your project plus
-  a namespace segment. If a real pipeline reads the path you push a test build to, then that pipeline is
-  now using your image. The tools warn about it, and beyond the warning it is your call.
-- **The baseline workspace referenced in defaults is public.**
-  `broad-firecloud-dsde-methods/GATK-Structural-Variants-Joint-Calling` is the featured GATK-SV
-  workspace that gatk-sv's own documentation links to (see `website/docs/execution/joint.md` and
-  `website/docs/advanced/build_ref_panel.md` in the gatk-sv repo). Override `GSVTK_BASELINE_*` to
-  point at your own frozen run.
-- **The publish guard uses *your* identifiers, not the author's.** `make audit` fails if the tracked tree
-  holds a credential shape (a service-account address, a private key, a real home path) or any value that
-  resolves to one of **your** coordinates (project, Terra workspace, registry path, checkout path) read
-  back off your own configuration, minus anything that is a shipped default. No file is exempt, and
-  nobody's names are shipped in the pattern list, so CI grades the shapes and your machine grades your
-  own values. Run it before pushing, not only in CI.
-  `make audit` grades the tracked tree, so a value that shipped once keeps passing forever: a later scrub
-  makes the file clean while the published blob stays reachable. `make audit-history` grades the object
-  store and every commit message instead, classified by exposure (`HEAD`/`STAGED` fail, `HISTORY`
-  reported, `DANGLING` advisory), and `make audit-history PUBLISH=1` is the pre-push form. Why it exists:
-  [`docs/static-checks.md`](docs/static-checks.md)
-  ([CONTRIBUTING.md](CONTRIBUTING.md) has the rule about what may be added where).
-- **`gs://` access is your own.** Staging and fetching use `gsutil` under your credentials.
-  Some gatk-sv resource buckets are anonymously readable; baseline workspace buckets are not,
-  which is why freezing copies them server-side rather than referencing them.
-- **When something breaks, grep [docs/troubleshooting.md](docs/troubleshooting.md) for the error text
-  you have** before searching the web. Every row is keyed on the verbatim message, which is the one
-  thing you definitely have.
-- **[docs/gap-ledger.md](docs/gap-ledger.md)** lists every item the three gap reviews asked for, what
-  happened to each one, and the command that proves that claim, including the two items left out of
-  scope and why. Commit messages cite the reviews; this is the tracked counterpart.
+1. **Most of it writes nothing.** Everything in `checks/` and `compare/` touches only `GSVTK_WORK`.
+   Helpers that change something need `confirm=True`. The ones that start compute also need `--confirm` on
+   the command line. The ones that write to Terra refuse the shared baseline workspace unless you add
+   `--allow-shared-target`.
+2. **Choose a push target that nothing reads.** The default registry path is derived from your project. If
+   a real pipeline reads that path, then it is now running your test image. The tools warn you, and past
+   the warning it is your judgement.
+3. **Run `make audit` before you push.** It fails if a tracked file holds a credential shape, or any value
+   that resolves to one of *your* coordinates: project, workspace, registry path, checkout path. It reads
+   those off your own configuration, which is why CI alone cannot catch it.
+   [docs/static-checks.md](docs/static-checks.md) explains both it and `make audit-history`, which grades
+   what you already published instead of what you are about to publish.
 
-### What is here
+The repo also ships the agent skill that drives it, under `.pi/skills/gatk-sv-testkit/`. Its wrapper
+dispatches read-only modes only, so an agent cannot reach a submission or a VM by accident.
+[docs/setup.md](docs/setup.md) has the details.
+
+## What is in the repo
 
 ```
-docker/     gatk-sv-build.sh + remote-build.sh   build+push any branch's images, no local Docker
-terra/      recon, baseline freezing, method configs, status, cost, call-level peek, fetch
-            artifacts by workflow output name, compare  (Terra loop)
-checks/     static checks: WDL launchability, WDL semantics + blast radius, sv_shell JSON
-            contract, image byte-proof (and running a script inside an image)
-compare/    13 comparators + a single-artifact tally (artifact_tally.py): keyed tables,
-            site×sample matrices, VCF fields, sets, bundles
+docker/     build and push any branch's images, with no local Docker
+terra/      the Terra loop: recon, baseline freezing, method configs, status, cost, fetch, compare
+checks/     static checks: WDL launchability, WDL semantics, sv_shell JSON contract, image byte-proof
+compare/    comparators for keyed tables, matrices, VCF fields, sets and bundles, plus an
+            artifact tally that refuses to report agreement on nothing
+kit/        the config layer that every tool reads
 replay/     rebuild a launchable input JSON from a captured successful run
-scripts/    fetch_wdl.py (WDLs from your checkout, never vendored), audit.py (publish guard)
-kit/        the config layer every tool reads (gsvtk-config + config.sh + config.py)
+scripts/    the publish guard, the WDL fetcher, and the gate's own tooling
 examples/   worked drivers from a real investigation, kept as recipes
-docs/       how each loop works, and the gotchas with their verbatim error text
-.pi/skills/ the agent skill that drives this repo: SKILL.md + a read-only `gsvtk` wrapper
+docs/       one page per job, with the gotchas keyed on their verbatim error text
+.pi/skills/ the agent skill and its read-only wrapper
 ```
 
-Run `make help` for the tool index, or `./kit/gsvtk-config show` to see the resolved configuration.
+Run `make help` for the tool index.
 
 ## Running the tests
 
@@ -243,96 +150,77 @@ Run `make help` for the tool index, or `./kit/gsvtk-config show` to see the reso
 make test
 ```
 
-This is the gate on the toolkit itself, and the static checks above are tools that grade gatk-sv. Don't
-confuse the two. `make test` needs no credentials, no data and no network, and it is the standard this
-repo holds itself to. Seven phases, each added because the one before it let something through:
+That grades the toolkit itself. Everything under `checks/` grades gatk-sv, which is a different question
+and easy to confuse with this one. This gate needs no credentials, no data and no network. It has seven phases, and each one
+was added because the one before it let something through:
 
 ```bash
 make syntax      # every .sh parses, every .py compiles
 make undefmods   # attribute access on a module the file never imports
-make flake       # pyflakes sweep: undefined names, unused values, imports that are not there
+make flake       # pyflakes: undefined names, unused values, imports that are not there
 make helpsweep   # --help on every tool, with zero configuration
 make smoke       # the tools actually run, end to end, on hostile fixtures
-make audit       # the publish guard (see Things worth knowing)
-make selftest    # config layer, both checkers, the shipped skill, the docs' structure, the probes
+make audit       # the publish guard
+make selftest    # config layer, both checkers, the shipped skill, the docs, the pinned probe set
 ```
 
-The phases that go beyond compiling are the ones that earned their place. `--help` never reaches
-`main()`, and a comparator that was dead on every real invocation passed `py_compile` and the help sweep
-and shipped. [CONTRIBUTING.md](CONTRIBUTING.md) has the table of what each part proves and what it caught.
+Two of those phases are there because compiling was not enough. A tool can print its usage and still be
+dead when called for real, so `smoke` runs the tools against empty files and against tables that share no
+keys, where the honest answer is "I compared nothing" followed by a nonzero exit. `selftest` adds a canary
+that asserts a known-failing command is reported as failing, plus one probe per defect a review confirmed,
+each with a positive control so a guard that could never fire cannot pass as a guard that never had to.
+The probe count is pinned: a probe that vanishes fails the gate, and so does one that never ran because a
+dependency was missing. Read the `ok` count, not the pass line.
 
-### End to end tests
-
-`make smoke` runs the tools against fixtures built to be hostile: empty files, and a table whose schema
-matches but shares no key with its partner, which must exit 2 rather than report agreement.
-`make selftest` adds a **canary**, which asserts that a known-failing command is reported as failing, and
-a set of **probes** in `scripts/probe_fixes.py`, one per defect a review confirmed. Each
-probe also runs a positive control proving the guarded path was reachable, because a guard that never
-fired and a guard that could never fire produce the same output.
-
-The probe count is pinned, and `WANT` counts the probes that must **run**: one that vanishes fails the
-gate, and so does one that never ran because a dependency is missing. The SKIP line names the file to
-install, and the gate will not pass on a smaller number. That last part is a correction. An earlier
-version of the counter added the skip tally to the running tally, so "3 ok, 5 skipped" passed as 8.
-Read the `ok` counts, not just the pass/fail line.
-
-### Coding style tests
-
-There is no formatter here and no style argument to have; `make lint` is an alias of `make syntax`, and
-the Makefile says why: no whitespace opinions. `make flake` is the rest of it, and it runs
-`flake8 --select=F` so it reports real defects rather than taste: undefined names, imports that are not
-there, values computed and then dropped. `make undefmods` covers the other half of `NameError`, the
-attribute-on-a-missing-import case that `py_compile` accepts. Style conventions that matter are in
-[CONTRIBUTING.md](CONTRIBUTING.md), which is also where the bar for a new tool lives.
+There is no style checker here. `make lint` is an alias of `make syntax`, and the Makefile says why: no
+whitespace opinions. [CONTRIBUTING.md](CONTRIBUTING.md) has the table of what each phase proves, and the
+bug each one caught.
 
 ## Costs
 
-- A `sv-pipeline` build: `e2-standard-8`, roughly 1-3 hours, plus a 150 GB PD-SSD. Ephemeral mode
-  deletes the VM on success; on failure it self-shuts-down and is kept so you can read the log.
-- A Terra head-to-head step is a fleet of VMs over tens of minutes to hours. `terra/batch_cost.py`
-  recomputes VM-minutes from saved Cromwell metadata, so a published number can be checked afterwards.
-- Local replay costs time and disk. The staged 1KG matrices are tens of GB.
+No prices, because your billing account and your discounts are not visible from here. Machines and
+wall-clock instead.
 
-## Built With
+- A `sv-pipeline` build: one `e2-standard-8`, one to three hours, plus a 150 GB persistent disk. It
+  deletes itself on success; on failure it shuts down and stays, so you can read the log.
+- A Terra head-to-head step: a fleet of VMs, tens of minutes to hours. `terra/batch_cost.py` recomputes
+  the VM-minutes from saved metadata, so a published number can be checked afterwards.
+- Local replay: time and disk. The staged reference matrices run to tens of gigabytes.
 
-What the tools are made of, and what you end up depending on:
+## Where to look next
 
-* **Bash 3.2** for `kit/` and the shell drivers, because macOS still ships it and a bash-4 feature once
-  broke the config shim silently.
-* **Python 3.9+**, standard library first. Most of `compare/` is stdlib only; `numpy`, `pandas` and
-  `pysam` are used where a table or a VCF makes them the short path.
-* **[miniwdl](https://github.com/chanzuckerberg/miniwdl)** for WDL parsing, as a dev dependency, and
-  `flake8` used only as a pyflakes runner.
-* **[jq](https://stedolan.github.io/jq/)**, `bcftools`, `gsutil` and `gcloud` as external binaries. Each
-  tool says what is missing and how to install it.
-* **[Terra](https://terra.bio/) / FireCloud** through `firecloud` (fiss), pinned to the
-  `api.firecloud.org` alias because `api.terra.bio` does not resolve on every network.
-* **Google Compute Engine** for the build and probe VMs. No local docker anywhere.
-* **[GATK](https://github.com/broadinstitute/gatk)** jars for local replay, built by you from your own
-  checkout.
-* **[pi](https://github.com/badlogic/pi-mono)** for the agent skill in `.pi/skills/`.
+- [docs/quickstart.md](docs/quickstart.md) all four jobs, step by step, with real output
+- [docs/setup.md](docs/setup.md) dependencies, credentials, and the agent skill
+- [docs/config.md](docs/config.md) every key, including the two with no default
+- [docs/troubleshooting.md](docs/troubleshooting.md) keyed on the verbatim error text, which is the one
+  thing you definitely have
+- [docs/comparators.md](docs/comparators.md) what each comparator decides, and the unit traps that already
+  cost someone an analysis
+- [docs/gap-ledger.md](docs/gap-ledger.md) every item the gap reviews asked for, what happened to it, and
+  the command that proves it
 
 ## Contributing
 
-`make test` before pushing; see [CONTRIBUTING.md](CONTRIBUTING.md). A new tool has to either remove an
-hour of waiting or catch a bug before it costs VM time. If it does neither, it probably belongs in
-gatk-sv itself.
+Run `make test` first. [CONTRIBUTING.md](CONTRIBUTING.md) has the bar: a new tool either removes an hour
+of waiting or catches a bug before it costs VM time. If it does neither, it probably belongs in gatk-sv.
+
+## Built with
+
+Bash 3.2 for the config layer and the shell drivers, because macOS still ships it. Python 3.9 and mostly
+the standard library. [miniwdl](https://github.com/chanzuckerberg/miniwdl) for WDL parsing, and `flake8`
+used only as a pyflakes runner. External binaries: [jq](https://stedolan.github.io/jq/), `bcftools`,
+`gsutil`, `gcloud`. Terra through `firecloud`. Google Compute Engine for the build and probe VMs.
+[GATK](https://github.com/broadinstitute/gatk) jars you build yourself.
+[pi](https://github.com/badlogic/pi-mono) for the agent skill.
 
 ## License
 
-BSD 3-Clause, Talkowski Lab. See [LICENSE](LICENSE). This toolkit is separate from and not endorsed by
-the Broad Institute.
+BSD 3-Clause, Talkowski Lab. See [LICENSE](LICENSE). This toolkit is separate from GATK-SV and is not
+endorsed by the Broad Institute.
 
 ## Acknowledgments
 
 The design follows GATK-SV's documented flows: manual docker deployment, the numbered joint-calling
-workspace, the `wdl/` and `src/sv_shell` layouts. Concordance work is expected to be published with
-[`gatk-sv-profile`](https://github.com/broadinstitute/gatk-sv-profile); the comparators here exist
-because its tables are bucketed and a figure lifted from one needs its aggregation rule written down.
-
-[docs/methodology.md](docs/methodology.md) records the claims this work proved wrong and what replaced
-them, which is the part of the investigation record that belongs in a repository. The session notes
-themselves are working copies under `docs/handoff/` and `docs/archive/`, ignored rather than tracked: a
-transcript quotes real paths, and `make audit` is right to call that a leak. What those notes published
-before they were ignored is still graded by `make audit-history`, because ignoring a file does not
-unpublish the copy that was already pushed.
+workspace, and the `wdl/` and `src/sv_shell` layouts. Concordance is expected to be published with
+[gatk-sv-profile](https://github.com/broadinstitute/gatk-sv-profile). The comparators here exist because
+its tables are bucketed, and a figure lifted from one needs its aggregation rule written down.

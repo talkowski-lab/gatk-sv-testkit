@@ -50,10 +50,12 @@ ticket: `WANT` counts probes that must *run*, and a skipped probe proves nothing
 of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8; the fix is in
 `scripts/selftest.sh`, and a probe pins the count claim so it cannot drift again.
 
-What stays skipped even with both files: the three clone-backed checks, until `GATK_SV` points at a
-gatk-sv checkout ([Configure](#configure)). Those are checks, not probes, so they do not touch the
-pinned count. CI installs both files, which is why CI is where the gate is really enforced. On a laptop you decide
-how much of it to run.
+What stays skipped even with both files: the four clone-backed self-tests, until
+`GSVTK_GATK_SV_CHECKOUT` points at a gatk-sv checkout ([docs/config.md](config.md)). They are `check`
+entries rather than `probe_fixes` probes, so they never enter the `WANT` ticket, but they are still
+counted: the count probe requires ran plus named skips to equal the claim, which is why a CI run prints
+`81 ran + 4 skipped = 85`. CI installs both files, which is why CI is where the gate is really enforced.
+On a laptop you decide how much of it to run.
 
 ## Pinning a local venv to what production actually runs
 
@@ -161,7 +163,12 @@ joint-calling workspace into your own namespace and point the tools at the clone
   **clone's pet service account**, which cannot read the original workspace's bucket. That is
   why `batch_freeze.py` copies the baseline inputs server-side instead of referencing them.
 
-Baseline (`GSVTK_BASELINE_*`) stays pointed at the reference run and is only ever read.
+Baseline (`GSVTK_BASELINE_*`) stays pointed at the reference run and is only ever read. The shipped
+default for it is that featured workspace itself, `broad-firecloud-dsde-methods/GATK-Structural-Variants-Joint-Calling`
+(the defaults in `kit/gsvtk-config`), which is the workspace GATK-SV's own documentation links to: see
+`website/docs/execution/joint.md` and `website/docs/advanced/build_ref_panel.md` in the gatk-sv repo. It is
+public by construction: a shipped default cannot be anything else, and `make audit` treats shipped
+defaults as public rather than as leaks. Override it to point at a run you froze.
 
 ## Storage
 
