@@ -118,10 +118,12 @@ checks/wdl_gate.sh origin/main my-branch
 
 ```
 docker/     gatk-sv-build.sh + remote-build.sh   build+push any branch's images, no local Docker
-terra/      recon, baseline freezing, method configs, status, cost, fetch+compare  (Terra loop)
+terra/      recon, baseline freezing, method configs, status, cost, call-level peek, fetch
+            artifacts by workflow output name, compare  (Terra loop)
 checks/     static checks: WDL launchability, WDL semantics + blast radius, sv_shell JSON
             contract, image byte-proof (and running a script inside an image)
-compare/    13 comparators: keyed tables, site×sample matrices, VCF fields, sets, bundles
+compare/    13 comparators + a single-artifact tally (artifact_tally.py): keyed tables,
+            site×sample matrices, VCF fields, sets, bundles
 replay/     rebuild a launchable input JSON from a captured successful run
 scripts/    fetch_wdl.py (WDLs from your checkout, never vendored), audit.py (publish guard)
 kit/        the config layer every tool reads (gsvtk-config + config.sh + config.py)
@@ -181,6 +183,9 @@ goes under `GSVTK_WORK` and is gitignored. Nothing the tools produce is committe
   which is why freezing copies them server-side rather than referencing them.
 - **When something breaks, grep [docs/troubleshooting.md](docs/troubleshooting.md) for the verbatim
   error text** before searching the web. It is keyed on exact strings, which is what you actually have.
+- **[docs/gap-ledger.md](docs/gap-ledger.md)** lists every item the three gap reviews asked for, what
+  happened to each one, and the command that proves that claim — including the two items left out of
+  scope and why. Commit messages cite the reviews; this is the tracked counterpart.
 
 ## Costs, stated plainly
 

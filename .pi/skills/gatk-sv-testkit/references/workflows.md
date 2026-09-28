@@ -210,9 +210,12 @@ Every invariant is measured and printed with both numbers whether or not the pre
 violation is a finding rather than a gap in the report.
 
 On the Terra side, two things that were hand-assembled in `curl` in every review: `terra/batch_peek.py`
-for a bounded call-level peek (what is running, what retried, what broke first — its live path needs
-credentials and is named as unexercised in the offline gate), and `terra/fetch_outputs.py`, which takes
-the **workflow output name** out of Cromwell metadata instead of a bucket path you guessed:
+for a bounded call-level peek (what is running, what retried, what broke first) **and for one task's
+artifacts** — `--metadata <local dump> --task <Call>` prints the rc from its file, the tail of its
+`stderr`, the rendered `script` block and which `attempt-N` dirs exist, which is how you tell a
+preemption (rc=141 under `attempt-1`) from an unstable image without opening a log. Its live listing
+path needs credentials and is named as unexercised in the offline gate. And `terra/fetch_outputs.py`,
+which takes the **workflow output name** out of Cromwell metadata instead of a bucket path you guessed:
 
 ```bash
 ./terra/fetch_outputs.py --metadata "$GSVTK_WORK"/metadata/run1.*.json \

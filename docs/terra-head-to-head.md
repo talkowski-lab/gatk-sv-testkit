@@ -405,3 +405,48 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
   `The job was stopped before the command finished` — which reads like an image-pull failure until you
   `gsutil cat` the task's `gcs_localization.sh` and see the CRAMs in it. Pass a `Boolean` computed at
   the call site when you only need presence.
+
+## 9. Reading one task's artifacts, and fetching an output by its name
+
+Two `curl`-shaped jobs that every review hand-rolled, now tools. Both are provable offline because
+both take an injected transport, and both say so when the cloud half is not what was exercised.
+
+**`terra/batch_peek.py`** is the bounded call-level peek (the 1.4 KB scratch script five reviews
+rewrote independently). The tally and the `rc`-object liveness signal are the running-monitor half;
+`--task` is the artifact half, and it reads the artifact rather than printing where it lives:
+
+```bash
+./terra/batch_peek.py --metadata "$GSVTK_WORK"/metadata/run1.*.json \
+    --task GatherBatchEvidence --tail 25 --no-scratch
+```
+
+`--metadata` takes a local Cromwell dump, so the whole path runs with no network and no credentials —
+which is also how `--selftest` proves it (54 assertions). What it prints: the `rc` read from the file,
+the **tail** of `stderr` with the drop counted (`TAIL 25 shown, first 375 not printed`), the **rendered
+`script`** block the backend actually executed, and which `attempt-N` directories exist. The attempt
+layout is what turns "unstable image" into "preempted": `rc=141` under `attempt-1` and `rc=0` under
+`attempt-2` says so without opening a log. `--attempt 9` against a call dir that has no `attempt-9`
+is REFUSED by name — it does not fall back to a neighbour's log and let you quote the wrong attempt.
+A withheld `stdout` is not a failure; a thing the page tried to show and could not read is, and the
+exit code says 1. `--shard` refuses a shard the call does not have for the same reason.
+
+**`terra/fetch_outputs.py`** takes the **workflow output name** and resolves it in Cromwell metadata,
+which is where the paths actually were (the Terra entity attributes stayed empty —
+`GAP-REVIEW-manta-tloc.md` §1). Never a bucket path typed by hand:
+
+```bash
+./terra/fetch_outputs.py --metadata "$GSVTK_WORK"/metadata/run1.json \
+    --output GATKSVPipelineSingleSample.svVCF --dry-run
+```
+
+Three answers, deliberately not conflated: the name was **never declared** (exit 3, the declared list
+printed), it was **declared and carries no value** (exit 4, saying out loud that this is a different
+question), or it is **present** (exit 0, sha256 into an appending manifest keyed by output name).
+`--verify` re-hashes what is on disk and exits 6 on drift. `--dry-run` prints the exact
+`gsutil -m cp -n` line without running it, and `--link-dir` hard-links instead of copying.
+
+`--all`, `--subdir` and `--manifest` exist in `--help` and are **not** exercised by this repo's
+offline gate (the gate drives `--metadata`, `--output`, `--dry-run`, `--link-dir`, `--verify`); the
+copy itself goes through one injected seam, so the command is proven as text and the bytes that move
+in `--selftest` come from a local capture. The real-cloud copy is named in the file header as the
+path no check in this repo has executed.

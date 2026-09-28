@@ -57,6 +57,31 @@ say the sentence, the tool will end up as a pile of flags. Also: if an existing 
 almost covers it, extend that one — duplication is how bindings drift between steps, and the
 worst bugs in this repo's history were two places disagreeing about one value.
 
+## A check that cannot fail is not a check
+
+Two rules, both earned, both enforced by `make test` rather than by good intentions.
+
+**Refuse to score an empty input.** A tool that reads nothing must not report a clean answer. Every
+site where this repo was fooled by an empty result is on the record: `fapi` answering `[]` for a
+workspace holding 5 submissions (`docs/terra-head-to-head.md` §8), `recon` exiting 0 on exactly that
+answer, a runner finishing green with `records=0` because the image was missing, an `elif` chain
+skipping the checks after it and calling the result a REVIEW, a manifest silently losing an entry.
+So: an empty input is a named state with its own exit code, never a `0` that looks like success — and
+"empty" and "absent" are different answers (`fetch_outputs.py` gives them exit 4 and 3, and says which
+it means). The same rule applies to a check whose target vanished: `artifact_tally.py` exits 2 on zero
+records counted; `wdl_semantics.py` reports `LOAD-FAILURES` because a count over a partially-parsed
+tree is a partial answer wearing a confident face.
+
+**Every fixed defect ships with a probe that has a POSITIVE CONTROL.** `scripts/probe_fixes.py` pins
+one confirmed defect per probe, and each probe first proves the guarded path was *reachable* — a
+control that would fail if the guard were removed. Without it, a guard that can never fire passes
+forever. Two probes were nearly vacuous while being written, which is why this sentence is here: a
+fake that returned a bare dict where `fiss` returns a `requests.Response` made the client leg report
+itself "unavailable" and the probe passed without ever testing the client it exists to watch; and a
+fixture that promised to declare what the config binds while deriving only the inputs side scored 10
+findings in probes about something else. If you add a guard, add the phase that proves it could have
+been hit.
+
 ## Configuration
 
 **A new environment-specific value goes in `kit/gsvtk-config`, in the same commit that reads
@@ -134,6 +159,23 @@ with coordinates redacted on purpose.
   initials and hostnames, and needed to exempt the Makefile from its own scan to function; that is
   the failure this rule closes. `make selftest` asserts a planted leak in a file named `Makefile` is
   still reported.
+
+### Coordinates: placeholder plus legend, not redaction-by-vibe
+
+Handoff and review prose publishes measurements, and measurements carry coordinates. The house rule is
+`docs/handoff/003`'s: replace the value with a `<placeholder>` **and ship a legend table next to it**
+saying what the placeholder is and where the real value lives (`kit/gsvtk-config show` →
+`GSVTK_PROJECT`, the workspace's `bucketName`, the submission list in the Terra UI). A bare `<...>`
+withholds nothing useful and destroys the reproducibility that made the doc worth writing; a legend
+keeps the doc runnable on the machine that ran it.
+
+The line is drawn at objects, not at names: workspace **names** are kept (the namespace is a shipped
+public default, and the name is what you type to find the run again), while project ids, registry
+paths, dev buckets, home paths, submission/workflow UUIDs and workspace **bucket** UUIDs are replaced.
+`make audit` enforces the machine-specific half — your own coordinates and credential shapes, on the
+tracked file set, as part of `make test`. It cannot arbitrate somebody else's workspace or branch name,
+which is exactly why the legend is the convention rather than an optional courtesy: three reviews
+disagreed about what may be published until the rule was written down.
 
 ## Corrections get published, not deleted
 

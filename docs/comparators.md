@@ -214,6 +214,39 @@ Exit codes are part of the contract across all thirteen: **0** compared and noth
 stated rule, **1** compared and found differences, **2** compared nothing (disjoint keys, no shared
 sample, unreadable join) — never a pass.
 
+## One artifact at a time (`compare/artifact_tally.py`)
+
+Every other tool in this directory answers "how do these two files differ?". That question is
+unavailable in the moment you most need it: a branch produces one VCF, and the thing to know is what
+is *in* it. One review recounted 17,789 records by eye to check a MOI summary; another read a QC table
+of 10 PASS / 17 FAIL and had no tool that could name the `qc_def` behind the cut. Counting one file
+independently is also the only way to tell "the comparator says no difference" apart from "the
+comparator read nothing".
+
+```bash
+./compare/artifact_tally.py run.vcf --info MOI --header-assert '##INFO=<ID=MOI,'
+./compare/artifact_tally.py run.table --column RESULT --qc-def inputs/single_sample.qc_def
+```
+
+Three behaviours are the point, not the tally:
+
+* **zero records counted exits 2, not 0.** An empty file and a header-only file print different
+  sentences, because "there was nothing in it" and "I could not read it" are different findings.
+* **`--invariant` is a check, not a tally.** `--invariant 'info=SVTYPE=DEL:0'` measures the declared
+  expectation over every row and FAILS (exit 1) when it is violated. It exists because a comparator
+  asserted "the baseline arm must have `CTX == 0`" — false in the production baseline, which holds 7
+  such records — and an `elif` chain silently skipped the remaining checks, turning good data into a
+  REVIEW. Every invariant prints its measured number whether or not the one before it passed; a key
+  that no record carries measures 0 and says so, which is a measurement allowed to disagree with the
+  declaration.
+* **`--qc-def` names where a verdict's thresholds came from and never opens the file.** A PASS/FAIL
+  count you cannot trace to a rule is an opinion. An absent path is disclosed rather than dropped —
+  the verdict stands, the cut behind it cannot be audited from here.
+
+`--samples-order` asserts the sample columns exactly (a prefix match passes a swapped pair), and
+`--pysam-check` prints whether this interpreter's pysam agrees with production's pin — see
+`scripts/prod_pins.py` and `docs/setup.md` for why the pinned version is a fact worth checking.
+
 ## How these are tested
 
 `make smoke` used to exercise one of the six comparators, on 40 MB of real VCF, with no assertion
