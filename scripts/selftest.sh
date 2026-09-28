@@ -305,7 +305,12 @@ else
     # belong to upstream and move when upstream moves), but the scan must read the whole tree and
     # must not lose a file to a parse error -- LOAD-FAILURES!=0 makes every count a partial answer.
     if "$PY" -c 'import WDL' >/dev/null 2>&1; then
-        semsum="$("$PY" checks/wdl_semantics.py --dir "$CK" --summary-only 2>/dev/null)"
+        # GSVTK_SEMANTICS_JOBS caps the parse fan-out. Added after a near-OOM: the default is
+        # min(8, cpus) miniwdl workers, each holding a few hundred MB, and a second full gate was
+        # started while a forgotten backgrounded one was still parsing -- 27 GB ended up in the
+        # compressor and the machine crawled. Set it to 1 on a machine already deep in swap.
+        semsum="$("$PY" checks/wdl_semantics.py --dir "$CK" --summary-only \
+            --jobs "${GSVTK_SEMANTICS_JOBS:-0}" 2>/dev/null)"
         if printf '%s' "$semsum" | grep -qE '^WRITE-SCOPE=[0-9]+ DEFINED-ONLY=[0-9]+ PIPEFAIL=[0-9]+ SHELL-SYNTAX=[0-9]+ LOAD-FAILURES=0$'; then
             ok=$((ok + 1)); printf '  ok    wdl_semantics scans real gatk-sv without losing a file\n'
             printf '        %s\n        (these are upstream counts: diff two refs, never read one)\n' "$semsum"
@@ -554,6 +559,21 @@ echo "selftest: one artifact, counted independently (compare/ was pairwise-only)
 # 10 PASS / 17 FAIL with no tool that could name the qc_def behind it. The tool carries the real
 # assertions; what is pinned here is that they RUN and report their own tally, since a checker that
 # detects nothing also sails through a --help sweep.
+# C2's ONLY proof. The gate-run probes (map_vs_wdl, drop_flag_guard) exercise batch_configs but their
+# fixtures declare every output the config binds, so the output-name check passes there whether or not
+# it still works -- a control-only guard, which is the rule CONTRIBUTING.md now states. These 6 config
+# fixtures are the ones that assert `out UNDECLARED` and `NO OUTPUTS BOUND` actually fire.
+expect 'terra/batch_configs.py --selftest catches an output name the workflow never declared' 0 \
+    'selftest: ok' -- "$PY" terra/batch_configs.py --selftest
+# Docs are executed, not admired: this grades every command a reader might copy out of README.md and
+# docs/*.md -- the tool must exist, `./x.py` needs the executable bit a clean checkout also gets, and
+# every --flag must be in that tool's own --help. An audit found the gap ledger uncopyable (a file
+# tracked 100644, a task name upstream does not have, a flag a script never took) and nothing in the
+# gate could see any of it, so the class got a checker.
+expect 'scripts/check_doc_flags.py --selftest finds each defect and stays silent on a clean doc' 0 \
+    'all selftest assertions passed' -- "$PY" scripts/check_doc_flags.py --selftest
+check "docs: every command in README.md and docs/ names a real tool, runnable as written, with real flags" \
+    "$PY" scripts/check_doc_flags.py
 expect 'compare/artifact_tally.py --selftest finds and refuses every case it claims' 0 \
     'all selftest assertions passed' -- "$PY" compare/artifact_tally.py --selftest
 expect 'checks/wdl_reach.py --selftest resolves the graph both ways and names the orphan' 0 \
