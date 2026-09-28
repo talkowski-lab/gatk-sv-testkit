@@ -384,6 +384,14 @@ waived silently:
    history, so scrubbing prose changes what is public by nothing while rewriting author fields would
    destroy attribution. Left alone, and deliberately not spelled out here, because this file is graded by
    the same audit and a checker's own documentation is not exempt from its rules.
+3. `scripts/audit_history.py:177`, a historical blob: a fabricated key header, written as a
+   selftest fixture and followed by the words "not really a key". The shape is what the rule matches, so
+   the rule fired on the file that shipped it, and that is the guard behaving correctly rather than
+   pedantically: a shape rule that quietly learned which files it may ignore is not a shape rule. The fix
+   went into the fixture, not the rule (assemble the header at runtime, plant it in a temp repo that is
+   never tracked), which is why this is a `HISTORY` line now instead of a `HEAD` one. No key material ever
+   existed in that blob, so there is nothing to rotate, and rewriting history to bury a fixture would
+   trade real commit dates and attribution for a cosmetic gain.
 
 The rewrite that cleaned the rest was `git filter-repo --replace-text` with six pairs (home paths, dev
 bucket, registry namespace, project id, two workspace-bucket handle forms), chosen from what the checker
