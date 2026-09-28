@@ -405,7 +405,12 @@ def render_task(t: dict, show_stdout: bool = False, script_lines: int = MAX_SCRI
             continue
         res = t["files"][name]
         if res.get("error"):
-            lines.append(f"  {name}: UNREADABLE — {res['error']}")
+            if name == "script":
+                lines.append(f"  script: not in this call dir ({res['error']}) — some backends do "
+                             "not write the rendered block next to the logs. Not a failure: rc and "
+                             "stderr are what every backend writes.")
+            else:
+                lines.append(f"  {name}: UNREADABLE — {res['error']}")
             continue
         text = res.get("text") or ""
         all_lines = text.splitlines()
@@ -529,18 +534,37 @@ def main() -> int:
             print(f"task {a.task} has no shard {a.shard} — it has {have}. Not reading a neighbour "
                   "and calling it the answer.")
             return 1
+        # `--attempt` has to select the RECORD, not merely validate the newest one's directory. The
+        # preemption log this flag exists for is the OLDER record: picking max(attempt) first and then
+        # checking --attempt against that record's callRoot made `--attempt 1` refuse with "this call
+        # dir has attempt-2" on exactly the layout the file documents (callRoot already ends in
+        # attempt-N/), so the case A5 was requested for was unreachable.
         rec = max(cand, key=lambda r: int(r.get("attempt") or 1))
+        note = "newest attempt of that shard; pass --attempt to pick another"
+        if a.attempt is not None:
+            exact = [r for r in cand if int(r.get("attempt") or 1) == a.attempt]
+            if exact:
+                rec = exact[-1]
+                note = f"attempt {a.attempt}, as asked"
+            else:
+                note = (f"no metadata record for attempt {a.attempt} (this call has "
+                        f"{sorted({int(r.get('attempt') or 1) for r in cand})}) — reading that "
+                        "attempt's files out of the execution dir instead, and refusing if they "
+                        "are not there")
         print(f"task {a.task}: {len(shards)} record(s), shard(s) "
               f"{sorted({int(r.get('shardIndex') or 0) for r in shards})}, reading shard "
-              f"{rec.get('shardIndex')} (newest attempt of that shard unless --attempt says "
-              "otherwise)")
+              f"{rec.get('shardIndex')} ({note})")
         ta = task_artifacts(rec, attempt=a.attempt, tail_lines=a.tail)
         for line in render_task(ta, show_stdout=a.show_stdout):
             print(line)
         # Only what the page TRIED to show counts as unreadable. stdout is withheld by default and is
         # absent from most PAPI records, so counting it made every real `--task` exit 1 — a tool that
         # is always broken is a tool nobody trusts, which is the same failure as always-clean.
-        wanted = ["stderr", "script", "rc"] + (["stdout"] if a.show_stdout else [])
+        # What can FAIL the run: rc and stderr, which every backend writes into the call dir, plus
+        # stdout when it was explicitly asked for. `script` is printed when present but is not written
+        # by every backend, so treating it as required made a legitimate preempted attempt exit 1 --
+        # and a tool that is always broken is a tool nobody trusts, the same failure as always-clean.
+        wanted = ["stderr", "rc"] + (["stdout"] if a.show_stdout else [])
         unreadable = [n for n in wanted if (ta["files"].get(n) or {}).get("error")]
         if ta.get("error") or ta["layout"].get("error") or unreadable:
             print(f"  could not read: {', '.join(unreadable) or 'the layout listing'} — a peek that "
@@ -802,6 +826,25 @@ def selftest() -> int:
                                    "--attempt", "9")
         ck("--attempt that does not exist exits 1 (a peek that cannot see the log does not exit 0)",
            rc_att == 1 and "REFUSED" in out_att)
+        # The scenario A5 exists for, reproduced: a preempted attempt-1 (rc=141) that came back on
+        # attempt-2. --attempt 1 must reach the OLDER record; validating the flag against the newest
+        # record's callRoot made this refuse, which is the bug the auditor caught.
+        meta_pre = os.path.join(d, "meta_pre.json")
+        with open(meta_pre, "w") as fh:
+            json.dump({"status": "Succeeded", "workflowName": "WF", "calls": {"Foo": [
+                {"shardIndex": 0, "attempt": 1, "executionStatus": "RetryableFailure",
+                 "callRoot": att1 + "/"},
+                {"shardIndex": 0, "attempt": 2, "executionStatus": "Done", "callRoot": att2 + "/"}]}},
+                fh)
+        rc_pre, out_pre = run_main("--metadata", meta_pre, "--task", "Foo", "--no-scratch",
+                                   "--attempt", "1")
+        ck("--attempt 1 on a two-attempt call reads the PREEMPTED attempt (rc=141 and its log), "
+           "instead of refusing because the newest record's dir is attempt-2", rc_pre == 0
+           and "rc: 141" in out_pre and "preempted by the backend" in out_pre, f"rc={rc_pre}")
+        ck("and it says which attempt it read, so the page cannot be misread as the final attempt",
+           "attempt 1, as asked" in out_pre)
+        ck("a call dir with no rendered `script` discloses it and still exits 0 (backend-dependent, "
+           "unlike rc/stderr)", "script: not in this call dir" in out_pre)
         rc_bad, _ = run_main("--metadata", os.path.join(d, "no-such.json"))
         ck("--metadata that cannot be read exits 1 naming the file type of failure", rc_bad == 1)
         rc_noshard, out_noshard = run_main("--metadata", meta_path, "--task", "Foo", "--no-scratch",
