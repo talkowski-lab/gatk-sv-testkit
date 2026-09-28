@@ -328,6 +328,60 @@ this repo's checks**. What the live path adds is `gcloud compute instances creat
 under a 25-minute ceiling. It does not power the instance off itself, for the reason in the lifecycle
 note above.
 
+## `audit_history.py` — what the object store would publish
+
+`make audit` answers "is the publishable file set clean today?". That is not the question a push asks.
+The version of `docs/handoff/003-single-sample-blockers-pr966.md` committed at `f8d158a` carried three
+absolute home paths, a dev bucket object path, a registry namespace containing the operator's name, a
+project id and a workspace bucket UUID — and the remote is public. A later commit scrubbed the file to the
+placeholder convention, `make audit` has printed `hits=0` ever since, and none of that unpublished a
+thing: the old blob is still reachable from `main`, still served to a clone, and GitHub still renders it
+at the commit URL.
+
+So this checker grades **blobs and commit messages**, not files, and classifies every hit by whether it
+can still travel:
+
+| class | meaning | verdict |
+|---|---|---|
+| `HEAD` | current content of a tracked path | fails (the half `audit` already covers) |
+| `STAGED` | in the index, not yet committed | fails — one commit from shipping |
+| `HISTORY` | reachable from a ref, not at HEAD | reported by default; `--publish` fails. **This is the class `audit` cannot see.** |
+| `DANGLING` | in the object store, reachable from no ref | advisory — a normal push does not send it |
+
+    make audit-history                 # what a commit would ship: HEAD + STAGED must be clean
+    make audit-history PUBLISH=1       # run this before `git push`; HISTORY must be clean too
+    ./scripts/audit_history.py --selftest
+
+Detectors are imported from `audit.py` rather than copied — a second copy of a credential pattern list is
+a second list that stops being true — so the shapes are shared and the coordinate half is derived from the
+machine running it (8 settings here, 5 of which matched a shipped default and are skipped). Findings are
+masked: the rule, the length, and bounded context, never the whole value.
+
+Its selftest's control is asymmetric on purpose: a planted coordinate in a file that a later commit
+deletes must still be found (as `HISTORY`), and the blessed placeholder spelling `gs://<your-dev-bucket>/`
+must produce nothing. A checker that flagged both, or neither, is not reading the store.
+
+**What `PUBLISH=1` reports on this repo today, and why each is accepted** — recorded here rather than
+waived silently:
+
+1. `checks/wdl_semantics.py:318`, a historical blob: an illustrative per-user temp path (the
+   macOS temp-directory *shape*, written with an ellipsis and a fake name) inside a docstring explaining
+   that such paths differ per user. A shape hit on prose, not a coordinate.
+2. one commit message containing the operator's username as a bare word — in the message that
+   *describes* this leak. The same username is already author metadata on every commit in the pushed
+   history, so scrubbing prose changes what is public by nothing while rewriting author fields would
+   destroy attribution. Left alone — and deliberately not spelled out here, because this file is graded by
+   the same audit and a checker's own documentation is not exempt from its rules.
+
+The rewrite that cleaned the rest was `git filter-repo --replace-text` with six pairs (home paths, dev
+bucket, registry namespace, project id, two workspace-bucket handle forms), chosen from what the checker
+reported rather than from memory. Verification after it: `HEAD^{tree}` byte-identical to the pre-rewrite
+HEAD (`8172f9a2`) — content untouched, only history — commit count unchanged at 28, author fields
+unchanged, and a re-scan with those six needles as patterns returning zero anywhere in the store. A bundle
+of the pre-rewrite refs is kept out of the repo as the rollback path. What no rewrite can do is recall a
+copy GitHub or a crawler already holds; with 0 forks and 0 watchers the reachable-copy surface is as small
+as it gets, not zero.
+
 ## Using them as gates
 
 

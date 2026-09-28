@@ -177,6 +177,11 @@ goes under `GSVTK_WORK` and is gitignored. Nothing the tools produce is committe
   back off your own configuration, minus anything that is a shipped default. No file is exempt, and
   nobody's names are shipped in the pattern list, so CI grades the shapes and your machine grades your
   own values. Run it before pushing, not only in CI
+  `make audit` grades the tracked tree, so a value that shipped once keeps passing forever: a later scrub
+  makes the file clean while the published blob stays reachable. `make audit-history` grades the object
+  store and every commit message instead, classified by exposure (`HEAD`/`STAGED` fail, `HISTORY`
+  reported, `DANGLING` advisory), and `make audit-history PUBLISH=1` is the pre-push form. Why it exists:
+  [`docs/static-checks.md`](docs/static-checks.md)
   ([CONTRIBUTING.md](CONTRIBUTING.md) has the rule about what may be added where).
 - **`gs://` access is your own.** Staging and fetching use `gsutil` under your credentials.
   Some gatk-sv resource buckets are anonymously readable; baseline workspace buckets are not,

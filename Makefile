@@ -8,7 +8,7 @@
 SHELL      := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 .DEFAULT_GOAL := help
-.PHONY: help setup test syntax helpsweep undefmods flake smoke selftest lint audit clean-work
+.PHONY: help setup test syntax helpsweep undefmods flake smoke selftest lint audit audit-history clean-work
 
 PYTHON ?= python3
 GSVTK  := ./kit/gsvtk-config
@@ -28,7 +28,7 @@ HELP_SAFE    := checks/svshell_contract_check.py checks/svshell_jq_plumbing_scan
                 compare/lineset_diff.py compare/json_diff.py compare/tar_manifest.py \
                 compare/make_fixtures.py \
                 examples/recompute_het_population.py scripts/fetch_wdl.py kit/config.py \
-                scripts/audit.py scripts/prod_pins.py scripts/check_doc_flags.py
+                scripts/audit.py scripts/audit_history.py scripts/prod_pins.py scripts/check_doc_flags.py
 HELP_NUMPY   := compare/gq_scale_compare.py compare/gq_paired_compare.py \
                 compare/profile_summarize.py compare/vcf_paired_diff.py
 HELP_PYSAM   := compare/pair_level_concordance.py
@@ -52,7 +52,7 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 83 selftests; needs no config file, no credentials, no"
+	@echo "              + publish audit + 85 selftests; needs no config file, no credentials, no"
 	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
 	@echo "              untracked file passes this gate and fails it one commit later. A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
@@ -62,6 +62,9 @@ help:
 	@echo "  flake       pyflakes bug sweep (undefined names, dead values); SKIPs if flake8 absent"
 	@echo "  audit       fail if the publishable file set holds a credential shape, or a value that"
 	@echo "              is one of THIS machine's own coordinates (make audit V=1 to see what it read)"
+	@echo "  audit-history  the same question of the OBJECT STORE and every commit message, classified by"
+	@echo "              exposure: HEAD/STAGED (not shipped) fail, HISTORY (reachable from a ref) is"
+	@echo "              reported, DANGLING is advisory. PUBLISH=1 fails on HISTORY: run it before push"
 	@echo "  clean-work  show what the work directory holds and what WOULD be deleted"
 	@echo
 	@echo "  Interpreter: PYTHON=/path/to/python make test   (default: python3, then ./.venv)"
@@ -255,10 +258,21 @@ lint: syntax
 #     line to prove that exception cannot blind the rest of the scan.
 #
 # What it cannot do: grade history. A value already pushed lives in the remote's object store no
-# matter how clean this prints.
+# matter how clean this prints. That half is `make audit-history` below.
 
 audit:
 	@$(PYTHON) scripts/audit.py $(if $(V),--verbose,)
+
+# The publish-scope half. `audit` grades `git ls-files` — the right scope for a working tree, the wrong
+# scope for "what am I about to publish": docs/handoff/003-... shipped home paths, a dev bucket, a
+# registry namespace and a workspace bucket UUID to a PUBLIC remote, a later commit scrubbed the file,
+# and `make audit` has said hits=0 ever since while the published blob stayed reachable. This walks every
+# blob and every commit message instead, and classifies each hit by whether it can still travel: HEAD and
+# STAGED (not shipped yet — a gate can fail on these), HISTORY (reachable from a ref — ships on the next
+# push), DANGLING (reachable from nothing — does not ship, advisory). Default mode fails only on what has
+# not shipped; run it with PUBLISH=1 before `git push`.
+audit-history:
+	@$(PYTHON) scripts/audit_history.py $(if $(PUBLISH),--publish,) $(if $(V),--show 200,)
 
 # ----------------------------------------------------------------- clean-work
 # Staged input trees are tens of GB and are often HARDLINKS into someone's reference panel

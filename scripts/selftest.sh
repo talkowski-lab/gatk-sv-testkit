@@ -467,6 +467,24 @@ rm -f "$A/audit.local.txt"
 
 # ------------------------------------------------------------------ the gate itself
 echo
+echo "selftest: the publish-scope audit — the object store, not only the working set"
+# `make audit` grades `git ls-files`. Right scope for a working tree, wrong scope for "what am I about
+# to publish": the version of docs/handoff/003-...-pr966.md committed at f8d158a carried three absolute
+# home paths, a dev bucket object path, a registry namespace carrying the operator's name, a project id
+# and a workspace bucket UUID — into a PUBLIC remote. A later commit scrubbed the file, and `make audit`
+# has printed hits=0 ever since, because the tracked copy is clean while the published blob is still
+# reachable from main. A scrub does not unpublish. This phase grades blobs by exposure class instead, and
+# its control is precisely the class the other audit structurally cannot see (a planted coordinate in a
+# file that is deleted by a later commit must still be found; the blessed placeholder spelling must not).
+check "scripts/audit_history.py grades all four exposure classes, the message scan, and its control" \
+    "$PY" scripts/audit_history.py --selftest
+check "no credential shape and no coordinate of THIS machine at HEAD or in the index" \
+    "$PY" scripts/audit_history.py
+printf '        (HISTORY is reported, not failed, in this mode. `make audit-history PUBLISH=1` is the\n'
+printf '        pre-push gate; docs/static-checks.md lists what it reports here today and why each is\n'
+printf '        acceptable rather than quietly waived)\n'
+
+echo
 echo "the gate itself: what 'make test' claims to run is what it runs"
 # CONTRIBUTING.md and docs/quickstart.md both list the parts of `make test`, and the audit was not one
 # of them when a handoff doc shipped nine private coordinates on a green gate. Docs describing a gate
