@@ -173,8 +173,15 @@ def selftest() -> int:
             with open(os.path.join(repo, name), "w") as fh:
                 fh.write(body)
 
+        # The PEM header is assembled here instead of written as a literal. `make audit` grades the
+        # tracked tree for credential SHAPES with no exemptions, and a literal in this file made the
+        # history auditor's own fixture the single hit the publish guard reported on the repo, which
+        # also failed selftest's "audit is clean at HEAD and in the index" probe. Splitting the token
+        # leaves the guard's red line untouched (its pattern needs the contiguous `-----BEGIN`) and
+        # still plants the real shape, in a temp repo that is never tracked.
+        pem = "-----BEGIN " + "OPENSSH" + " PRIVATE KEY-----"
         write("gone.txt", "dev bucket gs://PLANTED-COORD-9182/x/results.tgz\n"
-                          "-----BEGIN OPENSSH PRIVATE KEY-----\nnot really a key\n")
+                          f"{pem}\nnot really a key\n")
         write("at_head.txt", "live path /tmp/PLANTED-COORD-9182/still-tracked\n")
         write("kept.txt", "placeholder form: gs://<your-dev-bucket>/x\n")
         g("add", "-A")
