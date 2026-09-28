@@ -1514,6 +1514,81 @@ def probe_call_cache() -> str:
             "rerun body, both-flags refusal named, 0 requests left the machine")
 
 
+def probe_task_artifact_tail() -> str:
+    """batch_peek has to READ a task's artifacts, not print where they live.
+
+    A5 asked for "one task-artifact read (its `stderr` tail, its rendered `script`, its `attempt-N`
+    layout)". The first version of the tool printed `stderr: gs://...` and stopped. "Where is the log"
+    and "what did the task say" are different answers, and the incident that made this a requirement
+    (GAP-REVIEW-trio-calling.md) was a scala.MatchError sitting three lines from the end of a long
+    log, which the path does not deliver. Pinned with a control on the SAME fixture: delete one
+    artifact and the peek must not exit 0 -- a peek that cannot see the log has no business reporting
+    a clean answer, which is the same class as the `MISSING LOCAL IMAGE` that kept running.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import contextlib
+    import io
+    import json
+    import shutil
+    import tempfile
+
+    bp = fresh({"GSVTK_PROJECT": "p"}, "batch_peek")[0]
+    d = tempfile.mkdtemp(prefix="probe-peek-")
+    try:
+        att = os.path.join(d, "call-Foo", "shard-0", "attempt-1")
+        os.makedirs(att)
+        head, tail = "HEAD-line-not-the-answer", "scala.MatchError: the reason is on the LAST line"
+        with open(os.path.join(att, "stderr"), "w") as fh:
+            fh.write("\n".join([head] + [f"noise {i}" for i in range(400)] + [tail]) + "\n")
+        with open(os.path.join(att, "script"), "w") as fh:
+            fh.write("set -e\ngatk --java-options \"-Xmx8g\" CallVariants --REF hg38\n")
+        with open(os.path.join(att, "rc"), "w") as fh:
+            fh.write("10\n")
+        meta_path = os.path.join(d, "meta.json")
+        with open(meta_path, "w") as fh:
+            json.dump({"status": "Failed", "workflowName": "WF",
+                       "calls": {"Foo": [{"shardIndex": 0, "attempt": 1, "executionStatus": "Failed",
+                                          "callRoot": att + "/"}]}}, fh)
+
+        argv_save, out_lines = sys.argv, 0
+        try:
+            def run(extra):
+                sys.argv = ["batch_peek.py", "--metadata", meta_path, "--task", "Foo",
+                            "--no-scratch", *extra]
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = bp.main()
+                return code, buf.getvalue()
+
+            code, out = run(["--tail", "3"])
+            out_lines = len(out.splitlines())
+            if tail not in out:
+                raise AssertionError("the stderr CONTENT never reached the page -- printing the "
+                                     "PATH is not reading the log")
+            if head in out:
+                raise AssertionError("all 402 lines were dumped; the bounded tail is the promise")
+            if "gatk --java-options" not in out:
+                raise AssertionError("the rendered `script` block was not printed")
+            if "rc: 10" not in out:
+                raise AssertionError("the rc file was not read")
+            if code != 0:
+                raise AssertionError(f"the readable case exited {code}")
+
+            os.remove(os.path.join(att, "rc"))
+            code2, out2 = run([])
+            if code2 == 0 or "UNREADABLE" not in out2:
+                raise AssertionError(f"a missing artifact read as fine (exit {code2}); the whole "
+                                     "lesson of the lying-empty endpoint is that a failed read must "
+                                     "not print like an empty answer")
+        finally:
+            sys.argv = argv_save
+        return (f"tailed a 402-line log to {out_lines} line(s) with the reason on screen; "
+                "exit goes non-zero the moment an artifact is unreadable")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 PROBES = [
     ("rerun_guards", probe_rerun_guards),
     ("stage_batch_row", probe_stage_batch_row),
@@ -1531,6 +1606,7 @@ PROBES = [
     ("recon_empty_inventory", probe_recon_empty_inventory),
     ("step_lookup_names_itself", probe_step_lookup_names_itself),
     ("call_cache", probe_call_cache),
+    ("task_artifact_tail", probe_task_artifact_tail),
     # Last: this probe injects a key into batch_configs.CONFIGS. Every other probe re-imports the module
     # through fresh() so it could not read that, but a probe that mutates shared module state has no
     # business running before the ones that do not.

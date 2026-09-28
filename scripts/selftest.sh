@@ -31,7 +31,7 @@ PY="${1:-${PYTHON:-python3}}"
 # project venv when it exists so `make test` behaves the same with or without one.
 if [ ! -x "$PY" ] && [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 
-ok=0; skip=0; fail=0
+ok=0; skip=0; fail=0; skiplist=""
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
@@ -271,16 +271,20 @@ if "$PY" -c 'import WDL' >/dev/null 2>&1; then
 else
     echo "  SKIP  wdl_semantics --selftest: this interpreter cannot import WDL."
     echo "        Install miniwdl (make setup, or $PY -m pip install miniwdl) to run it."
-    skip=$((skip + 1))
+    skip=$((skip + 1)); skiplist="$skiplist wdl_semantics-selftest(no-WDL)"
 fi
 
 echo
 echo "selftest: checkers and fetchers, against a local gatk-sv clone if present"
 CK="$(./kit/gsvtk-config get GATK_SV_CHECKOUT 2>/dev/null || true)"
 if [ ! -d "$CK" ]; then
-    echo "  SKIP  the three clone-backed self-tests: GSVTK_GATK_SV_CHECKOUT is unset or not a"
+    echo "  SKIP  the four clone-backed self-tests: GSVTK_GATK_SV_CHECKOUT is unset or not a"
     echo "        directory. Set it in testkit.env to run them (docs/config.md)."
-    skip=$((skip + 3))
+    # FOUR, not three: the else branch runs svshell_jq_plumbing_scan, svshell_contract_check,
+    # fetch_wdl --list AND the wdl_semantics real-tree summary. It said 3 while holding 4, so a
+    # machine without the clone added up to 77 against a claim of 78 and the gate never noticed --
+    # which is exactly the drift the claim check below now does arithmetic about.
+    skip=$((skip + 4)); skiplist="$skiplist clone-backed(x4)"
 else
     printf '  (clone: %s)\n' "$CK"
     if command -v jq >/dev/null 2>&1; then
@@ -290,7 +294,7 @@ else
         printf '        with --compare-to <ref> -- docs/static-checks.md)\n'
     else
         echo "  SKIP  jq not on PATH: svshell_jq_plumbing_scan cannot execute the jq blocks"
-        skip=$((skip + 1))
+        skip=$((skip + 1)); skiplist="$skiplist jq-plumbing-scan(no-jq)"
     fi
     stagecheck "svshell_contract_check compares the stage calls of real gatk-sv" 12 \
         "$PY" checks/svshell_contract_check.py --repo "$CK"
@@ -310,7 +314,7 @@ else
         fi
     else
         echo "  SKIP  wdl_semantics against the clone: no WDL module for this interpreter"
-        skip=$((skip + 1))
+        skip=$((skip + 1)); skiplist="$skiplist wdl-semantics-clone(no-WDL)"
     fi
 fi
 
@@ -561,6 +565,8 @@ echo "selftest: production pins are read from upstream, not transcribed here"
 # true. Its own --selftest builds a two-dockerfile git fixture and asserts the refusals; the line
 # below asserts the COUNT too, because the bug class is a pin list with holes that reads complete (a
 # one-line parser saw 6 of 11 pins and exited 0). Raise the number with the file, never lower it.
+expect 'terra/batch_peek.py --selftest proves the bounded tally, the rc liveness signal and the task-artifact read' 0 \
+    'all selftest assertions passed' -- "$PY" terra/batch_peek.py --selftest
 expect 'scripts/prod_pins.py --selftest: every pin found, every refusal named' 0 \
     'prod_pins selftest: 9 ok, 0 failed' -- "$PY" scripts/prod_pins.py --selftest
 
@@ -667,22 +673,41 @@ echo "selftest: probes for the defects a review confirmed (offline, no network, 
 # (recon_empty_inventory), the step->workflow map copied into three tools with a lookup that died as a
 # bare StopIteration (step_lookup_names_itself), and call caching being a value the builder carried
 # rather than a choice the command line made -- which batch_rerun_step imported and never chose
-# (call_cache).
-probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 17 \
+# (call_cache); and the peek that printed a task's stderr PATH instead of reading it (A5's clause),
+# where the control is the same fixture with one artifact deleted and the exit code going non-zero
+# (task_artifact_tail).
+probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 18 \
     "$PY" scripts/probe_fixes.py
 printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that cannot fire is a\n'
 printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'
 
 echo
 # The selftest count in `make help` is a claim, not a comment: it read "32 selftests" through two
-# rounds of new assertions. This is checked, not hoped for -- and only on a run where nothing was
-# skipped, because a smaller number caused by a missing optional dependency is not a claim to fix.
+# rounds of new assertions. It used to be checked only when nothing was skipped -- which let a
+# machine without the gatk-sv clone run 74 against an advertised 78 and pass, the same silent-doc
+# drift the rule exists to catch, wearing the "optional dependency" costume written to excuse it.
+# Now BOTH branches bite: with nothing skipped the number must match, and with skips the sum of
+# (ran + named skips) must match, so a check that VANISHED cannot hide among the skips.
 CLAIM="$(command grep -o '[0-9][0-9]* selftests' Makefile | command grep -o '[0-9][0-9]*' | head -1)"
-if [ "$skip" -eq 0 ] && [ -n "$CLAIM" ] && [ "$CLAIM" != "$ok" ]; then
-    fail=$((fail + 1))
-    printf '  FAIL  make help claims %s selftests and %s ran\n' "$CLAIM" "$ok"
-    printf '        the claim is documentation that rots silently; change the number in the Makefile,\n'
-    printf '        and only upward if what you added is an assertion (a probe you deleted is a finding)\n'
+if [ -n "$CLAIM" ]; then
+    if [ "$skip" -eq 0 ] && [ "$CLAIM" != "$ok" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  make help claims %s selftests and %s ran\n' "$CLAIM" "$ok"
+        printf '        the claim is documentation that rots silently; change the number in the Makefile,\n'
+        printf '        and only upward if what you added is an assertion (a probe you deleted is a finding)\n'
+    elif [ "$skip" -gt 0 ] && [ "$((ok + skip))" != "$CLAIM" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s ran + %s skipped = %s, but make help claims %s\n' "$ok" "$skip" \
+            "$((ok + skip))" "$CLAIM"
+        printf '        a skipped check is honest only if it is NAMED and COUNTED: the skips were%s\n' \
+            "${skiplist:+ ($skiplist)}"
+        printf '        an uncounted check in a SKIP branch is how a selftest disappears quietly\n'
+    elif [ "$skip" -gt 0 ]; then
+        printf '  ok    make help claims %s: %s ran + %s skipped for a named reason%s\n' \
+            "$CLAIM" "$ok" "$skip" "$skiplist"
+        printf '        (skips are listed so a check that vanished cannot hide among them; install\n' \
+        printf '        miniwdl / jq / a gatk-sv clone to make this phase assert at full strength)\n'
+    fi
 fi
 printf 'selftest: %s ok, %s skipped, %s failed\n' "$ok" "$skip" "$fail"
 [ "$fail" -eq 0 ]
