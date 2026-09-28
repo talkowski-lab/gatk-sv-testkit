@@ -268,10 +268,15 @@ check "svshell_contract_check sees bare/quoted keys, both quote styles and every
 if "$PY" -c 'import WDL' >/dev/null 2>&1; then
     check "wdl_semantics fires on each of its four rules and stays silent on each control" \
         "$PY" checks/wdl_semantics.py --selftest
+    check "build_inputs takes its key prefix from the WDL you passed, not from a name in the file" \
+        "$PY" replay/build_inputs.py --selftest
 else
     echo "  SKIP  wdl_semantics --selftest: this interpreter cannot import WDL."
     echo "        Install miniwdl (make setup, or $PY -m pip install miniwdl) to run it."
     skip=$((skip + 1)); skiplist="$skiplist wdl_semantics-selftest(no-WDL)"
+    echo "  SKIP  build_inputs --selftest: same reason — its fixtures ARE WDL documents, so the check"
+    echo "        cannot run without the parser. Install miniwdl (make setup) to run it."
+    skip=$((skip + 1)); skiplist="$skiplist build_inputs-selftest(no-WDL)"
 fi
 
 echo
@@ -708,6 +713,12 @@ echo
 # drift the rule exists to catch, wearing the "optional dependency" costume written to excuse it.
 # Now BOTH branches bite: with nothing skipped the number must match, and with skips the sum of
 # (ran + named skips) must match, so a check that VANISHED cannot hide among the skips.
+# Measured: clone absent with every dependency present gives 79 ran + 4 skipped = 83 (`clone-backed(x4)`
+# is one entry over four checks). And it is not decorative -- running the suite with
+# `PYTHON=/tmp/bare/bin/python`, an interpreter with none of the kit's packages, made twelve checks fail
+# for real reasons and this line say "66 ran + 6 skipped = 72, but make help claims 83". That was also
+# the only occasion the two no-WDL entries (wdl_semantics, build_inputs) have been seen firing, which is
+# worth knowing: an unexercised skip branch is how the 77-against-78 mis-count hid in the first place.
 CLAIM="$(command grep -o '[0-9][0-9]* selftests' Makefile | command grep -o '[0-9][0-9]*' | head -1)"
 if [ -n "$CLAIM" ]; then
     if [ "$skip" -eq 0 ] && [ "$CLAIM" != "$ok" ]; then

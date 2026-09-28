@@ -49,7 +49,11 @@ frozen baseline, so a local difference is attributable to your code and nothing 
    arms instead of memorizing one. What it does **not** do is translate renamed inputs: a captured
    argument that the WDL you passed does not declare is reported under `task_args_not_in_wdl` and
    left alone, because renaming is [`checks/svshell_contract_check.py`](../checks/svshell_contract_check.py)'s
-   job. `replay/images.example.json` shows the image-map shape it expects.
+   job. `replay/images.example.json` shows the image-map shape it expects. That prefix rule has a proof
+   rather than a sentence: `python replay/build_inputs.py --selftest` loads two fixture workflows — one
+   deliberately named `SVShell` — and asserts each yields *its own* prefix, which is the only way to tell
+   derivation from the hardcoded literal this file used to carry. It needs miniwdl and prints a SKIP
+   naming that reason when the interpreter cannot `import WDL`.
 
 3. **Room on disk.** The staged matrices are tens of GB. If you have a previous copy of the
    same panel, `--link-dir` hardlinks instead of downloading (and copies, saying so, when the

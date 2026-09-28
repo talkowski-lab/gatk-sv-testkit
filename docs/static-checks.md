@@ -38,6 +38,14 @@ That is not convenience: the console script `make setup` installs lives in a ven
 shell has usually not activated, so `command -v miniwdl` said "not found" on the machine where
 `miniwdl check` passes, and the WDL loop got written off as unavailable.
 
+The suite's own interpreter is a third knob, `PYTHON=…` (`scripts/selftest.sh:29` — not
+`$GSVTK_PYTHON`, which is what the *tools* use). It matters for reading the output: two checks
+(`wdl_semantics --selftest`, `build_inputs --selftest`) are skipped with a named reason when that
+interpreter cannot `import WDL`, so on a machine with miniwdl installed those SKIP lines never print and
+the branch is never exercised. It was exercised by pointing `PYTHON=` at a bare venv: both skips printed
+by name, and the count check then said "66 ran + 6 skipped = 72, but make help claims 83" — the twelve
+failures in that run are the bare interpreter missing the kit's own packages, which are not optional.
+
 Each ref is materialized to **its own directory** by `scripts/fetch_wdl.py` (git-archive of one
 ref, with a `.provenance` file recording the exact SHA). That is not tidiness: WDL imports
 resolve by filename within the directory, so a mixed tree resolves against the wrong version and

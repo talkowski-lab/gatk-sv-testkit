@@ -117,8 +117,92 @@ def coerce(wdl_type: str, value: str):
     return value  # e.g. Array[String], Object -- handed through for a human to check
 
 
+def selftest() -> int:
+    """Offline fixtures for the one rule this tool exists to keep: the prefix comes from the WDL you
+    passed, never from a name typed into this file.
+
+    R2 deleted five hardcoded `SVShell.` prefixes, and a test that only asserted "the keys say
+    SVShell." would have passed on the very literal that caused the bug. So the CONTROL is a fixture
+    whose workflow really is named SVShell — same expected string, reached by loading the document —
+    beside a differently named fixture that must produce a different prefix. Needs miniwdl, and says
+    so by name when it is absent rather than reporting a clean zero.
+    """
+    import shutil
+    import tempfile
+
+    if WDL is None:
+        print("selftest: SKIP -- miniwdl is required (`WDL` is the module wdl_inputs loads with). Run "
+              "it with the kit's interpreter: docs/setup.md")
+        return 0
+    fails = []
+
+    def ck(name, cond, extra=""):
+        print(("  ok    " if cond else "  FAIL  ") + name + (f"  <{extra}>" if extra else ""))
+        if not cond:
+            fails.append(name)
+
+    print("selftest: replay/build_inputs.py")
+    d = tempfile.mkdtemp(prefix="build-inputs-selftest-")
+    try:
+        def fixture(name: str) -> pathlib.Path:
+            p = pathlib.Path(d) / f"{name}.wdl"
+            p.write_text('version 1.0\nworkflow %s {\n  input {\n    String ref_fasta\n'
+                         '    File? baf_table\n    Array[String] samples = []\n  }\n  call t\n}\n'
+                         'task t { command {} }\n' % name)
+            return p
+
+        prefix, inputs = wdl_inputs(fixture("MyCoolPipeline"))
+        ck("CONTROL: the prefix is the loaded root workflow's own name plus a dot", prefix ==
+           "MyCoolPipeline.", prefix)
+        p2, _i2 = wdl_inputs(fixture("SVShell"))
+        ck("a fixture whose workflow IS named SVShell yields 'SVShell.' by LOADING it — the hardcoded "
+           "literal this file used to carry could not tell those two fixtures apart",
+           p2 == "SVShell.", p2)
+        ck("declared inputs are classified with optionality (a File? is not a File: one is a "
+           "conditional in the WDL, the other is required)",
+           set(inputs) == {"ref_fasta", "baf_table", "samples"}
+           and inputs["baf_table"]["optional"] and not inputs["ref_fasta"]["optional"], str(inputs))
+
+        scr = pathlib.Path(d) / "script.sh"
+        scr.write_text('set -euxo pipefail\nsv_tools \\\n  --arg ref_fasta '
+                       '"/mnt/disks/cromwell_root/b/k/ref.fa" \\\n  --argjson use_baf true \\\n'
+                       '  --arg sample NA12878\n')
+        got = parse_script(scr)
+        ck("Cromwell's substituted command is parsed: names recovered, quotes and the '\\\\' "
+           "continuation gone, --argjson marked as json",
+           set(got) == {"ref_fasta", "use_baf", "sample"}
+           and got["ref_fasta"][1] == "/mnt/disks/cromwell_root/b/k/ref.fa"
+           and got["use_baf"][0] == "json", str(sorted(got)))
+        ck("staged paths unlocalise back to gs:// (that is what the emitted JSON has to say), and a "
+           "gs:// already in place is left alone",
+           unlocalize("/mnt/disks/cromwell_root/b/k/ref.fa") == "gs://b/k/ref.fa"
+           and unlocalize("/bare/path") == "gs://bare/path"
+           and unlocalize("gs://a/b") == "gs://a/b")
+        ck("types coerce off the DECLARED type, not off what the string looks like",
+           coerce("Int", "12.0") == 12 and coerce("Boolean", "true") is True
+           and coerce("String", "12.0") == "12.0"
+           and coerce("File", "/mnt/disks/cromwell_root/b/k") == "gs://b/k",
+           f"{coerce('Int', '12.0')}")
+        ck("an unrecognised type is handed through for a human to check, not guessed into a value",
+           coerce("Array[String]", "a,b") == "a,b")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    print(("  FAIL  " + str(len(fails)) + " assertion(s) failed") if fails
+          else "  all selftest assertions passed")
+    return 1 if fails else 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     ap = argparse.ArgumentParser()
+    # Advertised here so `--help` tells the truth about the flag (scripts/check_doc_flags.py grades every
+    # documented flag against the tool's own help). Handled above parse_args, because every other argument
+    # on this tool is required and a selftest needs none of them.
+    ap.add_argument('--selftest', action='store_true',
+                    help='run the offline fixture checks (prefix derivation, script parsing, coercion) '
+                         'and exit; needs miniwdl, and prints a named SKIP when it is absent')
     ap.add_argument('--script', required=True, type=pathlib.Path)
     ap.add_argument('--wdl', required=True, type=pathlib.Path,
                     help='the arm\'s root WDL; its workflow name is the prefix every emitted key '

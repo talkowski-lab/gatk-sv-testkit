@@ -52,7 +52,7 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 82 selftests; needs no config file, no credentials, no"
+	@echo "              + publish audit + 83 selftests; needs no config file, no credentials, no"
 	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
 	@echo "              untracked file passes this gate and fails it one commit later. A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
