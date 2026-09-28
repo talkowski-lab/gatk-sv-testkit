@@ -67,3 +67,11 @@ testkit.*.env
 # audit.local.txt holds YOUR identifiers for scripts/audit.py: personal by definition, so it
 # is never tracked. audit.local.example is the committed template.
 audit.local.txt
+
+# .pi/skills/ is shipped documentation and stays tracked. .pi/goals/ is the goal tool's own state:
+# a JSONL event log of task evidence, and the reports independent auditors wrote back. Those
+# transcripts quote real paths verbatim -- the second audit's own report named this machine's
+# gatk-sv checkout, and `make audit` correctly reported a leak that the *tool* had introduced.
+# So the boundary is here, not a waiver: session state is never publishable, however accurate it is.
+.pi/goals/
+.pi/.goals-pool-snapshot.json
