@@ -148,7 +148,7 @@ check "kit/config.sh loads AND really exports the resolved values" \
     '. kit/config.sh; [ "${GSVTK_ZONE:-}" = us-central1-a ] && [ -n "${GSVTK_ROOT:-}" ]'
 
 check "kit/config.sh warns (not silently empty) when the resolver is broken" \
-    env GSVTK_PYTHON=/nonexistent-interpreter bash -c \
+    env GSVTK_PYTHON=/gsvtk-selftest-not-an-interpreter bash -c \
     '{ . kit/config.sh; } 2>&1 | grep -q "configuration layer produced no exports"'
 
 check "gsvtk_default returns the fallback for an unconfigured key" \

@@ -194,7 +194,13 @@ def default_values(root):
     cfg = os.path.join(root, "kit", "gsvtk-config")
     if not os.path.exists(cfg):
         return set()
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent",
+    # The fixture HOME is deliberately word-shaped rather than a bare made-up absolute path:
+    # `make audit` compares shipped text against the VALUES of the kit's own settings, so a checker whose
+    # fixture string happens to equal a value someone passes as an override turns a green machine red.
+    # Measured: running the gate with GSVTK_GATK_SV_CHECKOUT pointed at a synthetic nonexistent path
+    # failed on this file's own fixture text, and the audit had to be re-run to see why.
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "HOME": "/gsvtk-audit-selftest-no-such-home",
            "GSVTK_CONFIG": "/dev/null"}
     rc, out = run([cfg, "show"], cwd=root, env=env)
     if rc != 0:
