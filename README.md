@@ -273,9 +273,7 @@ fired and a guard that could never fire produce the same output.
 The probe count is pinned, and `WANT` counts the probes that must **run**: one that vanishes fails the
 gate, and so does one that never ran because a dependency is missing. The SKIP line names the file to
 install, and the gate will not pass on a smaller number. That last part is a correction. An earlier
-version of the counter added the skip tally to the running tally, so "3 ok, 5 skipped" passed as 8, and
-handoff §4 recorded the gap without closing it
-([docs/handoff/002-module-profiles-and-quickstart.md](docs/handoff/002-module-profiles-and-quickstart.md)).
+version of the counter added the skip tally to the running tally, so "3 ok, 5 skipped" passed as 8.
 Read the `ok` counts, not just the pass/fail line.
 
 ### Coding style tests
@@ -332,6 +330,9 @@ workspace, the `wdl/` and `src/sv_shell` layouts. Concordance work is expected t
 [`gatk-sv-profile`](https://github.com/broadinstitute/gatk-sv-profile); the comparators here exist
 because its tables are bucketed and a figure lifted from one needs its aggregation rule written down.
 
-Session records from the investigation that produced this toolkit are in
-[docs/archive/](docs/archive/), including the parts that turned out to be wrong.
-[docs/methodology.md](docs/methodology.md) explains why they are kept.
+[docs/methodology.md](docs/methodology.md) records the claims this work proved wrong and what replaced
+them, which is the part of the investigation record that belongs in a repository. The session notes
+themselves are working copies under `docs/handoff/` and `docs/archive/`, ignored rather than tracked: a
+transcript quotes real paths, and `make audit` is right to call that a leak. What those notes published
+before they were ignored is still graded by `make audit-history`, because ignoring a file does not
+unpublish the copy that was already pushed.

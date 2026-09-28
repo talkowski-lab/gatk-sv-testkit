@@ -1,16 +1,18 @@
 # How this toolkit's claims were made, and how to disagree
 
 The investigation that produced these tools ran for weeks against a real cohort and a real
-baseline run, and it produced wrong answers along the way. The published session records in
-[archive/](archive/) keep both the claims that survived and the ones that did not. This page is
-the short version of why, and what it implies for anything you read here.
+baseline run, and it produced wrong answers along the way. The session notes from that work keep
+both the claims that survived and the ones that did not, but they are working copies rather than
+tracked files, so this page is the part that ships: the short version of why, and what it implies
+for anything you read here.
 
 ## Corrections stay in the record
 
-Every claim that this work proved wrong is listed, with what replaced it, in
-[archive/CHECKPOINT.md](archive/CHECKPOINT.md) under "Corrections". Deleting them would make the
-record read as if the conclusions had been reached on the first try, which is not how any of them
-were reached, and it would hide exactly the failure modes you are most likely to repeat.
+Every claim that this work proved wrong is listed, with what replaced it, in the session record's
+"Corrections" section, and the ones worth the reading are summarized below, because a summary is what
+outlives a transcript. Deleting them would make the record read as if the conclusions had been reached
+on the first try, which is not how any of them were reached, and it would hide exactly the failure modes
+you are most likely to repeat.
 
 Four of the corrected claims are worth reading for the kind of mistake rather than the content:
 

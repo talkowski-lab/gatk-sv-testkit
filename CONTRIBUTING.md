@@ -130,8 +130,9 @@ Two conventions worth keeping in mind while editing:
 
 ## Adding or changing a doc
 
-Write it fresh. Do not copy a session log: `docs/archive/` is for those, and it is published with
-coordinates redacted on purpose.
+Write it fresh. Do not copy a session log. The transcripts in `docs/handoff/` and `docs/archive/` are
+ignored rather than tracked, and not only because of their coordinates: a transcript quotes real paths
+where a doc has to state the general case, and the two are different documents.
 
 - One doc per loop, and it must contain a command you actually ran. **Never document a flag you did not
   run.** `make test` catches `--help` drift, not doc drift; several wrong flags were found in these docs
@@ -154,8 +155,9 @@ coordinates redacted on purpose.
 
 ### Coordinates: placeholder plus legend
 
-Handoff and review prose publishes measurements, and measurements carry coordinates. The house rule is
-`docs/handoff/003`'s: replace the value with a `<placeholder>` **and ship a legend table next to it**
+Working prose publishes measurements, and measurements carry coordinates. The house rule came out of a
+handoff doc that shipped nine private coordinates while the publish gate was green: replace the value
+with a `<placeholder>` **and ship a legend table next to it**
 saying what the placeholder is and where the real value lives (`kit/gsvtk-config show` →
 `GSVTK_PROJECT`, the workspace's `bucketName`, the submission list in the Terra UI). A bare `<...>`
 withholds nothing useful and destroys the reproducibility that made the doc worth writing; a legend keeps

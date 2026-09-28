@@ -75,3 +75,14 @@ audit.local.txt
 # So the boundary is here, not a waiver: session state is never publishable, however accurate it is.
 .pi/goals/
 .pi/.goals-pool-snapshot.json
+
+# Session records. Two directories, not three: docs/handoff/ is the numbered progress notes and
+# docs/archive/ is the as-run dump (scripts that ran against the real cohort, a captured run's input
+# JSON, the checkpoint and plan files). Both stay on disk here and neither ships.
+#
+# This is NOT an unpublish, and the distinction is the whole point of scripts/audit_history.py: the
+# blobs stay reachable from history and still render at their commit URLs. Ignoring a path stops the
+# working-tree audit from grading it (audit grades `git ls-files`, and an ignored file is never
+# pushed), while the history audit keeps finding whatever those commits and blobs already published.
+docs/archive/
+docs/handoff/

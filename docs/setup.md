@@ -47,8 +47,8 @@ Without the dev file the gate does **not** quietly shrink. A probe whose depende
 the reason and the file to install (`SKIP miniwdl_resolver needs miniwdl (pip install -r
 requirements-dev.txt)`), and the pinned probe count then **fails** rather than passing on a smaller
 ticket: `WANT` counts probes that must *run*, and a skipped probe proves nothing. An earlier version
-of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8; the record is in
-[handoff 002](handoff/002-module-profiles-and-quickstart.md), the fix is in `scripts/selftest.sh`.
+of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8; the fix is in
+`scripts/selftest.sh`, and a probe pins the count claim so it cannot drift again.
 
 What stays skipped even with both files: the three clone-backed checks, until `GATK_SV` points at a
 gatk-sv checkout ([Configure](#configure)). Those are checks, not probes, so they do not touch the
