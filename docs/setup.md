@@ -10,7 +10,7 @@ source .venv/bin/activate
 ```
 
 Python 3.9+ (`kit/gsvtk-config` uses `str.removeprefix`, added in 3.9; `kit/config.sh`'s interpreter
-probe enforces the same floor). The pure-python tools — `checks/` and `kit/` — need nothing beyond
+probe enforces the same floor). The pure-python tools (`checks/` and `kit/`) need nothing beyond
 the standard library, so they run on a bare interpreter with no venv at all. `compare/` is not one
 of them: three of its six tools import `numpy`, one `pandas`, one `pysam`. The Terra tools need two third-party packages:
 
@@ -23,7 +23,7 @@ Extras you opt into:
 
 | Tool | Needs | Install |
 |---|---|---|
-| `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it — see `./kit/gsvtk-config miniwdl` |
+| `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it; see `./kit/gsvtk-config miniwdl` |
 | `make flake` | `flake8` (used only as a pyflakes runner, `--select=F`) | `python -m pip install -r requirements-dev.txt`. `make test` SKIPs it with this named when it is absent, and CI is where it is enforced |
 | `checks/svshell_jq_plumbing_scan.py` | `jq` on PATH | `brew install jq` / `apt-get install jq` |
 | `terra/batch_check_inputs.py` | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar` |
@@ -35,7 +35,7 @@ Extras you opt into:
 ## The offline gate wants the dev file too
 
 `make setup` installs `requirements.txt` and nothing else, and that file is what a tool **imports**.
-miniwdl and flake8 are not imports — they are dev tools, so they live in `requirements-dev.txt`. For
+miniwdl and flake8 are not imports: they are dev tools, so they live in `requirements-dev.txt`. For
 a fresh clone that means:
 
 ```bash
@@ -47,19 +47,19 @@ Without the dev file the gate does **not** quietly shrink. A probe whose depende
 the reason and the file to install (`SKIP miniwdl_resolver needs miniwdl (pip install -r
 requirements-dev.txt)`), and the pinned probe count then **fails** rather than passing on a smaller
 ticket: `WANT` counts probes that must *run*, and a skipped probe proves nothing. An earlier version
-of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8 — the record is in
+of `probecount` added the skip count to the tally, so "3 ok, 5 skipped" passed as 8; the record is in
 [handoff 002](handoff/002-module-profiles-and-quickstart.md), the fix is in `scripts/selftest.sh`.
 
 What stays skipped even with both files: the three clone-backed checks, until `GATK_SV` points at a
 gatk-sv checkout ([Configure](#configure)). Those are checks, not probes, so they do not touch the
-pinned count. CI installs both files, which is why CI is where the gate is enforced; on a laptop the
-coverage is a choice you make with your eyes open.
+pinned count. CI installs both files, which is why CI is where the gate is really enforced. On a laptop you decide
+how much of it to run.
 
 ## Pinning a local venv to what production actually runs
 
-The versions that matter are not in this repo, and they must not be: a version written here is a
-version that stops being true the day gatk-sv moves a dockerfile. `scripts/prod_pins.py` reads them
-out of the upstream clone at a ref, with `git show <ref>:<path>` — the clone's working tree, index and
+The versions that matter are deliberately not in this repo. A version written here goes stale the day
+gatk-sv edits a dockerfile. `scripts/prod_pins.py` reads them
+out of the upstream clone at a ref, with `git show <ref>:<path>`; the clone's working tree, index and
 HEAD are never touched, the same discipline `scripts/fetch_wdl.py` keeps with `git archive`:
 
 ```bash
@@ -67,7 +67,7 @@ HEAD are never touched, the same discipline `scripts/fetch_wdl.py` keeps with `g
 ./scripts/prod_pins.py --requirements venv-prod.txt      # pip-installable approximation
 ```
 
-Run against a real clone, that prints the provenance of each file it read and then the pins — on
+Run against a real clone, that prints the provenance of each file it read and then the pins. On
 2026-09-25 at `e1909d2fa646` it was 14 keys (`pysam=0.15.4`, `python=3.10.4`, `pybedtools=0.9.0`, …)
 from three dockerfiles:
 
@@ -79,13 +79,13 @@ prod_pins: <clone> @ e1909d2fa646 (origin/main)  dockerfiles/sv-utils-env/Docker
 
 `pysam=0.15.4` is the load-bearing one. A local pysam newer than that is exactly what produces
 `[E::vcf_format] Invalid BCF, the INFO tag id=16 is too large` when a header-added INFO tag goes
-through a `bcftools sort` stdin pipe ([troubleshooting.md](troubleshooting.md) has the row) — so the
+through a `bcftools sort` stdin pipe ([troubleshooting.md](troubleshooting.md) has the row), so the
 requirements file it emits carries that warning in its header too, and `python` stays a comment
 because pip cannot install an interpreter.
 
 What it refuses, each pinned by `--selftest` (9 assertions, offline, git fixture in a temp dir): a ref
 that does not resolve, a `--repo` that is not a git repository, a dockerfile that is not there, a
-required pin that has gone, and **one package pinned twice to two versions — naming both**, because
+required pin that has gone, and **one package pinned twice to two versions, naming both**, because
 first-write-wins would silently pick an answer about someone else's version. The selftest's control
 asserts the **full** pin count across a backslash continuation: gatk-sv writes its conda list across
 two physical lines, and a one-line parser saw 6 of 11 pins and still exited 0.
@@ -167,20 +167,20 @@ Baseline (`GSVTK_BASELINE_*`) stays pointed at the reference run and is only eve
 
 `gsutil` runs under your ADC. Publicly readable and used in place:
 
-- `gs://gatk-sv-resources-public` — gatk-sv hg38 resources
-- `gs://gatk-sv-ref-panel-1kg-v1-1` — the public 1KG reference panel
-- `gs://gcp-public-data--broad-references` — hg38 fasta/dict
+- `gs://gatk-sv-resources-public`: gatk-sv hg38 resources
+- `gs://gatk-sv-ref-panel-1kg-v1-1`: the public 1KG reference panel
+- `gs://gcp-public-data--broad-references`: hg38 fasta/dict
 
 Anything under `gs://fc-…` belongs to a workspace and is only readable by that workspace's
 members and pet service accounts.
 
 ## Verifying the whole picture
 
-> `recon.py` is read-only against Terra, but it writes eight JSON dumps under
-> `$GSVTK_WORK/recon/` and its stdout names your Terra e-mail (redacted unless
-> `--show-identity`) and every workspace you can reach. Attach `recon/*.json` to an issue
-> only after you have looked at what they list, and prefer describing the failure over
-> pasting the inventory.
+> [!WARNING]
+> `recon.py` is read-only against Terra, but it writes eight JSON dumps under `$GSVTK_WORK/recon/`, and
+> its stdout names your Terra e-mail (redacted unless `--show-identity`) plus every workspace you can
+> reach. Check what `recon/*.json` lists before attaching it to an issue, and prefer describing the
+> failure over pasting the inventory.
 
 ```bash
 make test                                 # offline: syntax, pyflakes, --help, real runs, audit, selftests
@@ -207,7 +207,7 @@ living in someone's home directory:
 
 [pi](https://github.com/badlogic/pi-mono) loads it from `.pi/skills/` once the project is trusted;
 other harnesses read `.agents/skills/`, so symlink rather than copy if you need both. To use it from
-*other* projects (the usual case — you are usually standing in gatk-sv, not here):
+*other* projects (the usual case: you are usually standing in gatk-sv, not here):
 
 ```bash
 ln -sfn "$PWD/.pi/skills/gatk-sv-testkit" ~/.pi/agent/skills/gatk-sv-testkit
@@ -215,6 +215,6 @@ ln -sfn "$PWD/.pi/skills/gatk-sv-testkit" ~/.pi/agent/skills/gatk-sv-testkit
 
 The wrapper finds the checkout on its own (`GSVTK_HOME` overrides) and refuses to treat a
 flattened pile of testkit files as a checkout: a directory is accepted only if it is a git clone of
-a remote named in `GSVTK_TRUSTED_REPOS`. `make selftest` runs `scripts/check_skill.py` against it —
-version stamp, frontmatter, and the refusal list *executed* rather than quoted — because a skill
-that quietly drifts from the code is worse than no skill: an agent follows it.
+a remote named in `GSVTK_TRUSTED_REPOS`. `make selftest` runs `scripts/check_skill.py` against it (version
+stamp, frontmatter, and the refusal list *executed* rather than quoted), because an agent
+follows a drifted skill without noticing.

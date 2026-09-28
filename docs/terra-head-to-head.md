@@ -2,10 +2,10 @@
 
 The question this answers: **did my change alter the pipeline's output, and if so where?**
 
-Comparing two whole pipeline runs is usually meaningless — different inputs, different
+Comparing two whole pipeline runs is usually meaningless: different inputs, different
 reference panels, different tags, and the differences that matter hide inside the differences
 that don't. So the shape here is: **freeze one baseline's inputs, rerun only the stage you
-changed, compare that stage's output against the baseline's** — with every input pinned to a
+changed, compare that stage's output against the baseline's**, with every input pinned to a
 coordinate that cannot move.
 
 ```
@@ -26,7 +26,20 @@ Set up once: [`setup.md`](setup.md), then `testkit.env` with `GSVTK_PROJECT`,
 `GSVTK_TERRA_NAMESPACE`/`_WORKSPACE` (yours), `GSVTK_BRANCH`, `GSVTK_IMAGE_REPO`
 ([docker builds](docker-builds.md) to make the image it will use).
 
-## 1. Recon — read-only, run this first
+## Contents
+
+* [1. Recon (read-only, run this first)](#1-recon-read-only-run-this-first)
+* [2. Freeze the baseline](#2-freeze-the-baseline)
+* [3. Method configs](#3-method-configs)
+* [4. Gate before you submit](#4-gate-before-you-submit)
+* [5. Run, wait, price](#5-run-wait-price)
+* [6. Fetch and compare](#6-fetch-and-compare)
+* [7. If the numbers moved](#7-if-the-numbers-moved)
+* [Cost and blast radius](#cost-and-blast-radius)
+* [8. API edges that bite, with the exact text each produces](#8-api-edges-that-bite-with-the-exact-text-each-produces)
+* [9. Reading one task's artifacts, and fetching an output by its name](#9-reading-one-tasks-artifacts-and-fetching-an-output-by-its-name)
+
+## 1. Recon (read-only, run this first)
 
 ```bash
 python terra/recon.py
@@ -71,13 +84,13 @@ comparison:
   running on inputs that are not the baseline.
 
 Frozen object names are the source basename, **except** when two *different* source objects share a
-basename (this model does — e.g. two batches each holding `merged_pe.out`): those freeze as
+basename (this model does, e.g. two batches each holding `merged_pe.out`): those freeze as
 `<attribute>__<basename>`. Without that, both attributes end up pointing at one object, the last
 writer wins, and one of the inputs steps 06/07 read is quietly the wrong file.
 
 **Object coordinates.** The baseline's input files get copied into your workspace bucket with
 their **names, `crc32c` and byte size** recorded in
-`$GSVTK_WORK/manifests/baseline_frozen_inputs.json`. Not referenced — copied: your sandbox has its
+`$GSVTK_WORK/manifests/baseline_frozen_inputs.json`. Not referenced, copied: your sandbox has its
 own Google project, and Cromwell localizes `gs://` with that project's pet service account, which
 cannot read the baseline's bucket. Copies also survive deletion of the source, and `gsutil cp`
 preserves `crc32c`, so a `verify` match proves the bytes you compared are the bytes you will
@@ -108,42 +121,42 @@ chain.
 
 **The input maps are a snapshot of one branch's WDL signature; `GSVTK_BRANCH` only chooses the
 Dockstore URL.** Point the URL at a ref the maps were not written against and they carry keys that
-ref never declared, which Rawls rejects as an **extra input at submission** — after `create`
+ref never declared, which Rawls rejects as an **extra input at submission**, after `create`
 succeeded, so the workspace holds a config that looks fine until someone submits it. A ref that
 Dockstore never published fails earlier with `Cannot get dockstore://... from method repo`: one
 mismatch, two symptoms, and the 404 tends to arrive first and absorb the attention.
 
 `check` is the offline form of `validate`: it reads `wdl/` out of your own checkout with `git
 archive` and parses the workflow with miniwdl, so it needs neither the ref to be published nor a
-Terra target — which is why `create` and `validate` run it before doing anything else and refuse on
+Terra target, which is why `create` and `validate` run it before doing anything else and refuse on
 findings. What it reports:
 
 | Finding | Means |
 |---|---|
 | `EXTRA <WF>.<input>` | the map binds a key this ref does not declare. Known branch-only keys are labelled as such (the table beside `CONFIGS`), because "exists on the branch under test" and "never seen" need different fixes |
 | `MISSING <WF>.<input>` | the ref **requires** it and nothing binds it: no default to fall back on, fails as a missing input |
-| `CANNOT CHECK` | the workflow file is not in that tree or miniwdl could not load it. Counted as a finding — a skipped comparison is not a pass |
+| `CANNOT CHECK` | the workflow file is not in that tree or miniwdl could not load it. Counted as a finding: a skipped comparison is not a pass |
 | pre-check `SKIPPED` from `create` | no ref or no checkout, so the comparison never ran. Printed, never silent |
 
 `--allow-unknown-inputs` posts anyway and prints that it was taken. Measured against this repo's
 maps (redacted per this repo's own audit rule, which treats a person-named branch as an internal
-identifier — see [config.md](config.md)): `<branch-under-test>` 0 of 64 rejected, `origin/main` 1
-(`10-GenotypeBatch.training_vcf`, a branch-only input), `v1.1.1` 56 findings — those maps were never
+identifier, see [config.md](config.md)): `<branch-under-test>` 0 of 64 rejected, `origin/main` 1
+(`10-GenotypeBatch.training_vcf`, a branch-only input), `v1.1.1` 56 findings; those maps were never
 a `v1.1.1` shape. Run `check` yourself to reproduce all three; the numbers are three commands.
 
 **The guard is on the rerun path too, and that mattered more than it looks.**
-`terra/batch_rerun_step.py` builds its config with `from batch_configs import body` — the builder,
-not the guard — so when the pre-check landed only in `batch_configs.create`/`validate`, the one path
+`terra/batch_rerun_step.py` builds its config with `from batch_configs import body`: the builder,,
+not the guard, so when the pre-check landed only in `batch_configs.create`/`validate`, the one path
 that actually submits stayed open: create returned 200, submit returned 400, and Terra's own
 typecheck was the thing that named the key. `create`, `validate` and `submit` each call it now. Since
 rerun's Dockstore pin is `GSV_WDL_VERSION`, which can differ from `GSVTK_BRANCH`, what it grades is
-the pin — the ref that config will really run — and it prints which ref it compared.
+the pin (the ref that config will really run) and it prints which ref it compared.
 
 **Want the other ref's shape? Ask for it by name.** `--drop-branch-only-inputs` removes
 known-branch-only bindings the target ref does not declare, so the map fits the ref you pointed at.
-It is deliberately not automatic, because pruning a binding is not a fix, it selects a different
-pipeline: main's `GenotypeBatch` trains PE/SR from `vcf`, the branch from a separate training VCF.
-So it drops nothing against a ref it cannot read (unverified is not evidence of absence), it prints
+It is deliberately not automatic, because pruning a binding does not fix anything: it selects a
+different pipeline: main's `GenotypeBatch` trains PE/SR from `vcf`, the branch from a separate training VCF.
+So it drops nothing against a ref it cannot read (unverified is not evidence of absence). It prints
 each dropped key to **stderr** so `show | jq` stays valid JSON, and it prints the semantic
 consequence plus the ref it compared. If you meant to run your own branch, unset `GSVTK_BRANCH`
 instead of reaching for this flag.
@@ -151,18 +164,18 @@ instead of reaching for this flag.
 The guard grades the **pruned** map, not the raw table: `check_maps(..., drop=...)` applies the same
 `BRANCH_ONLY_INPUTS` rule `_adapt_inputs()` uses. Before that, `show --drop-branch-only-inputs`
 printed the 16-key body Rawls accepts while `create` on the same command line refused to POST it and
-named the key it had just dropped. The flag is still not a blindfold — a key outside the table is
+named the key it had just dropped. The flag is still not a blindfold, a key outside the table is
 reported `EXTRA` with the flag set.
 
 **…and it grades the one ref that config runs.** `--against` belongs to `check`, and a command that
 POSTS refuses it: `create` and `validate` compare the ref their own Dockstore pin names
 (`GSVTK_BRANCH`, or `GSV_WDL_VERSION` on a rerun), because that is the WDL Terra will actually read.
-Letting you pick a different one was worse than a wrong pass — with `--drop-branch-only-inputs` the
+Letting you pick a different one was worse than a wrong pass, with `--drop-branch-only-inputs` the
 guard pruned the key *there* and then posted the map built from the branch, printing `DROPPED … this
 is what body() posts` about a body it had not built. To post another ref's shape, point
 `GSVTK_BRANCH` at it (that is what pins Dockstore there); to see that ref's findings without posting
 anything, `check --against <ref> --drop-branch-only-inputs`. `probe_fixes.py`'s `drop_flag_guard` pins
-both halves — including the body that actually leaves the machine, because "the guard and the body
+both halves, including the body that actually leaves the machine, because "the guard and the body
 agree" is a claim about two components and only the POST can settle it.
 
 Two non-obvious details that cost real debugging time when wrong:
@@ -172,10 +185,10 @@ Two non-obvious details that cost real debugging time when wrong:
   `sample_set` (`batch_configs.py`'s `rootEntityType` per config is the authority, and it agrees
   with gatk-sv's own `GenotypeBatch.json.tmpl`, which binds `GenotypeBatch.batch` to
   `${this.sample_set_id}`). Submit against the wrong one and the batch-level `this.*` bindings
-  resolve to nothing — usually at runtime, after VMs booted.
+  resolve to nothing, usually at runtime, after VMs booted.
 - **`GSVTK_BATCH` must name a real `sample_set`.** It defaults to `all_samples`, the entity in
   gatk-sv's reference-panel workspace; rename it and every `this.<attr>` binding silently empties.
-  It is read by every tool on this path — including `fetch_baseline.py --entity` (which writes the
+  It is read by every tool on this path, including `fetch_baseline.py --entity` (which writes the
   manifest) and `stage_inputs.py --attrs` (which reads it back), so a wrong value cannot split the
   freeze and the staging across two different rows. If the row is missing from the manifest,
   `stage_inputs.py` stops with exit 2, naming the rows that exist, instead of selecting nothing and
@@ -186,14 +199,14 @@ Two non-obvious details that cost real debugging time when wrong:
   single-workflow closure into one document, and `--check` typechecks the result with miniwdl,
   refusing to report success without it (miniwdl is resolved through `./kit/gsvtk-config miniwdl`,
   so the copy `make setup` put in `./.venv/bin` is found without activating anything). It refuses
-  multi-workflow closures on purpose -- including `TinyResolve`, whose import `GetShardInputs.wdl`
-  declares a workflow of its own -- because a document with two workflows has no primary and fails
+  multi-workflow closures on purpose, including `TinyResolve`, whose import `GetShardInputs.wdl`
+  declares a workflow of its own, because a document with two workflows has no primary and fails
   at submission looking like a broken WDL. It likewise refuses a closure where two **different**
   files declare the same task/struct name (importing one file twice is fine; it is emitted once):
   one document cannot hold it twice, and picking a winner is a decision about what the pipeline
   runs, not a bundler detail. gatk-sv main has no such collision in any of its 118 closures.
 - **A binding is not an expression.** A value Cromwell *evaluates* rather than *reads* can come
-  back empty, and the WDL's own default then wins — which is invisible in the create/validate
+  back empty, and the WDL's own default then wins, which is invisible in the create/validate
   path, because both consider the config well-formed. `batch_check_inputs.py` flags bindings that
   contain `~{}` or start like an expression (`select_all`, `read_*`, `{`, `[`) as
   `FAIL expression-shaped bindings`, and exits 1 on any FAIL.
@@ -210,12 +223,12 @@ actual WDL under a complete inputs object, so a missing or renamed input fails o
 seconds instead of on step 08 in an hour. The `--no-sidecars` run models the index-less case
 that Terra's `localize()` does not supply.
 
-`terra/batch_rerun_step.py` refuses every mode **except `show`** while no image is pinned —
+`terra/batch_rerun_step.py` refuses every mode **except `show`** while no image is pinned:
 either `--image KEY=REF` per call, or an explicit `GSVTK_IMAGE_REPO`/`GSVTK_GATK_IMAGE_REPO` in the
 profile. A value merely *derived* from your project does not count, because "derived from the
 project" is not a statement about which code ran. `show` is deliberately allowed unpinned so you
 can inspect the body before deciding. Unpinned images are the one class of mistake that otherwise
-looks like a successful submission followed by an `ImagePullBackupFailed` on every shard — or
+looks like a successful submission followed by an `ImagePullBackupFailed` on every shard, or
 worse, a green run of someone else's code.
 
 ## 5. Run, wait, price
@@ -229,7 +242,7 @@ python terra/batch_status.py --costs                  # quick per-submission cos
 
 What `batch_rerun_step.py` guarantees is about *images*: every `*_docker` input is pinned literally
 into the config it POSTs, so a rerun cannot inherit whatever the workspace attribute happened to
-point at. It does **not** re-read live workflow outputs — `batch_check_inputs.py --step 10` is the
+point at. It does **not** re-read live workflow outputs, `batch_check_inputs.py --step 10` is the
 tool that checks bindings against the last submission's actual `inputResolutions`.
 
 ### Two arms, one variable
@@ -252,11 +265,11 @@ Two ways that design degenerates silently, both cheap to avoid:
 - **Both arms write the same entity attributes.** Outputs land in `*<GSVTK_NEW_SUFFIX>` (default
   `_new`), so the second arm overwrites the first and the comparison ends up reading one run against
   itself. Give each arm its own suffix and pass the matching `GSVTK_FROZEN_SUFFIX` to whatever reads
-  that arm back — the empty-diff failure mode in [troubleshooting.md](troubleshooting.md) is this
+  that arm back; the empty-diff failure mode in [troubleshooting.md](troubleshooting.md) is this
   disagreement between two tools.
 - **`useCallCache: true`.** Cromwell reuses call outputs when command and inputs match, which is what
   you want across retries and not what you want between arms if a tag is mutable. Pin both images by
-  digest or commit-SHA tag — which is what the pinning guard in this tool already refuses to let you
+  digest or commit-SHA tag, which is what the pinning guard in this tool already refuses to let you
   skip for `*_docker`.
 
 ```bash
@@ -266,11 +279,11 @@ python terra/batch_cost.py --outdir "$GSVTK_WORK/metadata" \
 ```
 
 Cost is **recomputed from saved Cromwell metadata** rather than quoted from a dashboard, and is
-reported in **VM-minutes and job counts** — no rates, no currency, because your billing account is
+reported in **VM-minutes and job counts**: no rates, no currency, because your billing account is
 not mine. The accounting is `sum(vmEndTime - vmStartTime)` over every call record at any nesting
 depth (`batch_save_metadata.vm_minutes`), which is deliberately not the root `call start→end` span:
 spans are printed as a separate column because they are what produced two bogus headline figures
-here. Multiply the VM-minutes by your own per-type price and re-run the arithmetic against the JSON —
+here. Multiply the VM-minutes by your own per-type price and re-run the arithmetic against the JSON;
 that is the point of storing it.
 
 **The chain total and the ratio are refused when the data is incomplete**, because every one of these
@@ -278,9 +291,9 @@ forms used to print a tidy wrong number and exit 0:
 
 | What is missing | What the tool now says |
 |---|---|
-| one step's metadata file on either side | `chain total is PARTIAL: no saved metadata for 06/baseline`, `ratio new/baseline: n/a`, **exit 1**. That step counted as *zero* in the sum — deleting one file once flipped the conclusion from “4.5× cheaper” to “20× more expensive” |
+| one step's metadata file on either side | `chain total is PARTIAL: no saved metadata for 06/baseline`, `ratio new/baseline: n/a`, **exit 1**. That step counted as *zero* in the sum, deleting one file once flipped the conclusion from "4.5× cheaper" to "20× more expensive" |
 | a sub-workflow whose tree was never expanded (depth cap, older or hand-trimmed file) | `N sub-workflow call(s) have no expanded tree below them -> cost is a FLOOR`. `_missingSubWorkflows` alone was not enough: a truncated tree looks exactly like a complete one, and baseline step 10 read 918 VM-min instead of 1672.8 that way |
-| a call with `vmStartTime` but no `vmEndTime` (running or aborted) | `excluded from BOTH minutes and job count` — the job count under-reports too, not just the minutes |
+| a call with `vmStartTime` but no `vmEndTime` (running or aborted) | `excluded from BOTH minutes and job count`: the job count under-reports too, not just the minutes |
 | no step files at all in `--outdir` | says so and exits 1, rather than printing a table of zeros |
 
 So `every step present on both sides, every tree expanded -> these are measurements` is a claim the
@@ -299,7 +312,7 @@ terra/batch_fetch_compare.sh all --dry-run
 `fetch` is a no-clobber sync of tens of GB, so keep the scratch under `GSVTK_WORK` on a roomy
 disk. `profile` refuses a non-empty output directory unless `--force`.
 
-For **any** other callset pair, use the generic comparators directly —
+For **any** other callset pair, use the generic comparators directly, see
 [comparators.md](comparators.md).
 
 ## 7. If the numbers moved
@@ -307,12 +320,12 @@ For **any** other callset pair, use the generic comparators directly —
 The discipline that matters: for each differing column, decide which of these it is, and write
 the answer next to the number.
 
-1. **a bug in my change** — the interesting case;
-2. **an intended behaviour change** — then the baseline number is what must change, and a
+1. **a bug in my change**: the interesting case;
+2. **an intended behaviour change**: then the baseline number is what must change, and a
    strategy-aware comparator should mark it `STRATEGY`, never diff it as a bare number;
-3. **an input difference you did not control** — the comparison is invalid, not the code.
+3. **an input difference you did not control**: the comparison is invalid, not the code.
 
-Case 3 is why freezing exists. Case 2 is why [comparators.md](comparators.md) exists — a column
+Case 3 is why freezing exists. Case 2 is why [comparators.md](comparators.md) exists: a column
 whose inputs are *superset* on one side has no right to be compared as a mean.
 
 ## Cost and blast radius
@@ -337,11 +350,11 @@ All of these were hit driving real submissions on 2026-09-22…25 (gatk-sv `trio
 single-sample pipeline, ~$26 of real runs). Each was worth a round trip, none is documented elsewhere
 in this repo, and two of them only surface after a run has already spent money.
 
-**Payload shape — rejected at submit time, cheap to find, painful to guess.**
+**Payload shape: rejected at submit time, cheap to find, painful to guess.**
 
 - Config `inputs` keys must be **workflow-qualified**: `GATKSVPipelineSingleSample.dragen_vcf`, not
   `dragen_vcf`. Strip the prefix and the validator reports every single input as extra (observed:
-  117 `extraInputs`, 87 missing) — a total-misery error message for a one-line cause.
+  117 `extraInputs`, 87 missing), a total-misery error message for a one-line cause.
 - Submission entity expression is exactly `this`. `this.sample.SM-GN4BI` → HTTP 400.
 - Config `outputs` **values** are unqualified: `this.moi_summary`, not
   `this.GATKSVPipelineSingleSample.moi_summary`:
@@ -359,7 +372,7 @@ output named GATKSVPipelineSingleSample.final_bed does not exist
 
 Cromwell's own root status was `Succeeded`, all 17 outputs existed, and Terra still marked the
 workflow `Failed`. Cost of that one key: an entire 20 h / $18.87 run reported as a failure. **Check
-the config's output names against the descriptor before submitting** — the only validator is the run:
+the config's output names against the descriptor before submitting**, because the only validator is the run:
 
 ```bash
 ID='%23workflow%2Fgithub.com%2Fbroadinstitute%2Fgatk-sv%2FSingleSamplePipeline'
@@ -374,13 +387,13 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
   the truth. **You no longer hand-curl this:** `terra.submissions()` and `terra.workspace_configs()`
   ask both clients on every call, print `the two endpoints DISAGREE — raw REST GET /api/… answered 2,
   fapi.list_submissions answered 0` when the counts differ (and use raw REST), and **raise naming the
-  endpoint** when both answer empty — because an empty listing and an invisible workspace are otherwise
+  endpoint** when both answer empty, because an empty listing and an invisible workspace are otherwise
   the same answer. One extra request per listing is the accepted price of detecting the lie.
   `probe_listing_lie` pins it offline; `recon` exits 1 on this answer rather than 0
   (`probe_recon_empty_inventory`). The reason to check after a submit call that raised mid-flight is
   unchanged: prove you did not double-spend.
 - Per-workflow metadata is a **cached snapshot**: two fetches 30+ min apart returned byte-identical
-  JSON while the scratch bucket proved the run had advanced. It also omits sub-workflow internals —
+  JSON while the scratch bucket proved the run had advanced. It also omits sub-workflow internals:
   top-level `calls` sat at 9 entries while ~200 tasks ran inside `GatherBatchEvidence`. Use
   `?expandSubWorkflows=true` for the real call graph and know it returns **~45 MB**: `curl -o` it and
   print a summary, never into an agent's context.
@@ -389,7 +402,7 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
   call-level view without the 45 MB payload, `terra/batch_peek.py` reads non-expanded metadata and
   prints a bounded tally (240 records across 60 calls renders 18 lines) plus the first failure message
   and per-attempt rc values; it refuses a submission it cannot see instead of reporting nothing. Its
-  live-Terra path needs credentials and was **not** exercised by this repo's offline gate — the
+  live-Terra path needs credentials and was **not** exercised by this repo's offline gate, the
   guards, the tally, and the exit codes were proven against metadata fixtures.
 - Finished submissions store their config under a per-submission snapshot name
   (`single-sample-trio-a0e10b99_B0EJFlC5SLk`). Those are not extra configs; don't clean them up.
@@ -403,7 +416,7 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
 - Every `File` input is **downloaded** into the task's working directory before the command runs, even
   when the command only asks `defined(the_file)`. Two whole-genome parental CRAMs onto a task asking
   for `local-disk 10 HDD` = a job that runs ~20 min, writes **no stdout/stderr at all**, and dies with
-  `The job was stopped before the command finished` — which reads like an image-pull failure until you
+  `The job was stopped before the command finished`, which reads like an image-pull failure until you
   `gsutil cat` the task's `gcs_localization.sh` and see the CRAMs in it. Pass a `Boolean` computed at
   the call site when you only need presence.
 
@@ -421,18 +434,18 @@ rewrote independently). The tally and the `rc`-object liveness signal are the ru
     --task GatherBatchEvidence --tail 25 --no-scratch
 ```
 
-`--metadata` takes a local Cromwell dump, so the whole path runs with no network and no credentials —
+`--metadata` takes a local Cromwell dump, so the whole path runs with no network and no credentials;
 which is also how `--selftest` proves it (54 assertions). What it prints: the `rc` read from the file,
 the **tail** of `stderr` with the drop counted (`TAIL 25 shown, first 375 not printed`), the **rendered
 `script`** block the backend actually executed, and which `attempt-N` directories exist. The attempt
 layout is what turns "unstable image" into "preempted": `rc=141` under `attempt-1` and `rc=0` under
 `attempt-2` says so without opening a log. `--attempt 9` against a call dir that has no `attempt-9`
-is REFUSED by name — it does not fall back to a neighbour's log and let you quote the wrong attempt.
+is REFUSED by name. It will not fall back to a neighbour's log and let you quote the wrong attempt.
 A withheld `stdout` is not a failure; a thing the page tried to show and could not read is, and the
 exit code says 1. `--shard` refuses a shard the call does not have for the same reason.
 
 **`terra/fetch_outputs.py`** takes the **workflow output name** and resolves it in Cromwell metadata,
-which is where the paths actually were (the Terra entity attributes stayed empty —
+which is where the paths actually were (the Terra entity attributes stayed empty; see
 `GAP-REVIEW-manta-tloc.md` §1). Never a bucket path typed by hand:
 
 ```bash

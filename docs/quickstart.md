@@ -1,17 +1,17 @@
 # Quickstart: what you can do in the next ten minutes
 
 Every command below was run on a laptop: **no Terra call, no VM created, no bucket written, nothing on
-disk**. The two build-preflight commands do make *read-only* gcloud and GitHub calls — that is what
+disk**. The two build-preflight commands do make *read-only* gcloud and GitHub calls; that is what
 makes them worth running before the expensive one. The outputs are real captures from this checkout,
-shortened where they ran long, with the project / workspace / registry values replaced by `YOUR_*` —
+shortened where they ran long, with the project / workspace / registry values replaced by `YOUR_*`;
 those are yours to name and the tools refuse to guess them ([config.md](config.md)).
 
 By the end you will have seen all four loops, and you will know which ones this machine can actually
 run.
 
-Nothing on this page spends money. Two of the four loops spend money **when you follow them up** — a
+Nothing on this page spends money. Two of the four loops spend money **when you follow them up**: a
 branch build is roughly 1-3 h of `e2-standard-8`, a head-to-head step is a fleet of VMs over tens of
-minutes to hours — and each section says so where it stands.
+minutes to hours, and each section says so where it stands.
 
 ```
 make setup && cp testkit.env.example testkit.env      # a couple of minutes; pip needs the network
@@ -34,7 +34,7 @@ make setup                          # ./.venv (first run needs the network for p
 cp testkit.env.example testkit.env  # then edit: project + Terra workspace are yours to name
 ```
 
-Don't guess whether your setup works. Ask, and read *where each value came from*:
+Rather than guessing whether your setup works, ask it, and read *where each value came from*:
 
 ```
 $ ./kit/gsvtk-config show
@@ -44,7 +44,7 @@ $ ./kit/gsvtk-config show
   GSVTK_IMAGE_REPO           us.gcr.io/YOUR_PROJECT/YOUR_NS/gatk-sv   [derived from PROJECT]
 ```
 
-Two keys have no default at all — the GCP project and the Terra workspace — because they decide whose
+Two keys have no default at all (the GCP project and the Terra workspace) because they decide whose
 billing runs and whose workspace gets written. **Exit 4 naming the missing key is correct behaviour**,
 not a crash:
 
@@ -73,12 +73,12 @@ build     gcloud ok
 inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar
 ```
 
-That is the whole tool inventory with its dependencies resolved — including *where* miniwdl was found,
+That is the whole tool inventory with its dependencies resolved, including *where* miniwdl was found,
 which matters because `make setup` installs it into a venv your shell has no reason to have activated.
-The last line is the toolkit telling you the local-replay loop is partly blocked here, rather than you
-discovering it 40 minutes later.
+The last line says the local-replay loop is partly blocked on this machine, instead of you finding that
+out 40 minutes later.
 
-## 2. Loop: "is my WDL actually launchable?" — seconds, no data
+## 2. Loop: "is my WDL actually launchable?" (seconds, no data)
 
 `miniwdl check` passes a workflow whose call sites never bind a required input, and one that passes an
 input the callee dropped. Both are unlaunchable, neither is a `check` error, and gatk-sv's CI does not
@@ -98,10 +98,10 @@ Each ref is materialized into **its own** directory with `git archive` (never a 
 imports resolve by filename within a directory, so a mixed tree resolves against the wrong version and
 reports a result that is neither the old bug nor the new one.
 
-Two things worth internalising about every checker here:
+Two things to know about every checker here:
 
-* **Findings are a diff, not a verdict.** Today's gatk-sv carries a few `IncompleteCall` warnings on
-  purpose, so `--strict` is a baseline-comparison decision, not a default. `--strict` on a clean
+* **Findings are a diff.** Today's gatk-sv carries a few `IncompleteCall` warnings on purpose, so
+  `--strict` is a baseline-comparison decision rather than a default. `--strict` on a clean
   workflow says so explicitly:
 
   ```
@@ -111,14 +111,14 @@ Two things worth internalising about every checker here:
   every workflow named was actually present at the ref given.
   ```
 
-* **A workflow you did not check is a failure, not a blank cell.** A typo'd name — or one that only
-  exists on newer refs — used to contribute nothing to the exit code, so the gate certified "no hard
+* **A workflow you did not check counts as a failure.** A typo'd name, or one that only
+  exists on newer refs, used to contribute nothing to the exit code, so the gate certified "no hard
   errors" having checked nothing. Now it prints `ABSENT at <sha>` and exits 1.
 
-## 3. Loop: "did that rename break `sv_shell`?" — seconds, and the reason this repo exists
+## 3. Loop: "did that rename break `sv_shell`?" (seconds, and the reason this repo exists)
 
 `src/sv_shell` has no CI at all. Its driver chains 14 module scripts, feeding each an `inputs.json`
-that a `jq -n` block assembles — and `jq -r ".missing_key"` returns the **string** `"null"` instead of
+that a `jq -n` block assembles, and `jq -r ".missing_key"` returns the **string** `"null"` instead of
 failing, so a renamed key becomes `--some-flag null` several stages later, inside a running VM.
 
 ```
@@ -131,7 +131,7 @@ sv_shell contract check: src/sv_shell/single_sample_pipeline.sh + 14 stage calls
 ```
 
 (Abridged: the full run also lists ~40 gCNV hyperparameters that arrive from elsewhere. Those are the
-*baseline* findings — which is exactly why the next command matters.)
+*baseline* findings, which is exactly why the next command matters.)
 
 ```
 $ python checks/svshell_jq_plumbing_scan.py
@@ -145,11 +145,11 @@ vs baseline main: NEW null/empty in 0 key(s) across 0 block(s)
 Same tree, two verdicts, and **both are right**: the first reports the state of the world, the second
 reports *what your change did*. Read the second one.
 
-## 4. Loop: "would my Terra head-to-head actually run?" — seconds, offline, before any money
+## 4. Loop: "would my Terra head-to-head actually run?" (seconds, offline, before any money)
 
 The method-config input maps are a snapshot of one branch's WDL signature, while `GSVTK_BRANCH` only
 picks the Dockstore URL. Point them at different refs and Terra rejects the whole config as an extra
-input **at submission** — after the config sat in your workspace looking created. This is that check,
+input **at submission**, after the config sat in your workspace looking created. This is that check,
 offline, against your own checkout:
 
 ```
@@ -168,11 +168,11 @@ WDL read from ~/repos/gatk-sv @ main
 check: 1 problem(s).
 ```
 
-It read that ref with miniwdl — not a regex, because a first attempt at this check used one and
+It read that ref with miniwdl, not a regex, because a first attempt at this check used one and
 reported 13 unknown bindings against `main`, where `main` has exactly one.
 
-**The mutating half of this loop refuses you first, on purpose.** `show` before `submit` is the whole
-discipline, and the tooling enforces the order:
+**The mutating half of this loop refuses you first, on purpose.** The discipline is `show` before
+`submit`, and the tooling enforces that order:
 
 ```
 $ python terra/batch_configs.py create
@@ -187,15 +187,16 @@ no entity dump at $GSVTK_WORK/recon/sample_set_entities.json.
 ```
 
 The second one is the house style for failure: name the missing file, name the command that makes it,
-exit nonzero. An empty table that reads like "no differences" is the failure this repo fears most.
+exit nonzero. An empty table that reads like "no differences" is the failure this repo has been caught by more than
+once.
 
 Recon → freeze → configs → gate → run → fetch → compare, with what each step costs and which are
 write-once, is in [terra-head-to-head.md](terra-head-to-head.md).
 
-## 5. Loop: "the numbers moved — do they match?"
+## 5. Loop: "the numbers moved, do they match?"
 
-Thirteen comparators, one rule each, all of them written down so a number survives someone checking
-it. They take explicit paths, touch no network, and their only writes are `--out-prefix` and `--json`.
+Thirteen comparators, one rule each, and each rule is written down so that someone can check the
+number. They take explicit paths, touch no network, and their only writes are `--out-prefix` and `--json`.
 
 | Tool | Question it answers | Needs |
 |---|---|---|
@@ -214,8 +215,8 @@ it. They take explicit paths, touch no network, and their only writes are `--out
 | `tar_manifest.py` | did a bundle change (tar-in-tar included) | two tarballs or dirs |
 
 The last seven are generic; the first six are the fixed rules a v1.1.1 head-to-head happened to need.
-Every one of them takes `--json`, which writes `{tool, argv, inputs+hash, rule, …, compared_something}`
-— the rule that produced a number travels with the number.
+Every one of them takes `--json`, which writes `{tool, argv, inputs+hash, rule, …, compared_something}`:
+so the rule that produced a number is recorded next to it.
 
 Run the differ with nothing in it and it tells you it compared nothing, with exit 1, instead of
 printing a tidy empty table:
@@ -229,13 +230,13 @@ $ python compare/compare_batch_tables.py --baseline-dir empty/b --new-dir empty/
 ```
 
 With real inputs it reports `MATCH` / `DELTA` / `MISSING`, and `STRATEGY` for a row that changed *by
-design* — where diffing the raw means would be a lie. A worked capture, including the four SR cutoffs
+design*, where diffing the raw means would tell you the wrong thing. A worked capture, including the four SR cutoffs
 labelled `STRATEGY` and the `SR_sum_log_pval` → `SRQ` 10× scale trap, is in
 [table_diff_example.md](../examples/table_diff_example.md). The three properties that have each burned
 someone (site-weighted vs row-weighted, scale before magnitude, marginals vs pairs) are in
 [comparators.md](comparators.md).
 
-## 6. Loop: "build my branch's image" — and the free way to check first
+## 6. Loop: "build my branch's image" (and the free way to check first)
 
 An image built for `linux/amd64` cannot be built natively on Apple Silicon. This builds it on one
 throwaway x86_64 GCE VM with no local Docker, streams the log, and deletes itself on success.
@@ -258,19 +259,19 @@ INFO it must be able to push to us.gcr.io/YOUR_PROJECT/YOUR_NS/gatk-sv; for GCR 
 
 `--check` and `--dry-run` are the two commands to run before the expensive one: the first proves the
 branch resolves, the second prints the exact `gcloud` call, the machine type and the registry it will
-push to. **Cost, stated plainly: `e2-standard-8`, roughly 1-3 hours, plus a 150 GB PD-SSD.** Nothing in
-this repo quotes a price — your billing account, discounts and spot pricing are not ours to read; the
-timeout ceiling is the only bound it can give you.
+push to. **Cost: `e2-standard-8`, roughly 1-3 hours, plus a 150 GB PD-SSD.** Nothing in this repo quotes a
+price. Your billing account, discounts and spot pricing are not visible from here, so the timeout
+ceiling is the only bound the tool can give you.
 
-One trap that saves people time: a build VM acts as **its own** service account.
-`--impersonate-service-account` changes the API caller, not the VM, so it cannot fix a denied push —
+One trap worth knowing about: a build VM acts as **its own** service account.
+`--impersonate-service-account` changes the API caller instead of the VM, so it cannot fix a denied push;
 the fix is the bucket grant the `INFO` line prints.
 
 ## 7. Loop: "run the real trainer on the real inputs, locally"
 
 The inputs of a captured successful run, staged; a locally built GATK jar, pointed at them. Costs
 nothing but time and disk (the 1KG matrices are tens of GB). The worked drivers are in
-`examples/` — deliberately recipes, not supported interfaces — and the one decision they each encode is
+`examples/`, deliberately recipes and not supported interfaces, and the one decision they each encode is
 in the table beside them (`do not publish RD numbers from a chr20 slice`).
 
 Start with [local-replay.md](local-replay.md). Note step 1's answer above: `WOMTOOL_JAR unset/missing`
@@ -279,7 +280,7 @@ means this loop is blocked on this machine until you point it at a jar.
 ## 8. Before you change anything here: the offline gate
 
 `make test` must pass with **no credentials, no data, no network**, and its seven parts each exist
-because the previous one proved insufficient — the comparator that was dead on every real invocation
+because the previous one proved insufficient: the comparator that was dead on every real invocation
 passed `py_compile` *and* the `--help` sweep, and shipped.
 
 ```
@@ -296,31 +297,30 @@ make test: PASS (offline gate)
 ```
 
 The `13` is a pinned count, not a coincidence: each of those probes reproduces a defect a review
-confirmed, then asserts a **positive control** proving the guarded path was reachable — because "the
+confirmed, then asserts a **positive control** proving the guarded path was reachable, because "the
 guard never fired" and "the guard could not have fired" print the same thing. That number going down is
 a failed gate. The `audit` part fails if the publishable file set holds a credential shape **or any
-value that is one of your own coordinates** — it derives those from your configuration rather than
+value that is one of your own coordinates**; it derives those from your configuration rather than
 shipping anyone's names, so CI grades the shapes and your machine grades your names. It used to be a
 separate target, and a handoff doc shipped nine private coordinates while this gate was green: code is
 compiled, prose is not, so the audit moved inside. `make audit V=1` still runs it alone and prints what
-it read. Both run in CI, and one limit matters — the audit scans the **tracked** set, so stage before
+it read. Both run in CI, and one limit matters: the audit scans the **tracked** set, so stage before
 asking whether a change is publishable.
 
 Two things on a first run. Install the dev file alongside `make setup`
-(`.venv/bin/python -m pip install -r requirements-dev.txt`) — miniwdl and flake8 are dev tools, not
-imports, so `make setup` alone cannot install them. And read the `ok` count, not the pass/fail line: a
+(`.venv/bin/python -m pip install -r requirements-dev.txt`), because miniwdl and flake8 are dev tools, not
+imports, so `make setup` alone cannot install them. And read the `ok` count rather than the pass/fail line: a
 probe whose tool is missing prints `SKIP ... needs miniwdl (pip install -r requirements-dev.txt)` and the
-pinned count then **fails** rather than passing on twelve. A skipped probe proves nothing. That is a
-correction, not the original behaviour — the counter used to add skips to the tally, so "3 ok, 5 skipped"
-passed as 8.
+pinned count then **fails** rather than passing on twelve. A skipped probe proves nothing. This part is a
+correction: the counter used to add skips to the tally, so "3 ok, 5 skipped" passed as 8.
 
-If a defect you just reproduced is fixed here, it belongs in `scripts/probe_fixes.py` — one function,
+If a defect you just reproduced is fixed here, it belongs in `scripts/probe_fixes.py`: one function,
 one `PROBES` entry, and the count raised in `scripts/selftest.sh`.
 
 ## 9. The agents' door
 
 `.pi/skills/gatk-sv-testkit/` ships the skill that drives this repo, and its wrapper dispatches
-**only** read-only modes — the refusals are executed by `make test`, so "submit is refused" stays a
+**only** read-only modes: the refusals are executed by `make test`, so "submit is refused" stays a
 checked claim rather than a sentence:
 
 ```
@@ -346,7 +346,7 @@ checkout, `show` first, and say out loud where the write goes, what it costs, an
 | images, registries, the VM lifecycle, the gcr grant | [docker-builds.md](docker-builds.md) |
 | the trainer, locally, on a real run's inputs | [local-replay.md](local-replay.md) |
 | every config key and where it resolves from | [config.md](config.md), [setup.md](setup.md) |
-| an error you are holding right now | [troubleshooting.md](troubleshooting.md) — keyed on the verbatim text |
+| an error you are holding right now | [troubleshooting.md](troubleshooting.md) (keyed on the verbatim text) |
 | supporting a module other than genotyping | [module-profiles.md](module-profiles.md) (a proposal, not a feature) |
 | the bar for adding a tool | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 

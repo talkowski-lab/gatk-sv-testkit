@@ -3,7 +3,7 @@
 A real capture from one head-to-head: the v1.1.1 baseline on the left, a branch
 trainer on the right. Produced by `compare/compare_batch_tables.py` (stdlib only,
 read-only, no network, no Terra). Your columns and values will differ; the verdict
-vocabulary is the point -- MATCH / DELTA / MISSING / STRATEGY, where STRATEGY means
+vocabulary is the point: MATCH / DELTA / MISSING / STRATEGY, where STRATEGY means
 this row changed by design and must never be diffed as a bare number.
 
 ```
@@ -23,7 +23,7 @@ DELTAs for both evidence types; RD state-0 mean/sd agree to ~13 s.f. (MATCH) whi
 rows differ (0.615152 vs 0.6151515..., 0.703763604621896 vs 0.7011975175605271); the four SR frequency
 cutoffs are labelled STRATEGY (v1.1.1 fitted loose-single/strict-both on purpose); SR_sum_log_pval /
 PE_log_pval vs SRQ / PEQ are never diffed numerically because the new metric is GATK QUAL =
--10*log10(p) -- the 10x-reconciled check prints in NOTES instead.
+-10*log10(p); the 10x-reconciled check prints in NOTES instead.
 
 ## stdout
 
