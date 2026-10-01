@@ -267,12 +267,12 @@ One trap worth knowing about: a build VM acts as **its own** service account.
 `--impersonate-service-account` changes the API caller instead of the VM, so it cannot fix a denied push;
 the fix is the bucket grant the `INFO` line prints.
 
-## 7. Loop: "run the real trainer on the real inputs, locally"
+## 7. Loop: "run a real GATK stage on the real inputs, locally"
 
 The inputs of a captured successful run, staged; a locally built GATK jar, pointed at them. Costs
-nothing but time and disk (the 1KG matrices are tens of GB). The worked drivers are in
-`examples/`, deliberately recipes and not supported interfaces, and the one decision they each encode is
-in the table beside them (`do not publish RD numbers from a chr20 slice`).
+nothing but time and disk (the 1KG matrices are tens of GB). The worked drivers in `examples/` run the
+genotyping trainers, today's main use; they are deliberately recipes and not supported interfaces, and the
+one decision they each encode is in the table beside them (`do not publish RD numbers from a chr20 slice`).
 
 Start with [local-replay.md](local-replay.md). Note step 1's answer above: `WOMTOOL_JAR unset/missing`
 means this loop is blocked on this machine until you point it at a jar.
@@ -344,10 +344,10 @@ checkout, `show` first, and say out loud where the write goes, what it costs, an
 | why the static checks report what they report | [static-checks.md](static-checks.md) |
 | a number you can publish | [comparators.md](comparators.md) |
 | images, registries, the VM lifecycle, the gcr grant | [docker-builds.md](docker-builds.md) |
-| the trainer, locally, on a real run's inputs | [local-replay.md](local-replay.md) |
+| a GATK stage, locally, on a real run's inputs | [local-replay.md](local-replay.md) |
 | every config key and where it resolves from | [config.md](config.md), [setup.md](setup.md) |
 | an error you are holding right now | [troubleshooting.md](troubleshooting.md) (keyed on the verbatim text) |
-| supporting a module other than genotyping | [module-profiles.md](module-profiles.md) (a proposal, not a feature) |
+| supporting GATK-SV modules beyond genotyping | [module-profiles.md](module-profiles.md) (planned, not yet a feature) |
 | the bar for adding a tool | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 
 When something breaks, **grep `docs/troubleshooting.md` for the verbatim string** before searching the

@@ -45,6 +45,27 @@ One limit to know before you trust a green gate: the audit scans the **git-track
 in an untracked file passes `make test` and fails it one commit later, so `git add` first when the
 question is "is this ready to publish".
 
+## Layout
+
+Where a new file goes, and what each directory is allowed to depend on:
+
+```
+docker/     build and push any branch's images, with no local Docker
+terra/      the Terra loop: recon, baseline freezing, method configs, status, cost, fetch, compare
+checks/     static checks: WDL launchability, WDL semantics, sv_shell JSON contract, image byte-proof
+compare/    comparators for keyed tables, matrices, VCF fields, sets and bundles, plus an
+            artifact tally that refuses to report agreement on nothing
+kit/        the config layer that every tool reads; bash 3.2, no dependencies
+replay/     rebuild a launchable input JSON from a captured successful run
+scripts/    the publish guard, the WDL fetcher, and the gate's own tooling
+examples/   worked drivers from a real investigation, kept as recipes
+docs/       one page per job, with the gotchas keyed on their verbatim error text
+.pi/skills/ the agent skill and its read-only wrapper
+```
+
+`make help` prints the target index and every tool takes `--help`; the offline gate runs that `--help`
+with zero configuration.
+
 ## The bar for a new tool
 
 **It removes an hour of waiting, or it catches a bug before it costs VM money.** If it does neither, it
