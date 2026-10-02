@@ -52,7 +52,7 @@ code, in more places than revision 1 admitted.
 | `terra/batch_check_inputs.py:42` `WDLS` | step→workflow map: **copy 1 of 3** |
 | `terra/batch_save_metadata.py:36` `STEPS` | step→workflow map: copy 2 of 3 |
 | `terra/batch_status.py:27` `STEPS` | the 5-step chain: copy 3 of 3 (revising a claim made in rev 1: `batch_status.py` *does* hardcode the genotyping chain) |
-| `terra/batch_fetch_compare.sh:36-38` | the exported-attribute list: **7** names, and the largest concentration of genotyping literals after `batch_configs.py` |
+| `terra/batch_fetch_compare.sh:141-148` (its header names 5 of the 7 at `:36-39`) | the exported-attribute list: **7** required + 10 optional names, and the largest concentration of genotyping literals after `batch_configs.py`. Still a literal (no `export` field exists to hold it: §9 step 4 names the schema change), and now guarded — `scripts/selftest.d/profiles.sh` compares it against the attributes the profile says the chain writes |
 | `terra/batch_rerun_step.py` | `CONFIG = "10-GenotypeBatch-rerun"`, `ETYPE = "sample_set"`, the `GenotypeBatch.` key prefix, `body("10-GenotypeBatch")` |
 | `terra/stage_inputs.py:10,346` | `genotyped_depth_vcf` inside a generic tool's *help and error text* |
 | `checks/wdl_gate.sh:61` | `WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)` |
@@ -530,14 +530,49 @@ tables, and `rerun.sh` pins the agreement step by step *plus* the control that a
 shows up in the map (that control fails on the literals, which is what makes the agreement check a claim
 about one source rather than a tautology).
 
-Still open in step 4, each with its guard named in item 4 above: `terra/batch_fetch_compare.sh`'s 7-name
-export list, `replay/build_inputs.py`'s `SVShell.` prefix, the jar-probe target+flags, and
-`fetch_baseline.py:160`'s `!! no config for step`, which prints and continues -- its comment at `:108`
-says why it declines `steps.match_configs` (that lookup answers a request for a known step; this one
-enumerates a workspace). `checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item
-4's first guard is that a profile naming only `GenotypeBatch` would silently drop three of the four
-workflows it certifies, in the one tool whose comment says an unchecked workflow must fail. Step 5 stays
-open, and §11's questions (1, 2, 3) are unanswered.
+Still open in step 4, one bullet per item, each saying what is actually blocking it:
+
+* **`terra/batch_fetch_compare.sh`'s export list (7 required + 10 optional names): still a literal, and
+  the blocker is a schema field that does not exist, not work left undone.** §3 rule 5's `export` is the
+  field meant to hold it; `kit/module_profile.py` does not have it — `STEP_FIELDS` is
+  `step, wdl, workflow, rootEntityType, inputs, outputs, branch_only_inputs`, so a profile carrying
+  `export` is refused (measured: `unknown field 'export'`, exit 4). And no field that *does* exist
+  reproduces the seven, which is the thing to know before adding one: the terminal step's outputs are
+  **10** attributes, **8** once §3 rule 4's `_index` siblings are excluded, and the fetched 7 are those 8
+  minus **`regeno_coverage_medians`** — which the script lists as OPTIONAL. So deriving the list from the
+  profile as it stands would promote that one attribute to *required*, and "required" is the script's
+  exit code (`fetch incomplete: N required *<new> attribute(s) not set yet` → `return 1`): every baseline
+  whose chain never wrote `regeno_coverage_medians` would start failing a fetch that passes today. That
+  is a question to ask with a real run in hand, so it was **asked and rejected** rather than settled
+  inside a refactor whose promise was "collapse, don't duplicate".
+
+  What ships instead is the guard that makes the eventual swap checkable:
+  `scripts/selftest.d/profiles.sh`'s export-list probe runs `terra/batch_fetch_compare.sh fetch
+  --dry-run` — which touches no Terra, no bucket and no dependency, so it has no SKIP branch — and asserts
+  the 7 and the 10 against the attributes the profile says the chain writes, **stating the one-name delta
+  as a fact instead of pretending the sets are equal**. Falsified from both sides: renaming a
+  terminal-step output *in the profile* fails 2 of its 6 assertions; making the rejected promotion (move
+  `regeno_coverage_medians` into the required list) fails 3; renaming a required name to an attribute no
+  step writes fails 2. **To finish this item in one move:** add `export` to `STEP_FIELDS` and to the
+  `Loaded` surface in `kit/module_profile.py`, give `profiles/genotyping.json` its per-step `export`
+  names, and read them in `batch_fetch_compare.sh` the way the suffixes are already read. That probe is
+  what tells the author whether the change kept the seven names — do not re-derive it, and do not
+  re-litigate the promotion without a run that shows whether the attribute is always written.
+* **the jar-probe target+flags: not done, and not this lane's file.** The three flags are at
+  `checks/image-check/jar_flag_probe.sh:52` and `checks/image-check/svshell_image_check.sh:148` (`for f
+  in rd-depth-table rd-pesr-table rd-table`) with the VM target in `run_in_image.sh`'s `$RUN_TARGET` —
+  `checks/**`, which a concurrent lane owns. Recorded here rather than quietly dropped, because a
+  still-open item that looks finished costs the next reader a whole lane to rediscover.
+* `replay/build_inputs.py`'s `SVShell.` prefix and `fetch_baseline.py`'s `!! no config for step` — the
+  two remaining names in item 4's list. Both have moved since the paragraph above was written, and each
+  is taken up on its own immediately below rather than in a list, because "still open" that is already
+  shut is worse than an absent list.
+
+`checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item 4's first guard is that
+a profile naming only `GenotypeBatch` would silently drop three of the four workflows it certifies, in
+the one tool whose comment says an unchecked workflow must fail. Step 5 is graded below (it stays open:
+both candidates fail the test, with the wrong field named for each), and §11's questions (1, 2, 3) are
+unanswered.
 
 ## 10. What this makes newly possible to get wrong
 

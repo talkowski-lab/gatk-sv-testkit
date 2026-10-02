@@ -111,6 +111,15 @@ for e in sys.argv[3:]:
     elif field == "split_wdl":
         step = doc["steps"][0]
         step["wdl"], step["workflow"] = "DepthClustering", "ClusterDepth"
+    elif field == "rename_output":                        # old:new attribute name, on the LAST step
+        old, _colon, new = value.partition(":")
+        step = doc["steps"][-1]
+        outs = step["outputs"]
+        # What drifts in real life is the ATTRIBUTE the step writes (the value), so the value moves with
+        # the key: a guard that read only the binding keys would not notice either.
+        for k in list(outs):
+            if k.endswith("." + old):
+                outs[k[:-len(old)] + new] = outs.pop(k).replace("this." + old, "this." + new)
 json.dump(doc, open(dst, "w"), indent=2)
 PY
 }
@@ -237,6 +246,149 @@ if [ -e "$TMP/never-created" ]; then
 else
     ok=$((ok + 1)); printf '  ok    and the scratch directory it could have created is still absent\n'
 fi
+
+# 11. The fetch loop's export list, and the one attribute the profile says the chain also writes.
+#
+# `terra/batch_fetch_compare.sh` still carries its fetched-attribute list as literals (the last item of
+# docs/module-profiles.md §9 step 4 that this lane could not collapse: `export` is not a profile field --
+# §3 rule 5 -- so `kit/module_profile.py` refuses it as `unknown field 'export'`, and the data for it is
+# not in profiles/genotyping.json either). What ships here is the GUARD, so that the literal can be
+# replaced by data in one safe move later: it compares the names the script plans to fetch, read off its
+# own `fetch --dry-run` output, with the attributes the module profile says the chain writes.
+#
+# `fetch --dry-run` touches no Terra and no bucket: it prints the plan and returns (the entity read is
+# behind `if [ "$DRY_RUN" -eq 1 ]`), which is what makes this assertion machine-independent. It needs no
+# dependency either -- no firecloud, no miniwdl, no checkout -- so unlike most of `make selftest` it has
+# no SKIP branch at all: it either runs or the phase fails.
+#
+# The delta is stated, not smoothed over. Measured here, at this commit:
+#   * derived from the profile -- terminal step's `this.*` outputs, `_index` siblings excluded because §3
+#     rule 4 makes index closure a code rule -- 8 names;
+#   * fetched as REQUIRED by the script: 7 names;
+#   * the one difference: `regeno_coverage_medians`, which the script lists as OPTIONAL.
+# That difference is the finding. "Required" is the script's exit code (`fetch incomplete: N required
+# *<new> attribute(s) not set yet` and `return 1`), so deriving the list from the terminal step's outputs
+# would make every baseline whose chain never wrote `regeno_coverage_medians` fail a fetch that succeeds
+# today. That question needs a real run in hand, not a refactor whose promise was "collapse, don't
+# duplicate", so the literal stays and §9 step 4 names the schema field that would let it go.
+cat > "$TMP/export-guard.py" <<'PY'
+"""The fetch loop's export list vs the attributes the module profile says the chain writes.
+
+Both sides are read, never typed: the script's list comes from its own dry-run plan, the chain's from
+`kit/module_profile.load()` (so `GSVTK_MODULE_DIR` moves the derived side, which is how the control below
+breaks it). The suffix that turns an attribute into a workspace attribute name comes from the one
+resolver both languages use, `module_profile.suffixes()`.
+"""
+import os
+import subprocess
+import sys
+
+ROOT = sys.argv[1]
+sys.path.insert(0, os.path.join(ROOT, "kit"))
+import module_profile                                          # noqa: E402  (kit/ is a sys.path entry)
+
+SFX = module_profile.suffixes()["new"]
+REQUIRED_PLAN = "gsutil cp"                       # the line shape of a REQUIRED attribute in --dry-run
+OPTIONAL_PLAN = "fetched only if the config exports it"
+# The known delta, stated as data so the guard fails the day it stops being the whole story.
+KNOWN_EXTRA = "regeno_coverage_medians"
+
+bad, good = [], []
+
+
+def check(cond, desc, detail=""):
+    (good if cond else bad).append(desc)
+    print(("  ok    " if cond else "  FAIL  ") + desc + (("  <%s>" % detail) if detail else ""))
+
+
+def plan_lines(work):
+    """(exit, required names, optional names) from `batch_fetch_compare.sh fetch --dry-run`."""
+    env = dict(os.environ)
+    env.update({"GSVTK_WORK": work, "GSVTK_PYTHON": sys.executable, "TERRA_PY": sys.executable,
+                # the offline belt this phase's sibling rerun.sh uses: an escaped request is a refused
+                # connection here, never a call to Terra
+                "GSVTK_TERRA_API_ROOT": "http://127.0.0.1:9/api/"})
+    r = subprocess.run(["bash", "terra/batch_fetch_compare.sh", "fetch", "--dry-run"],
+                       cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       universal_newlines=True)
+    req, opt = [], []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("[plan] "):
+            continue
+        name = line[len("[plan] "):].split(":", 1)[0].strip()
+        if name.endswith(SFX):
+            name = name[:-len(SFX)]
+        if REQUIRED_PLAN in line:
+            req.append(name)
+        elif OPTIONAL_PLAN in line:
+            opt.append(name)
+    return r.returncode, req, opt, r.stdout
+
+
+def leaf(value):
+    """`this.cutoffs_new` / `workspace.merge_batch_sites_vcf_new` -> the attribute name."""
+    for prefix in ("this.", "workspace."):
+        if value.startswith(prefix):
+            name = value[len(prefix):]
+            return name[:-len(SFX)] if name.endswith(SFX) else name
+    return None
+
+
+os.chdir(ROOT)
+rc, req, opt, out = plan_lines(sys.argv[2])
+check(rc == 0 and len(req) == 7 and len(opt) == 10,
+      "fetch --dry-run plans exactly 7 required + 10 optional attributes, and exits 0 (a plan loop that "
+      "ran zero times would print neither)", "exit %s, %d required, %d optional" % (rc, len(req), len(opt)))
+
+prof = module_profile.load()
+prof.require("profiles.sh export guard")
+steps = sorted(prof.configs)
+terminal = steps[-1]
+term_out = set(filter(None, (leaf(v) for v in prof.configs[terminal]["outputs"].values())))
+term_nonindex = {a for a in term_out if not a.endswith("_index")}
+all_out = set()
+for s in steps:
+    all_out |= set(filter(None, (leaf(v) for v in prof.configs[s]["outputs"].values())))
+
+check(terminal.startswith("10-") and len(term_out) == 10 and len(term_nonindex) == 8,
+      "the module profile's terminal step writes 10 attributes, 8 of them not an `_index` sibling "
+      "(index closure is §3 rule 4's code rule, so an index is never itself a required fetch)",
+      "%s writes %d, %d non-index" % (terminal, len(term_out), len(term_nonindex)))
+check(not (set(req) - term_nonindex),
+      "every attribute the script calls REQUIRED is one the terminal step actually writes (a fetch entry "
+      "for an attribute no step writes is a permanent `[missing]` line)",
+      "not written: %s" % ", ".join(sorted(set(req) - term_nonindex)))
+check(not (set(opt) - all_out),
+      "every OPTIONAL name is an attribute some step of the chain writes, across all %d steps "
+      "(the optional list is chain data too, not a wishlist)" % len(steps),
+      "not written: %s" % ", ".join(sorted(set(opt) - all_out)))
+extra, missing = sorted(term_nonindex - set(req)), sorted(set(req) - term_nonindex)
+check(extra == [KNOWN_EXTRA] and not missing,
+      "the delta between the derived 8 and the fetched 7 is exactly the one named attribute, and it is "
+      "listed by the script as OPTIONAL rather than required",
+      "derived-not-fetched %s, fetched-not-derived %s, optional list holds it: %s"
+      % (extra or "-", missing or "-", KNOWN_EXTRA in opt))
+check(KNOWN_EXTRA in opt,
+      "and the delta name is fetched when present, so nothing is dropped -- only not demanded",
+      "optional plan: %s" % ", ".join(opt))
+
+print("export-list guard: %d ok, %d failed  (delta: %s is derived-and-optional, never derived-and-required)"
+      % (len(good), len(bad), KNOWN_EXTRA))
+sys.exit(1 if bad else 0)
+PY
+want "the fetch loop's 7 required attributes agree with what the module profile says the chain writes" 0 \
+    "export-list guard: 6 ok, 0 failed" "regeno_coverage_medians is derived-and-optional" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/guardwork" \
+    "$PY" "$TMP/export-guard.py" "$ROOT" "$TMP/guardwork"
+# CONTROL, and the reason the agreement above is a claim about the data rather than a paraphrase of the
+# script: rename one terminal-step output IN THE PROFILE and the derived side moves while the script's
+# literals cannot. On hand-typed-equality code nothing would change; here the guard fails by name.
+broken rename_output rename_output=genotyping_pe_table:genotyping_pe_table_v2
+want "CONTROL: renaming a terminal-step output in the profile breaks the export-list guard, by name" 1 \
+    "FAIL" "genotyping_pe_table_v2" "export-list guard: " -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/guardwork2" GSVTK_MODULE_DIR="$TMP/mod-rename_output" \
+    "$PY" "$TMP/export-guard.py" "$ROOT" "$TMP/guardwork2"
 
 printf 'profiles selftest: %s ok, %s failed\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]
