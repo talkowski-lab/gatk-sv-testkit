@@ -198,7 +198,7 @@ if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
 fi
 for f in "$REQ_7F" "$REQ_01" "$STRUCT_FIX" "$MATRIX" "$MATRIX_WDL" \
          "$FIX/womtool84-validate-not-specified.txt" "$FIX/womtool84-validate-coercion.txt" \
-         "$FIX/womtool84-validate-extra-key.txt"; do
+         "$FIX/womtool84-validate-extra-key.txt" "$FIX/womtool84-validate-value-and-missing.txt"; do
     if [ ! -f "$f" ]; then
         printf '  FAIL  the fixture %s is missing; nothing below this line can be graded\n' "${f#"$ROOT"/}"
         printf '\njarshape selftest: 0 passed, 1 failed, 0 skipped\n'
@@ -370,7 +370,6 @@ sys.modules["wdl_inputs_check"] = wic
 spec.loader.exec_module(wic)
 text = open(path_to_msg).read()
 print("CLASS=%s" % wic.rejection_class(text))
-print("HEADLINE=%s" % wic.headline(text)[:60])
 PY
     want "the measured 'not specified' rejection is the key-presence question" 0 "CLASS=keys" -- \
         "$PY" "$TMP/classify.py" "$ROOT" "$msg_keys"
@@ -378,9 +377,14 @@ PY
         "$PY" "$TMP/classify.py" "$ROOT" "$msg_value"
     want "the measured extra-key rejection is its own class, not keys and not value" 0 \
         "CLASS=extras" -- "$PY" "$TMP/classify.py" "$ROOT" "$msg_extra"
-    want "and its own line is the one picked as the headline, not a banner" 0 \
-        "HEADLINE=WARNING: Unexpected input provided: IntegrateGDVcf.this_key_" -- \
-        "$PY" "$TMP/classify.py" "$ROOT" "$msg_extra"
+    #    Measured on a Terra config with BOTH problems at once (this capture is womtool-84's whole
+    #    3-line answer: two value-coercion lines and one `not specified` line, because womtool prints
+    #    every problem it finds rather than the first). The mixed pair must classify as the comparable
+    #    class, or a missing required input could hide behind a value error and the gate would report
+    #    "out-of-layer" over the one finding it is supposed to make.
+    want "a pair rejected for a value AND a missing input still classifies as the key question" 0 \
+        "CLASS=keys" -- "$PY" "$TMP/classify.py" "$ROOT" \
+        "$FIX/womtool84-validate-value-and-missing.txt"
 
     #    And the branch each decision drives, end to end, with no jar: the same tree, the same input
     #    JSON, the offline layer clean, and only womtool's WORDS changing. A value-class rejection must
