@@ -80,15 +80,18 @@ real run could pick up your test build.
 python terra/recon.py                         # read-only look at the workspace and baseline run
 python terra/batch_freeze.py plan             # what would be copied from the baseline
 python terra/batch_freeze.py copy --write     # copy the baseline's inputs into your bucket
-python terra/batch_rerun_step.py submit --confirm   # rerun the stage with your branch's images
+python terra/batch_rerun_step.py --step 08 submit --confirm   # rerun that stage with your branch's images
 python terra/batch_status.py --costs          # check progress and cost
 terra/batch_fetch_compare.sh all              # download the outputs and compare them to the baseline
 ```
 
 Save one good run as a baseline, rerun the stage you changed on the same inputs, and compare. It costs far
 less than running the whole pipeline twice, and you know the inputs matched. Commands that change anything
-outside your machine refuse to run until you pass `--confirm` or `--write`. For now,
-`batch_rerun_step.py` only reruns GenotypeBatch; support for other stages is planned. The [Terra
+outside your machine refuse to run until you pass `--confirm` or `--write`. `--step` picks the stage, and
+`batch_rerun_step.py` reruns any of the five batch stages 06, 07, 08, 09, 10 — printing the workflow, config
+name and root entity it resolved to before it does anything, so you see which stage you asked for. The
+single-sample stages are not on that list: the freeze loop cannot write a participant entity at all, so
+there is nothing frozen to rerun against (see [module profiles](docs/module-profiles.md)). The [Terra
 head-to-head](docs/terra-head-to-head.md) guide covers the full sequence.
 
 ### Run a stage locally
@@ -142,7 +145,7 @@ terra/
   batch_freeze.py              copy the inputs into your own bucket: plan | copy | verify | attrs
   batch_configs.py             manage the method configs that wire files to stages
   batch_check_inputs.py        check a stage's config against its WDL, and that its input files exist
-  batch_rerun_step.py          rerun a stage with your branch's code and images (GenotypeBatch for now)
+  batch_rerun_step.py          rerun one stage of 06-10 with your branch's code and images
   batch_status.py              check whether jobs have finished and what they cost
   batch_peek.py                see what's running, what retried, and what failed first
   batch_save_metadata.py       save a run's metadata locally

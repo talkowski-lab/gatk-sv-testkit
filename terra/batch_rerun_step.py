@@ -247,8 +247,7 @@ def entity(r: dict) -> str:
     name = _row_name(r)
     if not name:
         raise SystemExit(
-            f"step {r['step']} ({r['workflow']}) is submitted against a "
-            f"{r['root_entity']} row, and\n  "
+            f"step {r['step']} ({r['workflow']}) is submitted against a {r['root_entity']} row, and\n"
             f"  GSVTK_BATCH={config.get('BATCH', 'all_samples')!r} names a sample_set, not a "
             f"{r['root_entity']}.\n"
             "  pass --entity <cohort-name> (the sample_set_set row your workspace holds -- the row the\n"
