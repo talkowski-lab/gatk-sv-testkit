@@ -103,9 +103,9 @@ Things that are per-invocation rather than per-user stay as flags or their own v
 | Variable | Tool | Meaning |
 |---|---|---|
 | `FISS_API_URL` | `terra/terra.py` | last-word override of the API root, above `GSVTK_TERRA_API_ROOT` |
-| `JAVA` | `batch_check_inputs.py`, `batch_fetch_compare.sh` | the `java` used for womtool and for the GATK jar |
+| `JAVA` | `batch_check_inputs.py`, `batch_fetch_compare.sh`, `checks/wdl_gate.sh` | the `java` used for womtool and for the GATK jar; the gate runs `java -jar $WOMTOOL_JAR validate` with it, and names the layer as skipped when it is not on PATH |
 | `GSVTK_PYTHON` | `kit/config.sh` | interpreter used to resolve config (>=3.9) |
-| `WOMTOOL_JAR` | `terra/batch_check_inputs.py` | path to a womtool jar; required; a missing one is reported as a missing prerequisite rather than a crash |
+| `WOMTOOL_JAR` | `terra/batch_check_inputs.py`, `checks/wdl_gate.sh` | path to a womtool jar. `batch_check_inputs.py` requires it and refuses without it. `checks/wdl_gate.sh` does **not**: its input-binding layer answers the key-presence question offline (`checks/wdl_inputs_check.py`, miniwdl AST + the key sets of the input JSONs the ref renders), and uses the jar only to also run CI's exact `womtool validate` per pair and compare the two answers. Unset or missing: that comparison prints a named, counted `SKIPPED — <reason>` row (never a crash, never silence), and `--strict` fails on it — a check that could not run is not a check that passed |
 | `MINIWDL` | `checks/wdl_gate.sh`, `terra/wdl_flat.py` | the miniwdl executable, and it is optional: without it both resolve `$PATH` → the bin next to the interpreter → `./.venv/bin` (one resolver, `./kit/gsvtk-config miniwdl`, prints the path it chose). `make setup` installs miniwdl into a venv your shell has not activated, so a PATH-only lookup reported the checker missing on machines where it passes |
 | `JAR`, `GATK_JAR` | examples, `batch_fetch_compare.sh` | a locally built GATK jar |
 | `PROFILE_BIN` | `batch_fetch_compare.sh` | an installed `gatk-sv-profile` |

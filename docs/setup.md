@@ -25,8 +25,9 @@ Extras you opt into:
 |---|---|---|
 | `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it; see `./kit/gsvtk-config miniwdl` |
 | `make flake` | `flake8` (used only as a pyflakes runner, `--select=F`) | `python -m pip install -r requirements-dev.txt`. `make test` SKIPs it with this named when it is absent, and CI is where it is enforced |
+| `checks/wdl_gate.sh` (the `MISSING-INPUTS` column) | `jinja2`, because gatk-sv's own `scripts/inputs/build_inputs.py` imports it | `python -m pip install -r requirements-dev.txt`. The gate looks for an interpreter that can `import jinja2` the same way it looks for miniwdl; none found is a counted `SKIPPED`, not a silent pass |
 | `checks/svshell_jq_plumbing_scan.py` | `jq` on PATH | `brew install jq` / `apt-get install jq` |
-| `terra/batch_check_inputs.py` | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar` |
+| `terra/batch_check_inputs.py`, `checks/wdl_gate.sh` (the womtool comparison only) | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar`. The gate's input-binding layer runs without it and prints a counted `SKIPPED` line for the part that needs it; `batch_check_inputs.py` refuses outright |
 | `compare/*` (some) | `bcftools`, `pysam`, `pandas` | `bcftools` via your package manager; the rest in requirements |
 | `compare/profile_summarize.py` | `numpy`, `pandas` | reads `gatk-sv-profile`'s bucketed `.tsv.gz` tables |
 | paired profiling | [`gatk-sv-profile`](https://github.com/broadinstitute/gatk-sv-profile) | `pip install -e <checkout>`, then `export PROFILE_BIN=...` |
