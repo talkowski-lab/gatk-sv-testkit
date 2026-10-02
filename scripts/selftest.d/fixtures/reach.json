@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "reach",
+  "_why_name": "Synthetic one-step module profile for scripts/selftest.d/reach.sh. It exists so the module-profile source of `reach --images` is exercised against data rather than against an absent file, and so a Terra-flavoured binding (`workspace.<key>`, a value the tree cannot see) has to be reported as UNRESOLVED with a reason instead of being quoted back as an image. Nothing here is a real module, step or workspace attribute.",
+  "callers": ["manta"],
+  "steps": [
+    {
+      "step": "99-Renamed",
+      "wdl": "Renamed",
+      "workflow": "ClusterDepthByProfile",
+      "rootEntityType": "sample_set",
+      "inputs": {
+        "ClusterDepthByProfile.in_file": "this.input_vcf",
+        "ClusterDepthByProfile.sv_pipeline_docker": "workspace.sv_pipeline_docker"
+      },
+      "outputs": {
+        "ClusterDepthByProfile.n": "this.reach_count_new"
+      }
+    }
+  ]
+}

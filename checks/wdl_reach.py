@@ -606,11 +606,18 @@ def docker_input_decls(doc) -> list:
     invent a binding surface the workflow does not have.
     """
     wf = getattr(doc, 'workflow', None)
+    decls = getattr(wf, 'inputs', None) or []
+    # miniwdl has always handed back a list of declarators here; a dict would be just as readable, and
+    # arguing about which one it is would be a crash in the middle of an answer.
+    items = list(decls.values()) if isinstance(decls, dict) else list(decls)
     out = []
-    for name, decl in sorted((getattr(wf, 'inputs', None) or {}).items()):
+    for decl in items:
+        name = str(getattr(decl, 'name', '') or '')
         if not DOCKER_INPUT.search(name):
             continue
-        out.append((name, str(decl.type), default_as_written(doc, decl), decl.pos.line))
+        out.append((name, str(getattr(decl, 'type', '')), default_as_written(doc, decl),
+                    decl.pos.line))
+    out.sort()
     return out
 
 
@@ -749,18 +756,21 @@ def gather_image_sources(a, root) -> dict:
            'profile': {}, 'profile_status': 'skipped', 'profile_reason': '', 'profile_path': '',
            'head_sha': '', 'head_whence': '', 'render': None}
     tree = ''
+    # ONE resolution for "the clone": the rendered JSONs and the commit under review have to come from
+    # the same tree, because comparing an image tag's sha against a DIFFERENT tree's HEAD would print a
+    # confident answer to a question nobody asked.
+    checkout = (a.checkout or (str(root) if os.path.isdir(os.path.join(str(root), 'inputs'))
+                               else '') or cfg_get('GATK_SV_CHECKOUT'))
     if a.inputs_root:
         tree = a.inputs_root
         candidate = os.path.join(a.inputs_root, 'inputs', 'build')
         if os.path.isdir(candidate):
             src['json_root'] = candidate
-            src['json_reason'] = 'given by --inputs-root '
+            src['json_reason'] = 'given by --inputs-root'
         else:
             src['json_reason'] = ('no inputs/build under --inputs-root ' + a.inputs_root
                                   + ' (render one with checks/wdl_inputs_check.py --render-only)')
     else:
-        checkout = (a.checkout or (str(root) if os.path.isdir(os.path.join(str(root), 'inputs'))
-                                   else '') or cfg_get('GATK_SV_CHECKOUT'))
         if not checkout:
             src['json_reason'] = ('nothing to render from: GSVTK_GATK_SV_CHECKOUT is unset and neither '
                                   '--inputs-root nor --checkout was given')
@@ -787,8 +797,7 @@ def gather_image_sources(a, root) -> dict:
     if a.head_sha:
         src['head_sha'], src['head_whence'] = a.head_sha, '--head-sha'
     else:
-        src['head_sha'], src['head_whence'] = git_head(tree or a.checkout or cfg_get('GATK_SV_CHECKOUT'),
-                                                       a.inputs_ref)
+        src['head_sha'], src['head_whence'] = git_head(checkout, a.inputs_ref)
     return src
 
 
@@ -965,7 +974,8 @@ def print_image_answer(rows: list, tally: dict, top: int, verbose: bool) -> None
                     print(ln)
             for h in inp['holes']:
                 print('      ' + inp['input'].ljust(24) + 'UNRESOLVED')
-                for ln in wrap('<- ' + h['reason'], ' ' * 26):
+                src_txt = h['source'] + (': ' + h['where'] if h['where'] else '')
+                for ln in wrap('<- ' + src_txt + '   |   ' + h['reason'], ' ' * 26):
                     print(ln)
     if len(rows) > len(shown):
         print('  … detail for ' + str(len(rows) - len(shown)) + ' more workflow(s) withheld (-v); '
@@ -998,11 +1008,14 @@ def image_verdict(bindings: list, unresolved: list) -> dict:
         for value, rec in values:
             wfs = rec['wfs']
             listed = ', '.join(wfs[:4]) + (' (+' + str(len(wfs) - 4) + ' more)' if len(wfs) > 4 else '')
-            lines += wrap(value + '   [' + rec['verdict'] + ']   bound by: ' + listed, '    ')
+            lines += ['    ' + value]
+            lines += wrap('[' + rec['verdict'] + '] bound by: ' + listed, '        ')
             lines += wrap(rec['reason'], '        ')
     if not bindings:
-        lines.append('  no docker-shaped image is bound by anything in this answer: every reaching '
-                     'workflow binds none, which is an answer rather than a gap')
+        lines.append('  no reaching workflow here binds a literal image' +
+                     (' — the ' + str(len(unresolved)) + ' binding(s) below resolve to something that '
+                      'is not one' if unresolved else ': every one of them binds none, which is an '
+                      'answer rather than a gap'))
     if unresolved:
         lines.append('  binding(s) whose value is not a literal image (' + str(len(unresolved)) + '):')
         for u in unresolved:
