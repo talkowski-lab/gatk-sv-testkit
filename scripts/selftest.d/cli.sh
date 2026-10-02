@@ -338,6 +338,15 @@ expect 'compare accepts the hyphen spelling of an underscore stem' 0 \
     'STUB compare/table_diff.py a b' -- run compare table-diff a b
 expect 'compare --list names the comparators rather than inventing them' 0 \
     'compare/table_diff.py' 'compare/artifact_tally.py' -- run compare --list
+# The header of that list names `gsvtk compare` in backticks, and it used to sit inside DOUBLE quotes
+# -- where a backtick is a command substitution, not typography. The list printed "by the name  takes"
+# and leaked "gsvtk: command not found" from a subshell looking for the entry point on PATH, while the
+# assertion above still passed because it only read the file paths. Quote the typography, and assert
+# the sentence that carries it.
+expect 'and its header is TYPOGRAPHY, not a command substitution that runs gsvtk' 0 \
+    'by the name `gsvtk compare` takes' -- run compare --list
+absent 'so --list never shells out to a gsvtk that may not be on PATH' 0 \
+    'command not found' -- run compare --list
 expect 'compare refuses the reader MODULE and points at its CLI' 2 \
     'artifact_tally.py' -- run compare artifact
 expect 'compare refuses a name that is not a comparator' 2 \

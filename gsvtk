@@ -675,7 +675,7 @@ cmd_compare() {
 }
 
 list_comparators() {
-  printf '%s\n' "compare/ CLIs, by the name `gsvtk compare` takes (each also has --help):"
+  printf '%s\n' 'compare/ CLIs, by the name `gsvtk compare` takes (each also has --help):'
   for f in "$ROOT"/compare/*.py; do
     n="$(basename "$f" .py)"
     case "$n" in artifact|make_fixtures) continue;; esac
