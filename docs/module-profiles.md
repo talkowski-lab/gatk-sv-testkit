@@ -453,7 +453,9 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    tool's `--control` mode asserts the untouched capture **passes**, then deletes one input binding from
    step 06 and one output binding from step 10 out of a copy of the table and requires the comparison to
    **fail** both times — and `scripts/selftest.d/profiles.sh` asserts that control every run
-   (`profiles selftest: 15 ok, 0 failed`). The golden is *not* retired yet, as this step's original text
+   (`profiles selftest: 18 ok, 0 failed` — 15 when this sentence was written; 16 after the export-list
+   guard, 17 after its control, 18 after the `fetch_baseline` counted-gap guard, which carries ten
+   assertions of its own inside one tally line). The golden is *not* retired yet, as this step's original text
    imagined: it stays while `CONFIGS` is populated from data, because it is the only content check the
    loader has. **Merge note:** the rerun lane holds `scripts/selftest.d/golden/rerun-step10-body.json`
    (2473 bytes) captured from the same placeholder coordinates (`your-namespace` /
