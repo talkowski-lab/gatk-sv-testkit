@@ -40,10 +40,12 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
@@ -325,6 +327,118 @@ class CannotCheck(Exception):
     that skips a workflow and still says 'clean' is the failure mode this repo keeps meeting."""
 
 
+# ------------------------------------------------------------------ template read (§9 step 3)
+# Where production says what it binds. `wdl/*.wdl` answers what an input IS; the `.json.tmpl` answers
+# which attribute or literal FEEDS it, and nothing else in the repo holds that wiring: 196 of the 473
+# bindings across the cohort templates point at an attribute whose leaf name differs from the input
+# name (`median_coverage<-this.median_cov`, `rd_file<-this.merged_bincov`).
+TEMPLATE_SUBPATH = "inputs/templates"
+TEMPLATE_PREFERRED = "terra_workspaces/cohort_mode/workflow_configurations"
+
+# The one substitution §4 of docs/module-profiles.md measured: 28 of 28 templates parse with `json.loads`
+# once the Jinja braces are neutralised to `null`. Rendered, they would need `jinja2` AND upstream's
+# `inputs/values/` bundle (their renderer skips a whole template when a referenced value is undefined and
+# defaults `ref_panel -> ref_panel_empty`), which would answer "what did that values profile bind" rather
+# than "what does this ref bind". So: neutralise, parse strictly, never render.
+JINJA_RE = re.compile(r"\{\{.*?\}\}", re.S)
+
+_TREES: dict = {}     # (ref, subpath) -> the unpacked directory, so one `git archive` per pair
+
+
+def _tree_from_ref(ref: str, subpath: str) -> str:
+    """Materialize one subdirectory of <checkout> at <ref> into a temp dir. Read-only by construction.
+
+    `_wdl_dir_from_ref()` is this with subpath `wdl`; the templates need the same discipline, because
+    the only difference between reading a ref and disturbing someone's checkout is `git archive`. It
+    cannot touch the working tree, the index or HEAD, which is the rule `scripts/fetch_wdl.py` keeps.
+    """
+    key = (ref, subpath)
+    if key in _TREES:
+        return _TREES[key]
+    ck = config.get("GATK_SV_CHECKOUT")
+    if not ck or not os.path.isdir(ck):
+        raise CannotCheck("no GSVTK_GATK_SV_CHECKOUT checkout to read it from")
+    tmp = tempfile.mkdtemp(prefix="gsvtk-tree-")
+    atexit.register(shutil.rmtree, tmp, True)
+    r = subprocess.run(["git", "-C", ck, "archive", ref, subpath], capture_output=True)
+    if r.returncode:
+        why = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise CannotCheck(f"git -C {ck} archive {ref} {subpath}: {(why or ['?'])[:1][0]}")
+    if subprocess.run(["tar", "-x", "-C", tmp], input=r.stdout).returncode:
+        raise CannotCheck(f"failed to unpack {subpath} from git archive")
+    _TREES[key] = os.path.join(tmp, subpath.split("/")[0])
+    return _TREES[key]
+
+
+def find_template(tmpl_dir: str, workflow: str) -> str:
+    """The `.json.tmpl` for one workflow, preferring the cohort deployment.
+
+    Upstream keeps several templates per workflow name (`cohort_mode/workflow_configurations/`,
+    `test/<W>/`, `single_sample/`), and the cohort one is what the chain in this repo runs. Preferring
+    it is a lookup rule, not a guess: the path is printed with the verdict, so "which file did you
+    read" is answerable from the output rather than from this function's source.
+    """
+    if not tmpl_dir:
+        return ""
+    want = f"{workflow}.json.tmpl"
+    hits = sorted(p for p in Path(tmpl_dir).rglob(want))
+    if not hits:
+        return ""
+    pref = [p for p in hits if TEMPLATE_PREFERRED in str(p.relative_to(tmpl_dir)).replace(os.sep, "/")]
+    return str((pref or hits)[0])
+
+
+def read_template(path: str) -> dict:
+    """One template read STRUCTURALLY: {state, keys, neutralised, error}.
+
+    `state` is what `check` prints per step: DERIVED (strict parse, no Jinja), JINJA-NEUTRALISED (the
+    braces were replaced by `null` first, and the count of them is stated), NO TEMPLATE (no such file at
+    this ref), CANNOT PARSE (a strict `json.loads` refused it after the one substitution -- a finding
+    about the document, not a licence to say nothing).
+
+    `keys` maps each top-level binding to its value as read, and a value that was Jinja becomes None --
+    which is honest: neutralising is lossy about the VALUE, and this file never pretends to render.
+    Keys are counted, never scraped with a regex: `_declared_inputs()` refuses regex for a documented
+    reason (a nested object like `runtime_override_plot_qc_per_family: {"mem_gb": 15}` was once
+    miscounted that way, 12 reported where the template binds 10), and this is the same class of
+    document.
+    """
+    if not path:
+        return {"state": "NO TEMPLATE", "keys": {}, "neutralised": 0, "error": ""}
+    try:
+        text = open(path).read()
+    except OSError as e:
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": 0, "error": str(e)}
+    n = len(JINJA_RE.findall(text))
+    try:
+        obj = json.loads(JINJA_RE.sub("null", text))
+    except ValueError as e:
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": n, "error": str(e)}
+    if not isinstance(obj, dict):
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": n,
+                "error": f"top level is a {type(obj).__name__}"}
+    keys = {str(k): v for k, v in obj.items()}
+    return {"state": "JINJA-NEUTRALISED" if n else "DERIVED", "keys": keys,
+            "neutralised": n, "error": ""}
+
+
+def templates_for_ref(ref: str) -> str:
+    """The templates tree at `ref`, or '' when this command has no readable ref to read one from.
+
+    '' is a stated state, not a silent one: `check --wdl-dir <dir>` points at a dirty tree with no ref
+    at all, so the per-step line prints NO TEMPLATE with the reason. A source that could not be read is
+    never reported as a comparison that passed.
+    """
+    if not ref:
+        return ""
+    try:
+        return _tree_from_ref(ref, TEMPLATE_SUBPATH)
+    except CannotCheck as e:
+        print(f"  templates NOT READ: {e} -- the optional-bound-upstream finding cannot run, so "
+              f"'nothing to report' below is about the WDL only")
+        return ""
+
+
 # Which ref a config's bindings should be compared to. Empty means GSVTK_BRANCH. Set it when the
 # config points somewhere else: batch_rerun_step.py honours GSV_WDL_VERSION, so its Dockstore pin can
 # legitimately differ from GSVTK_BRANCH -- checking BRANCH there would be a guard pointed at a ref
@@ -566,6 +680,56 @@ def _classify_outputs(config_out: dict, declared_out: list[str], has_block: bool
             "problems": len(undeclared) + (1 if empty_config else 0)}
 
 
+def _report_template(tmpl_dir: str, workflow: str, tpl: dict, omitted: list, label: str) -> None:
+    """The template verdict for one step, and the one finding class only the template can give.
+
+    Four states, four sentences, because they mean different remedies: DERIVED and JINJA-NEUTRALISED are
+    both a successful read (the second says values were replaced by `null`, so the KEYS are known and the
+    VALUES are not); NO TEMPLATE says upstream ships nothing for this workflow at this ref; CANNOT PARSE
+    says the document refused the strict parse after the one substitution. None of them is a pass, and
+    none of them is a failure of this config.
+
+    `optional-bound-upstream-but-omitted` is the finding `check_maps` could not see before the templates
+    were read at all: an input the WDL makes OPTIONAL, that production PINS, and that this profile leaves
+    to the WDL default. Nothing else distinguishes "optional, deliberately default" from "optional,
+    forgotten" -- miniwdl is silent about who supplies an optional input, and `validate()` prints
+    `missingInputs` without failing. NON-FATAL by design: for genotyping the answer is recorded in the
+    profile (`_why_unbound` in `profiles/genotyping.json` says `n_RD_genotype_bins` and
+    `fail_on_degenerate_sr_cutoffs` come from the WDL defaults on purpose), and a non-fatal named line is
+    what makes that deliberate choice visible to the next module's author instead of invisible.
+    """
+    where = (os.path.relpath(find_template(tmpl_dir, workflow), tmpl_dir)
+             if tmpl_dir and find_template(tmpl_dir, workflow) else "")
+    if tpl["state"] == "NOT READ":
+        print(f"      TEMPLATE NOT READ  {tpl['error']} -- the production binding map was not "
+              f"compared, so\n        nothing above is evidence about which inputs production pins.")
+        return
+    if tpl["state"] == "NO TEMPLATE":
+        print(f"      NO TEMPLATE   no {workflow}.json.tmpl under {TEMPLATE_SUBPATH} at {label}.")
+        print("        Upstream may bind this workflow elsewhere (test/, single_sample/) or not at all;\n"
+              "        either way the optional-omitted finding had no source, so its absence means nothing.")
+        return
+    extra = (f"; {tpl['neutralised']} value(s) were {{{{ ... }}}} and are read as null, so the KEYS are\n"
+             f"        known and those VALUES are not -- rendering is a different, bundle-dependent thing") \
+        if tpl["neutralised"] else ""
+    if tpl["state"] == "CANNOT PARSE":
+        print(f"      TEMPLATE CANNOT PARSE  {where}: {tpl['error']}\n"
+              "        after the one substitution, so nothing was derived from it. Not counted as a\n"
+              "        problem with this config: it is a finding about that document.")
+        return
+    print(f"      TEMPLATE {tpl['state']:<16} {where}  -- {len(tpl['keys'])} key(s) bound by "
+          f"production at {label}{extra}")
+    for k in omitted:
+        v = tpl["keys"][k]
+        print(f"      optional-bound-upstream-but-omitted  {k} -- upstream's template binds it"
+              + (f" to {v!r}" if v is not None else " (a Jinja value, unread without rendering)")
+              + f",\n        {workflow} declares it optional, and this profile binds nothing, so the WDL "
+              f"default wins.\n        NON-FATAL, and for this module deliberate: see `_why_unbound` in "
+              f"the profile. For a new\n        module it is the case §4 of docs/module-profiles.md names "
+              f"-- an optional input nobody\n        asks about is exactly how a default becomes "
+              f"production behaviour.")
+
+
 def _report_outputs(name: str, workflow: str, declared_out: list[str], g: dict) -> None:
     """The verdict per output key, and one sentence per empty state. `_classify_outputs` decided."""
     if g["empty_config"]:
@@ -617,7 +781,8 @@ def _report_outputs(name: str, workflow: str, declared_out: list[str], g: dict) 
               "(`show` prints what would be POSTed).")
 
 
-def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: str = "") -> int:
+def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: str = "",
+               tmpl_dir: str = "") -> int:
     """Every top-level bound key of BOTH maps vs what that ref declares; every required input vs what is bound.
 
     Call-site bindings (`Workflow.Call.input`) are counted and named but NOT compared: this reads the
@@ -688,6 +853,13 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
                 bound.pop(key.split(".")[-1], None)
         unknown = [k for k in sorted(bound) if k not in declared]
         unbound = sorted(k for k in required if k not in bound)
+        # The template side (§9 step 3): what production binds, read structurally at the same ref.
+        tpl = read_template(find_template(tmpl_dir, workflow)) if tmpl_dir else \
+            {"state": "NOT READ", "keys": {}, "neutralised": 0, "error": "no ref to read at"}
+        bound_here = set(tgt["inputs"]) | {f"{workflow}.{k}" for k in bound}
+        omitted = sorted(k for k in tpl["keys"]
+                         if k.split(".")[-1] in declared and k.split(".")[-1] not in required
+                         and k not in bound_here and f"{workflow}.{k.split('.')[-1]}" not in bound_here)
         # One line per config, both maps on it: the reader sees in one place that the output side was
         # compared too, how many keys each side had, and which file a JSON config came from.
         summary = (f"{len(bound)} bound vs {len(declared)} declared"
@@ -696,6 +868,9 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
                    + f"  |  {len(g['bound'])} out vs {len(declared_out)} declared"
                    + (f", {len(g['unsaved'])} declared but unbound (not saved; not a defect)"
                       if g["unsaved"] else "")
+                   + (f"  |  template {tpl['state'].replace(' ', '-').lower()}"
+                      f" ({len(tpl['keys'])} key(s) bound upstream)" if tpl["keys"] else
+                      f"  |  template {tpl['state'].lower()}")
                    + ("" if tgt["origin"] == "CONFIGS" else f"   [{tgt['origin']}]")
                    )
         print(f"  {'BAD' if unknown or unbound or g['problems'] else 'ok '} {name:<24} {summary}")
@@ -732,6 +907,7 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
             bad += 1
             print(f"      MISSING {workflow}.{k} -- required by the WDL, bound by nothing, "
                   f"no default to fall back on")
+        _report_template(tmpl_dir, workflow, tpl, omitted, label)
         # The outputs map, after the input findings, so one config's report is one block. Its
         # problems are counted with everything else; the header already showed the verdict.
         _report_outputs(name, workflow, declared_out, g)
@@ -766,7 +942,12 @@ def cmd_check() -> int:
             # A ref you cannot read is not a ref that fits: say what failed, and do not exit 0.
             raise SystemExit(f"cannot read the WDL at {ref}: {e}") from None
         print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
-    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv, ref=ref)
+    # --tmpl-dir is the template side of `--wdl-dir`: a dirty tree has no ref to archive, so the bytes
+    # you want compared are the ones on disk. Both point at a directory, and both are stated on the
+    # per-step line, so "which document did you read" is never a guess.
+    td = _flag_value("--tmpl-dir") or ("" if _flag_value("--wdl-dir") else templates_for_ref(ref))
+    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv, ref=ref,
+                      tmpl_dir=td)
 
 
 def preflight(tag: str) -> None:
@@ -799,7 +980,7 @@ def preflight(tag: str) -> None:
         raise SystemExit(f"{tag}: refusing to continue -- cannot read the WDL at {ref}: {e}.\n"
                          f"  Unverified is not verified. Fix the ref/checkout, or say you mean it "
                          f"with --allow-unknown-inputs.") from None
-    if check_maps(wd, drop=DROP_FLAG in sys.argv, ref=ref):
+    if check_maps(wd, drop=DROP_FLAG in sys.argv, ref=ref, tmpl_dir=templates_for_ref(ref)):
         raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
                          f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
 
@@ -858,7 +1039,7 @@ def validate():
 # Flags that CONSUME the next token. `show` used to be found by "every argument that does not start
 # with -", which meant `check --against main` was reported as two modes -- and the fix for that must
 # not be to accept any stray positional, because `create foo` should still be a usage error.
-VALUE_FLAGS = ("--against", "--wdl-dir", "--config")
+VALUE_FLAGS = ("--against", "--wdl-dir", "--tmpl-dir", "--config")
 
 
 def positional(argv: list[str]) -> list[str]:
@@ -1132,6 +1313,10 @@ def usage(code=0):
               scored -- those keys are unverified, not wrong, and are not enumerated as
               findings). 3-segment keys are call-level wiring: disclosed UNCHECKED, not
               compared, not a finding.
+              --tmpl-dir <dir> reads the production `.json.tmpl` files from a directory instead of
+              `git archive`-ing inputs/templates at the ref -- the template side of --wdl-dir, for a
+              dirty tree and for fixtures. Without either, no template is read and the command says
+              TEMPLATE NOT READ per step rather than implying it compared production's bindings.
               --config takes any of the five shipped names OR a path to a method-config
               JSON (the body create POSTs / Terra returns); which workflow to read comes
               from that config's own methodRepoMethod. A name that is neither is a refusal

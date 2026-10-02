@@ -15,7 +15,7 @@ GSVTK  := ./kit/gsvtk-config
 
 # ----------------------------------------------------------------- file sets
 SH_FILES := $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
-                   examples/*.sh kit/*.sh scripts/*.sh)
+                   examples/*.sh kit/*.sh scripts/*.sh scripts/selftest.d/*.sh)
 PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py \
                    scripts/*.py examples/*.py docs/archive/as-run/*.py)
 
@@ -225,6 +225,7 @@ smoke:
 # harness ever goes vacuous again; keep new assertions there for that reason.
 selftest:
 	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
+	@$(SHELL) scripts/selftest.d/profiles.sh "$(PYTHON)"
 
 lint: syntax
 
