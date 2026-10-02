@@ -71,7 +71,7 @@ scripts that echo the resolved command line.
 | `gsvtk terra freeze-copy --write` / `freeze-attrs --write` | `terra/batch_freeze.py copy\|attrs` | **tens of GiB**, entity attributes |
 | `gsvtk terra rerun-create\|rerun-validate\|rerun-submit` | `terra/batch_rerun_step.py create\|validate\|submit` | **a fleet of VMs** |
 | `gsvtk terra fetch` / `fetch-compare` | `terra/fetch_outputs.py`, `terra/batch_fetch_compare.sh` | **bulk download**, then local compare |
-| `gsvtk compare <name> [args...]` | `compare/<name>.py`, arguments forwarded verbatim (`compare --list` prints the names) | free, local |
+| `gsvtk compare <name> [args...]` | `compare/*.py` — the one called `<name>.py`, arguments forwarded verbatim (`compare --list` prints the names) | free, local |
 | `gsvtk replay inputs` | `replay/build_inputs.py` | free, local |
 | `gsvtk replay train-chr20\|train-full\|train-definitive\|rd-population-probe\|reference-run\|het-population` | the matching `examples/` driver, after the preflight below | free, local |
 | `gsvtk replay preflight [mode]` | measures java major, the GATK jar, `bcftools`, and free disk | free |

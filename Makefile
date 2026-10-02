@@ -128,6 +128,12 @@ syntax:
 # --help on every tool, with an empty profile and a throwaway work directory, so a tool
 # that only works when configured is a BUG this catches (that was a real regression: a
 # --help path that called require() and died). Missing optional dependencies SKIP.
+#
+# run() dispatches by extension: an extension-less file matches no wildcard and would fall to the
+# Python arm, so `gsvtk` is named. That is not pedantry — the fall-through asked python to compile
+# bash and the sweep reported `FAIL gsvtk ... SyntaxError: closing parenthesis ')' does not match
+# opening parenthesis '{' on line 72`, a bug report about the interpreter, not about the CLI.
+# Naming it also execs it the way a user does (shebang + exec bit), which `bash x.sh` never proves.
 helpsweep:
 	@tmp="$$(mktemp -d)"; : > "$$tmp/empty.env"; \
 	py="$(PYTHON)"; \
@@ -142,8 +148,9 @@ helpsweep:
 	    skip=$$((skip+1)); return 0; \
 	  fi; \
 	  case "$$t" in \
-	    *.sh) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
-	    *)    out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
+	    gsvtk) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" "./$$t" --help 2>&1)"; rc=$$? ;; \
+	    *.sh)  out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
+	    *)     out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
 	  esac; \
 	  if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %-42s\n' "$$t"; \
 	  else fail=$$((fail+1)); printf '  FAIL  %-42s exit %s\n' "$$t" "$$rc"; \
