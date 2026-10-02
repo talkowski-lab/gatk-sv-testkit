@@ -390,5 +390,187 @@ want "CONTROL: renaming a terminal-step output in the profile breaks the export-
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/guardwork2" GSVTK_MODULE_DIR="$TMP/mod-rename_output" \
     "$PY" "$TMP/export-guard.py" "$ROOT" "$TMP/guardwork2"
 
+# 12. `fetch_baseline.py`: a baseline that skipped a step must not read like a baseline that had none.
+#
+# The last name on docs/module-profiles.md §9 step 4's list. `fetch_baseline.py` enumerates a workspace
+# rather than requesting a known step, so `pick_config` deliberately declines `steps.match_configs`
+# (its comment says refusing would turn "report what is there" into "agree with my table") -- which
+# leaves the emptiness handled, not avoided: `!! no config for step NN`, a `steps_missing` list inside
+# `baseline_run.json`, a counted summary and exit 1. That behaviour shipped in 0029972 with **no test at
+# all**, and this repo's position on an unguarded guard is in its own header: a check that cannot fail is
+# not a check.
+#
+# It lives in this phase rather than `rerun.sh` because the thing under test is what §9 step 4 made
+# single-sourced -- who is a step, and what happens when a step is missing -- and because the harness
+# stubs `terra` in process, so unlike the rerun phase it needs no `firecloud` and has no SKIP branch:
+# it either runs, or the phase fails. Nothing here reaches a network: an unexpected request raises
+# instead of asking, and the API root is a closed port.
+cat > "$TMP/fetch-baseline-guard.py" <<'PY'
+"""`fetch_baseline.py`'s missing-step path, run against a fake workspace.
+
+`terra` is replaced in `sys.modules` before the tool is imported: the four entry points it uses are
+stubbed, and anything else it asks for raises with the URL in the message. The tool's own `main()` runs,
+so the argparse surface, the ordering rule, the manifest bytes and the exit code are all the real thing.
+"""
+import io
+import json
+import os
+import sys
+import types
+from contextlib import redirect_stdout
+
+ROOT = sys.argv[1]
+WORK = sys.argv[2]
+sys.path.insert(0, os.path.join(ROOT, "kit"))
+sys.path.insert(0, os.path.join(ROOT, "terra"))
+
+STATE = {"names": []}
+
+
+class TerraError(Exception):
+    pass
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._p, self.status_code = payload, 200
+
+    def json(self):
+        return self._p
+
+    @property
+    def text(self):
+        return ""
+
+
+class _Session:
+    """Two reads: the method-config listing, and one config by name. Anything else is a failure."""
+
+    def get(self, url, timeout=None):
+        if "methodconfigs?allRepos" in url:
+            return _Resp([{"name": n, "namespace": "ns"} for n in STATE["names"]])
+        if "/methodconfigs/" in url:
+            name = url.rsplit("/", 1)[-1]
+            return _Resp({"name": name, "rootEntityType": "sample_set",
+                          "methodRepoMethod": {"methodUri": "dockstore://fake/%s/1" % name},
+                          "inputs": {"GenotypeBatch.batch": "this.sample_set_id"},
+                          "outputs": {"GenotypeBatch.genotyped_pesr_vcf":
+                                      "this.genotyped_pesr_vcf_new"}})
+        raise AssertionError("fetch_baseline asked for something this stub does not model: %s" % url)
+
+
+def _workspace(ns, ws):
+    return {"workspace": {"workspaceId": "fake-id", "bucketName": "fake-bucket",
+                          "attributes": {"bin_exclude": "gs://fake/bin.bed"}}}
+
+
+def _entity_sample(ns, ws, etype, page_size=200, page=1):
+    if etype == "sample":
+        return {"results": []}
+    return {"results": [{"name": "all_samples",
+                         "attributes": {"merged_PE": "gs://fake/pe.txt"}}]}
+
+
+def _dump(obj, path):
+    if not os.path.isdir(os.path.dirname(path)):
+        os.makedirs(os.path.dirname(path))
+    with open(path, "w") as fh:
+        json.dump(obj, fh, default=str)
+
+
+fake = types.ModuleType("terra")
+fake.TerraError = TerraError
+fake.TERRA_API = "https://fake.invalid/api/"
+fake.BASELINE_NS = "baseline-ns"
+fake.BASELINE_WS = "baseline-ws"
+fake.session = lambda: _Session()
+fake.workspace = _workspace
+fake.entity_sample = _entity_sample
+fake.dump = _dump
+sys.modules["terra"] = fake
+
+import fetch_baseline as fb                                    # noqa: E402  (fake terra is installed above)
+import steps                                                  # noqa: E402  (the lookup fetch declines)
+
+bad, good = [], []
+
+
+def check(cond, desc, detail=""):
+    (good if cond else bad).append(desc)
+    print(("  ok    " if cond else "  FAIL  ") + desc + (("  <%s>" % detail) if detail else ""))
+
+
+def run(steps_wanted, names):
+    """(exit code, stdout, manifest) for one fake workspace."""
+    STATE["names"] = list(names)
+    argv = ["fetch_baseline.py", "--ns", "ns", "--ws", "ws", "--entity", "all_samples",
+            "--steps"] + list(steps_wanted)
+    old, buf = sys.argv, io.StringIO()
+    sys.argv = argv
+    try:
+        with redirect_stdout(buf):
+            try:
+                fb.main()
+                rc = 0
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
+    finally:
+        sys.argv = old
+    path = os.path.join(WORK, "manifests", "baseline_run.json")
+    return rc, buf.getvalue(), (json.load(open(path)) if os.path.isfile(path) else {})
+
+
+order = fb.pick_config({"10-GenotypeBatch": {}, "10-GenotypeBatch_Ab12Cd": {},
+                        "09-MergeBatchSites": {}}, "10")
+check(order == ["10-GenotypeBatch", "10-GenotypeBatch_Ab12Cd"],
+      "pick_config prefers the LIVE config over the per-submission snapshot that shares its number "
+      "prefix (`sorted(matches)[0]` handed back whichever sorted first, which is what froze the wrong "
+      "config in the runs this repo measured)", ", ".join(order))
+
+bare = ["GenotypeBatch"]
+check(fb.pick_config({n: {} for n in bare}, "10") == []
+      and steps.match_configs("10", bare) == bare,
+      "the two lookups still answer an UN-NUMBERED chain name differently, which is the whole reason "
+      "fetch_baseline declines steps.match_configs: it enumerates a workspace, it does not request a "
+      "step",
+      "pick_config=%r steps.match_configs=%r"
+      % (fb.pick_config({n: {} for n in bare}, "10"), steps.match_configs("10", bare)))
+
+rc, out, man = run(["05", "06", "07", "08", "09", "10"],
+                   ["06-GenerateBatchMetrics", "10-GenotypeBatch"])
+check(rc == 1,
+      "a workspace holding two of the six requested steps exits NONZERO, so a caller cannot mistake a "
+      "partial baseline for the baseline", "exit %s" % rc)
+check(all(("!! no config for step %s" % s) in out for s in ("05", "07", "08", "09")),
+      "and each skipped step is named on a line of its own, not folded into a total",
+      "%d '!!' line(s)" % sum(1 for l in out.splitlines() if "!!" in l))
+check("!! 4 of 6 step(s) had no config to freeze: 05, 07, 08, 09" in out,
+      "the count is a fraction of what was asked for, with every name after it")
+check(man.get("steps_missing") == ["05", "07", "08", "09"] and len(man.get("steps") or {}) == 2,
+      "the hole is recorded INSIDE baseline_run.json, the artifact a later loop reads, beside the two "
+      "steps it did freeze", "steps_missing=%s, steps=%d"
+      % (man.get("steps_missing"), len(man.get("steps") or {})))
+check("PARTIAL" in out,
+      "and the log tells the human the manifest is PARTIAL rather than leaving silence to interpret")
+
+rc2, out2, man2 = run(["06", "07", "08", "09", "10"],
+                      ["06-GenerateBatchMetrics", "07-FilterBatchSites", "08-FilterBatchSamples",
+                       "09-MergeBatchSites", "10-GenotypeBatch"])
+check(rc2 == 0 and "steps_missing" not in man2 and "!!" not in out2,
+      "CONTROL: the same harness on a workspace that HAS every requested step exits 0, records no "
+      "`steps_missing` and prints no `!!` line -- so the failure above is about the data, not about the "
+      "stub", "exit %s, steps=%d, steps_missing present: %s"
+      % (rc2, len(man2.get("steps") or {}), "steps_missing" in man2))
+
+print("fetch_baseline counted-gap guard: %d ok, %d failed"
+      % (len(good), len(bad)))
+sys.exit(1 if bad else 0)
+PY
+want "fetch_baseline records a counted, named, PARTIAL hole for every step a workspace lacks, and exits 1" 0 \
+    "fetch_baseline counted-gap guard: 8 ok, 0 failed" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/baseline-work" \
+    GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/" \
+    "$PY" "$TMP/fetch-baseline-guard.py" "$ROOT" "$TMP/baseline-work"
+
 printf 'profiles selftest: %s ok, %s failed\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]
