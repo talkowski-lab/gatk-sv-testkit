@@ -48,13 +48,32 @@ partial (exit 2, never 0), a `call` miniwdl cannot resolve is reported as UNRESO
 dropped, and an import pointing outside the scanned directory is counted as `imports-outside` so a
 short answer is never mistaken for a closed one.
 
+Several targets, one load
+-------------------------
+`--target` is repeatable, and repeating it is what makes a batch question affordable: loading a whole
+gatk-sv tree costs ~35 s while a walk after it costs milliseconds, so N names asked as N processes
+cost N loads and N names asked as ONE process cost one. The rule the run keeps:
+
+    the tree loads once, the `tree:` provenance line prints once, and then one answer block per
+    target, in the order the names were given (duplicates included — nothing is deduped, because
+    reordering a caller's list is not this tool's question to answer).
+
+An unknown name among several does not stop the rest: each name that resolves gets its answer block,
+each name that does not gets its own `unknown target` report with its own closest-name list, and the
+run exits 2 if ANY target was unknown. That asymmetry is the same one the single-target case already
+keeps — `NOT REACHED` is an answer (exit 0) and an unknown name is not — and a batch run that quietly
+dropped the name it could not resolve would be the loudest possible version of the lie this file
+exists to refuse: a clean exit over a question that went unanswered.
+
 Usage
 -----
     checks/wdl_reach.py --dir DIR --target NAME              # what NAME reaches
     checks/wdl_reach.py --dir DIR --target NAME --reverse    # what reaches NAME
+    checks/wdl_reach.py --dir DIR --target A --target B      # both, ONE tree load, in that order
     checks/wdl_reach.py --dir DIR --target Foo.wdl -v        # every hit, with its full chain
     checks/wdl_reach.py --dir DIR --target NAME --json OUT   # machine-readable artifact
-    checks/wdl_reach.py --selftest                           # 4 fixture WDLs, both directions
+    checks/wdl_reach.py --selftest                           # 4 fixture WDLs, both directions,
+                                                             # one load answering several targets
 
 DIR is the tree `wdl_semantics.py` reads, by way of `wdl_semantics.wdl_files`: a `wdl/` subdirectory
 is preferred when present (a gatk-sv clone), else `DIR` itself (a `scripts/fetch_wdl.py` ref dir).
@@ -62,12 +81,20 @@ is preferred when present (a gatk-sv clone), else `DIR` itself (a `scripts/fetch
 
 NAME is a file (`Structs.wdl`), a callable (`MakeCohortVcf`, or `MakeCohortVcf.wdl::MakeCohortVcf`),
 or a script basename (`mantatloccheck.sh`). A name that matches several nodes unions them and says
-so — quietly choosing one is the same class of lie as an empty answer. A name that matches nothing
-exits 2 and lists the closest names the tree does know.
+so — quietly choosing one is the same class of lie as an empty answer. A name that matches nothing is
+named as unknown, lists the closest names the tree does know, and makes the run exit 2 (with several
+names, the other names are still answered first).
 
-Exit codes: 0 answered (reached, or NOT REACHED — an orphan is an answer), 2 unknown name / no tree /
-a partial answer, 3 miniwdl missing. Loading a whole gatk-sv tree is ~35 s and the traversal after it
-is instant, so for repeated questions run it once with `--json` and read the artifact.
+`--json` writes ONE artifact for the whole run. `targets` holds every answer in the order given (each
+block carries its own `nodes`/`counts`/`hits`/`reached`, plus `unknown` and `closest` for a name that
+did not resolve); `unknown_targets` and `target_count` summarize the run. The older keys — `target`,
+`counts`, `hits`, `reached` — still describe ONE target, the first name given, exactly as they did
+when one name was the only possibility, so a single-target artifact only gained keys.
+
+Exit codes: 0 answered (reached, or NOT REACHED — an orphan is an answer), 2 any target unknown / no
+tree / a partial answer, 3 miniwdl missing. Loading a whole gatk-sv tree is ~35 s and the traversal
+after it is instant, so ask several questions in one run (repeat `--target`, or `--json` once and
+read the artifact) instead of one run per question.
 
 No data, no docker, no network, nothing written but `--json`.
 """
@@ -334,30 +361,89 @@ def report(g: Graph, root, files, targets, hits, reverse: bool, top: int, verbos
         print(f'  … {len(order) - len(shown)} more (use -v)')
 
 
-def artifact(argv, root, files, target, targets, hits, g, reverse, secs, failures, unresolved, outside) -> dict:
+def report_unknown(g: Graph, root, files, name: str) -> list:
+    """The unknown-name answer for ONE target: what was looked for, plus that name's closest matches.
+
+    Returns the close-match list so the artifact can carry it. Goes to stderr because an unknown name
+    is not an answer, and must never be mistaken for the `NOT REACHED` that is one.
+
+    The flush is load-bearing, not decoration: stdout is block-buffered when it is a pipe, so without
+    it the answer blocks of the other targets would land AFTER this report and the printed order would
+    not be the order the names were given.
+    """
+    known = sorted({n for rec in g.nodes.values() for n in rec['names']
+                    if '::' not in n and '/' not in n})
+    close = difflib.get_close_matches(name, known, n=6, cutoff=0.55)
+    sys.stdout.flush()
+    print(f'unknown target {name!r}: no file, workflow, task or script of that name is in '
+          f'{root} ({len(files)} .wdl file(s) scanned, {len(g.nodes)} nodes known). A file target '
+          f'needs its .wdl suffix; a script target is the basename as the command block spells it; '
+          f'a workflow or task target is the bare name.', file=sys.stderr)
+    if close:
+        print('  closest: ' + ', '.join(close), file=sys.stderr)
+    return close
+
+
+def hit_records(g: Graph, hits: dict, reverse: bool) -> list:
+    """One target's hits as artifact rows, shortest path first."""
+    return [{'kind': g.nodes[n]['kind'], 'node': g.display(n), 'file': g.nodes[n]['file'],
+             'owner': g.nodes[n]['owner'], 'depth': h['depth'], 'edge': h['via']['why'],
+             'edge_kind': h['via']['kind'], 'edge_site': f'{h["via"]["file"]}:{h["via"]["line"]}',
+             'chain': [g.display(x) for x in
+                       (h['chain'] if reverse else list(reversed(h['chain'])))]}
+            for n, h in sorted(hits.items(), key=lambda kv: (kv[1]['depth'], g.display(kv[0])))]
+
+
+def target_answer(g: Graph, name: str, targets: list, hits: dict, reverse: bool) -> dict:
+    """One NAME's slice of the artifact: what it resolved to and the reach answer about it.
+
+    `unknown` separates the two ways this block can hold no hits: an unanswered name (`unknown: true`)
+    and a name nothing reaches (`unknown: false`, `reached: false`) — the second is an answer, the
+    first is not, and a reader must be able to tell them apart without parsing prose.
+    """
+    return {'name': name,
+            'mode': 'reverse' if reverse else 'forward',
+            'unknown': not targets,
+            'nodes': [[g.nodes[n]['kind'], g.display(n), g.nodes[n]['file']] for n in targets],
+            'counts': {'hits': len(hits),
+                       'by_depth': {str(d): c for d, c in sorted(
+                           collections.Counter(h['depth'] for h in hits.values()).items())},
+                       'by_kind': dict(sorted(collections.Counter(
+                           g.nodes[n]['kind'] for n in hits).items()))},
+            'hits': hit_records(g, hits, reverse),
+            'reached': bool(hits)}
+
+
+def artifact(argv, root, files, answers, g, secs, failures, unresolved, outside) -> dict:
+    """The ONE artifact for a whole run, however many names were asked.
+
+    Compatibility by construction, not by rename: `target`, `counts`, `hits` and `reached` still
+    describe one target — the FIRST name given, which for a single-target run is the only one — so an
+    artifact from a one-name run differs from the old shape by ADDING `targets`, `unknown_targets`
+    and `target_count`. `targets` is the whole run, in the order the names were given.
+    """
+    first = answers[0]
     return {'tool': 'wdl_reach.py', 'argv': argv, 'inputs': {'dir': str(root), 'files': len(files)},
-            'target': {'name': target, 'mode': 'reverse' if reverse else 'forward',
-                       'nodes': [[g.nodes[n]['kind'], g.display(n), g.nodes[n]['file']] for n in targets]},
+            # the old three keys, plus `unknown`; the hits stay top-level (and in `targets`) rather
+            # than being written a second time inside `target`.
+            'target': {k: first[k] for k in ('name', 'mode', 'nodes', 'unknown')},
+            'targets': answers,
+            'unknown_targets': [a['name'] for a in answers if a['unknown']],
+            'target_count': len(answers),
             'rule': {'edge_kinds': ['import: file -> file', 'call: workflow -> callable (miniwdl-resolved)',
                                     'invoke: task command block -> script basename',
                                     'contains: file -> its own workflows and tasks'],
                      'script_match': 'raw command block text, whole-line comments dropped, basename key',
                      'target_set_excluded_from_hits': True},
-            'counts': {'nodes': len(g.nodes), 'edges': g.n_edges, 'hits': len(hits),
-                       'by_depth': {str(d): c for d, c in sorted(
-                           collections.Counter(h['depth'] for h in hits.values()).items())},
-                       'by_kind': dict(sorted(collections.Counter(
-                           g.nodes[n]['kind'] for n in hits).items()))},
+            'counts': {'nodes': len(g.nodes), 'edges': g.n_edges,
+                       'hits': first['counts']['hits'], 'by_depth': first['counts']['by_depth'],
+                       'by_kind': first['counts']['by_kind']},
             'imports_outside': [list(o) for o in outside],
             'unresolved_calls': [list(u) for u in unresolved],
             'load_failures': [list(f) for f in failures],
-            'hits': [{'kind': g.nodes[n]['kind'], 'node': g.display(n), 'file': g.nodes[n]['file'],
-                      'owner': g.nodes[n]['owner'], 'depth': h['depth'], 'edge': h['via']['why'],
-                      'edge_kind': h['via']['kind'], 'edge_site': f'{h["via"]["file"]}:{h["via"]["line"]}',
-                      'chain': [g.display(x) for x in
-                                (h['chain'] if reverse else list(reversed(h['chain'])))]}
-                     for n, h in sorted(hits.items(), key=lambda kv: (kv[1]['depth'], g.display(kv[0])))],
-            'reached': bool(hits), 'files_scanned': len(files), 'scanned_something': len(files) > 0,
+            'hits': first['hits'],
+            'reached': first['reached'],
+            'files_scanned': len(files), 'scanned_something': len(files) > 0,
             'load_seconds': round(secs, 2)}
 
 
@@ -507,11 +593,80 @@ def selftest() -> int:
     rc, out = run('--target', 'zz_nope_zz')
     want(rc == 2 and 'zz_nope_zz' in out, 'a second invented name also fails loudly, never quietly')
 
+    # --- several targets, ONE load ---------------------------------------------------------------
+    # The claim is about the LOAD, not only the answers. `tree:` is main()'s provenance line and is
+    # printed once per build_graph(), so COUNTING it counts loads: an assertion that only required both
+    # answers to appear would still pass if the tool re-parsed the tree per name (which is the ~35 s
+    # cost this path exists to remove), and would pass if it answered the first name and dropped the
+    # rest, because `out` holds both either way. Hence the count, the block count, and the order.
+    def n_lines(text, prefix):
+        """How many LINES start with PREFIX — a count, not a substring match.
+
+        Anchored on purpose: an unanchored `tree: ` also matches the tail of a printed path ending in
+        `.../reach-tree: 3 nodes`, which turns a count of loads into a count of sentences.
+        """
+        return len(re.findall(r'(?m)^' + re.escape(prefix), text))
+
+    rc, out = run('--target', 'a.wdl', '--target', 'c.wdl', '--reverse')
+    want(rc == 0, 'two names that both resolve exit 0: an orphan plus a reach table is not an error',
+         f'rc={rc}')
+    want(n_lines(out, 'tree: ') == 1, 'two names, ONE tree load: the tree/provenance line appears ONCE',
+         f'{n_lines(out, "tree: ")} line(s)')
+    want(n_lines(out, 'target: ') == 2, 'and each name gets its OWN answer block',
+         f'{n_lines(out, "target: ")} block(s)')
+    want('NOT REACHED' in out and 'scanned 4 .wdl file(s)' in out,
+         'the first name prints its orphan answer, naming the files scanned, as before')
+    want('reach:' in out and 'b.wdl' in out and 'imports b.wdl at a.wdl:3' in out,
+         'the second name is answered too: its own reach table, naming the hop that carried a.wdl')
+    want(0 < out.index('target: a.wdl') < out.index('NOT REACHED')
+         < out.index('target: c.wdl') < out.index('reach:'),
+         'the blocks come in the ORDER ASKED (a.wdl first), not sorted and not first-only')
+
+    # an unknown name among several: answer what resolves, report each unknown as itself, exit 2
+    rc, out = run('--target', 'c.wl', '--target', 'c.wdl', '--target', 'd.wl', '--reverse')
+    want(rc == 2, 'one unknown among answered names exits 2 (a batch is not allowed to lose a name)',
+         f'rc={rc}')
+    want("unknown target 'c.wl'" in out and "unknown target 'd.wl'" in out,
+         'each unknown name is reported by name, not lumped into one complaint')
+    want(out.count('closest:') == 2, 'each unknown carries its OWN closest-name list',
+         f'{out.count("closest:")} list(s)')
+    want('closest: c.wdl,' in out and 'closest: d.wdl,' in out,
+         'and each list is that name\'s neighbours (c.wl -> c.wdl, d.wl -> d.wdl), not one shared list')
+    want('target: c.wdl [file]' in out and 'b.wdl' in out,
+         'the name that does resolve is still answered, in the middle of the failures')
+    want(out.index("unknown target 'c.wl'") < out.index('target: c.wdl')
+         < out.index("unknown target 'd.wl'"),
+         'unknown names are reported IN PLACE, so the printed order is still the order asked')
+
+    # one artifact for the whole run. The first name is deliberately the one nothing reaches, so an
+    # implementation that reported the UNION or the LAST answer at top level could not pass.
+    jp = root / 'multi.json'
+    rc, out = run('--target', 'a.wdl', '--target', 'c.wdl', '--reverse', '--json', str(jp))
+    art = json.loads(jp.read_text())
+    want(rc == 0 and [b['name'] for b in art['targets']] == ['a.wdl', 'c.wdl'],
+         '--json writes ONE artifact covering every target, in the order given', f'rc={rc}')
+    want(art['unknown_targets'] == [] and art['target_count'] == 2,
+         'the run-level keys count the names asked, not the nodes matched',
+         str(art['unknown_targets']))
+    want(art['reached'] is False and art['targets'][0]['reached'] is False
+         and art['targets'][1]['reached'] is True and art['counts']['hits'] == 0
+         and len(art['targets'][1]['hits']) > 0,
+         'the old top-level keys describe the FIRST target (not a union), so a single-target reader '
+         'sees what it saw before')
+    jp2 = root / 'unknown.json'
+    rc, out = run('--target', 'c.wdl', '--target', 'zz_nope_zz', '--reverse', '--json', str(jp2))
+    art2 = json.loads(jp2.read_text())
+    want(rc == 2 and art2['unknown_targets'] == ['zz_nope_zz']
+         and art2['targets'][0]['unknown'] is False and art2['targets'][1]['unknown'] is True,
+         'an unanswered block is marked unknown=true, so it can never be read as NOT REACHED',
+         f'rc={rc}')
+
     if bad:
         print('selftest: FAIL\n  ' + '\n  '.join(bad))
         return 1
     print(f'selftest: ok — {len(FIXTURES)} fixtures, {len(g.nodes)} nodes, {g.n_edges} edges; '
-          f'the chain resolves in both directions and the orphan is named as one')
+          f'the chain resolves in both directions, the orphan is named as one, and ONE load answers '
+          f'several targets in the order asked')
     return 0
 
 
@@ -520,18 +675,27 @@ def main(argv: list) -> int:
     ap = argparse.ArgumentParser(
         prog='wdl_reach.py', description=__doc__.split('\n\n')[0],
         epilog='forward = what it reaches, --reverse = what reaches it. NOT REACHED is an answer; an '
-               'unknown name is not. A whole gatk-sv tree takes ~35 s to load, then the walk is free.')
+               'unknown name is not, and stays unknown when it is one name among several: every '
+               'unknown --target is reported and exits 2, whatever the others answered. A whole '
+               'gatk-sv tree takes ~35 s to load and the walk after it is free, so ask several '
+               'questions in ONE run by repeating --target.')
     ap.add_argument('--dir', '--repo', dest='dir',
                     help='tree of *.wdl: a gatk-sv clone (DIR/wdl preferred) or a fetched ref dir')
-    ap.add_argument('--target',
+    ap.add_argument('--target', action='append', metavar='NAME',
                     help='file (Structs.wdl), callable (MakeCohortVcf / File.wdl::Name), or script '
-                         '(mantatloccheck.sh)')
+                         '(mantatloccheck.sh). Repeatable: one tree load answers every name, one '
+                         'answer block each, in the order given. A name that matches nothing is '
+                         'reported on its own with its closest matches and the run exits 2 — the '
+                         'other names are still answered, because NOT REACHED is an answer and an '
+                         'unknown name is not')
     ap.add_argument('--reverse', action='store_true',
                     help='what reaches the target, instead of what the target reaches')
-    ap.add_argument('--json', metavar='PATH', help='write the machine-readable artifact here')
+    ap.add_argument('--json', metavar='PATH',
+                    help='write ONE machine-readable artifact here, covering every --target given')
     ap.add_argument('--top', type=int, default=25, help='hits shown before truncating (default 25)')
     ap.add_argument('-v', '--verbose', action='store_true', help='list every hit, with its full chain')
-    ap.add_argument('--selftest', action='store_true', help='4 fixture WDLs, resolved in both directions')
+    ap.add_argument('--selftest', action='store_true',
+                    help='4 fixture WDLs: both directions, the orphan, and several targets on one load')
     a = ap.parse_args(argv[1:])
 
     if a.selftest:
@@ -559,44 +723,52 @@ def main(argv: list) -> int:
     print('  kinds ' + ' '.join(f'{k}={kc[k]}' for k in KINDS if kc[k])
           + f'   imports-outside={len(outside)} unresolved-calls={len(unresolved)}')
 
-    targets = find_targets(g, a.target)
-    if not targets:
-        known = sorted({n for rec in g.nodes.values() for n in rec['names']
-                        if '::' not in n and '/' not in n})
-        close = difflib.get_close_matches(a.target, known, n=6, cutoff=0.55)
-        print(f'unknown target {a.target!r}: no file, workflow, task or script of that name is in '
-              f'{root} ({len(files)} .wdl file(s) scanned, {len(g.nodes)} nodes known). A file target '
-              f'needs its .wdl suffix; a script target is the basename as the command block spells it; '
-              f'a workflow or task target is the bare name.', file=sys.stderr)
-        if close:
-            print('  closest: ' + ', '.join(close), file=sys.stderr)
-        return 2
-    if len(targets) > 1:
-        print(f'  NOTE {a.target} names {len(targets)} nodes; the answer below is their union: '
-              + ', '.join(f'{g.display(n)} [{g.nodes[n]["kind"]}]' for n in targets))
-
-    hits = traverse(g, targets, a.reverse)
-    report(g, root, files, targets, hits, a.reverse, a.top, a.verbose)
+    # One load above, then one answer block per name below, in the order the caller listed them. The
+    # tree is never re-parsed per name: the ~35 s is the load, and N processes would pay it N times.
+    answers, unknown = [], []
+    for i, name in enumerate(a.target):
+        if i:
+            print()                       # separates this answer block from the previous one
+        nodes = find_targets(g, name)
+        if not nodes:
+            unknown.append(name)
+            ans = target_answer(g, name, (), {}, a.reverse)
+            ans['closest'] = report_unknown(g, root, files, name)
+            answers.append(ans)
+            continue
+        if len(nodes) > 1:
+            print(f'  NOTE {name} names {len(nodes)} nodes; the answer below is their union: '
+                  + ', '.join(f'{g.display(n)} [{g.nodes[n]["kind"]}]' for n in nodes))
+        hits = traverse(g, nodes, a.reverse)
+        report(g, root, files, nodes, hits, a.reverse, a.top, a.verbose)
+        answers.append(target_answer(g, name, nodes, hits, a.reverse))
 
     if a.json:
         with open(a.json, 'w') as fh:
-            json.dump(artifact(argv, root, files, a.target, targets, hits, g, a.reverse, secs,
-                               failures, unresolved, outside), fh, indent=1, sort_keys=True)
+            json.dump(artifact(argv, root, files, answers, g, secs, failures, unresolved, outside),
+                      fh, indent=1, sort_keys=True)
         print(f'artifact: {a.json}')
 
+    rc = 0
+    if unknown:
+        print(f'\nUNKNOWN TARGETS — {len(unknown)} of the {len(a.target)} name(s) given are not in '
+              f'{root}: ' + ', '.join(repr(u) for u in unknown) + '. The block(s) above are real '
+              'answers; these names were not answered at all, which is why this run does not exit 0.',
+              file=sys.stderr)
+        rc = 2
     if failures or unresolved:
         if failures:
             print(f'\nLOAD-FAILURES — {len(failures)} file(s) miniwdl could not parse. Every answer '
                   f'above is a partial answer:', file=sys.stderr)
-            for name, err in failures:
-                print(f'  {name}  {err}', file=sys.stderr)
+            for bad_file, err in failures:
+                print(f'  {bad_file}  {err}', file=sys.stderr)
         if unresolved:
             print(f'\nUNRESOLVED-CALLS — {len(unresolved)} call(s) miniwdl could not resolve, so the '
-                  f'edge to their target is missing from the answer above:', file=sys.stderr)
-            for name, callee, line in unresolved:
-                print(f'  {name}:{line}  call {callee}', file=sys.stderr)
-        return 2
-    return 0
+                  f'edge to their target is missing from the answer block(s) above:', file=sys.stderr)
+            for bad_file, callee, line in unresolved:
+                print(f'  {bad_file}:{line}  call {callee}', file=sys.stderr)
+        rc = 2
+    return rc
 
 
 if __name__ == '__main__':
