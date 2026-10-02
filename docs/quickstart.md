@@ -70,7 +70,7 @@ terra     ~/repo/gatk-sv-testkit/.venv/bin/python
 wdl_gate  ok (~/repo/gatk-sv-testkit/.venv/bin/miniwdl)
 jq scan   ok
 build     gcloud ok
-inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar
+inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar (terra/batch_check_inputs.py AND the gate: check prints the required-input gap without it, the womtool verdict with it)
 ```
 
 That is the whole tool inventory with its dependencies resolved, including *where* miniwdl was found,

@@ -297,7 +297,7 @@ cmd_tools() {
     && printf 'build     gcloud ok\n' || printf 'build     needs gcloud (no VM without it)\n'
   if ! command -v java >/dev/null 2>&1; then printf 'inputs    needs a JDK (womtool is a jar)\n'
   elif [ -z "${WOMTOOL_JAR:-}" ] || [ ! -f "${WOMTOOL_JAR:-}" ]; then
-    printf 'inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar\n'
+    printf 'inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar (terra/batch_check_inputs.py AND the gate: check prints the required-input gap without it, the womtool verdict with it)\n'
   else printf 'inputs    ok (%s)\n' "$WOMTOOL_JAR"; fi
 }
 

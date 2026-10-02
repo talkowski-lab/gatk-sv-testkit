@@ -37,7 +37,8 @@ HELP_PYSAM   := compare/pair_level_concordance.py
 # checks/wdl_reach.py is here because its --help works without miniwdl but importing the module does
 # not: it builds its graph out of the AST. The sweep skips this whole list when miniwdl is absent,
 # which is honest -- a --help it cannot reach is not a --help it ran.
-HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py
+HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py \
+                checks/wdl_inputs_check.py
 HELP_TERRA   := $(wildcard terra/*.py)
 # ./gsvtk is here because it is the one command a newcomer types, and the sweep runs it with
 # GSVTK_CONFIG pointing at an EMPTY file and no credentials: an entry point whose --help needs a
@@ -57,7 +58,8 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 85 selftests + the ./gsvtk CLI suite; needs no config"
+	@echo "              + publish audit + the selftest phases, each printing its own tally (config"
+	@echo "              layer, ./gsvtk CLI, rerun, profiles, womtool/CI-parity); needs no config"
 	@echo "              file, no credentials, no network. The audit scans the GIT-TRACKED set, so"
 	@echo "              stage first: an untracked leak passes this gate and fails it one commit later."
 	@echo "              A missing"

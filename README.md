@@ -149,7 +149,7 @@ All the scripts, one line each. `./gsvtk <command>` reaches most of them by subc
 ```text
 gsvtk                          the command-line entry point: check | build | terra | compare | replay
 checks/
-  wdl_gate.sh                  will the pipeline actually start, or does it only look valid
+  wdl_gate.sh                  will the pipeline start: miniwdl, plus the input JSONs CI renders
   wdl_semantics.py             bugs that only show up while a stage is running
   wdl_reach.py                 which workflows a file change affects
   svshell_contract_check.py    stages that ask for inputs nobody provides
