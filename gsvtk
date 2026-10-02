@@ -57,8 +57,10 @@ die() { printf 'gsvtk: %s\n' "$*" >&2; exit 2; }
 # (CONTRIBUTING: one resolver, one precedence chain), so this program reads GSVTK_* from the
 # environment for exactly four TRANSPORT knobs — GSVTK_READ_ONLY, GSVTK_HOME (in the skill shim),
 # GSVTK_TERRA_PY, GSVTK_SKILL_VERSION — and asks kit/gsvtk-config for every real value. Those four
-# are per-invocation intent, not per-user config; docs/config.md lists them with the other
-# per-invocation variables.
+# are per-invocation intent, not per-user config, so they live with the CLI contract rather than in
+# the profile reference: docs/cli.md states what GSVTK_READ_ONLY refuses and shows the refusal, and
+# `gsvtk tools` prints which interpreter was resolved for each loop, which is the answer a wrong
+# GSVTK_TERRA_PY would otherwise have you guess at.
 cfg() { ( cd "$ROOT" && ./kit/gsvtk-config get "$1" 2>/dev/null ); }
 
 # join "$@" — space-joined copy of the arguments, for PRINTING a command only. Execution always
