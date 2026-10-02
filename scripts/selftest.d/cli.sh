@@ -19,10 +19,12 @@
 #     it). If the whitelist were checked after the interpreter probe, these would print "no
 #     interpreter with firecloud" instead of a refusal, and a refusal that depends on what is
 #     installed is a claim about the machine, not about the contract.
-#   * POSITIVE CONTROLS for that, three of them: under the SAME stripped environment, a benign
-#     read-only dispatch, a plan-only mode, and a comparator all still reach their script and exit 0.
-#     Without the controls, 17 refusals are also what a CLI that cannot parse its own arguments
-#     reports.
+#   * POSITIVE CONTROLS for that: seven of them, in two tiers. Five run under the same stripped PATH
+#     with firecloud present (a benign read-only dispatch, a plan-only download, the free build plan,
+#     a comparator, an image-check --dry-run), and two run under the IDENTICAL shim the refusals above
+#     use — no firecloud, no venv — where a comparator and the build plan still reach their script.
+#     Without the controls, 17 refusals are also what a CLI that cannot parse its own arguments, or
+#     cannot find its interpreter, reports.
 #   * each subcommand reaches the RIGHT script: the stand-ins echo the resolved command line, so the
 #     assertion is about the path and the arguments, not about a stamp alone. Nothing here touches the
 #     network: no stub imports anything, and the Terra stubs never load terra.py.
@@ -198,8 +200,20 @@ run_bare() {
     env -i PATH=/usr/bin:/bin HOME="$HOME" GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" \
         GSVTK_TERRA_PY=/usr/bin/false bash "$CLI" "$@"
 }
-# The CONTROL pair: identical stripped environment, but the interpreter CAN import firecloud, so any
-# difference in outcome can only have come from the mode being refused rather than from the machine.
+# The same bare environment WITH the read-only stamp — the shim every refusal below runs under.
+# Why a second bare variant exists: if the read-only whitelist were consulted AFTER the interpreter
+# probe, every refusal in this file would turn into "no interpreter with firecloud" and the suite
+# would be proving that this machine lacks a module instead of proving that the CLI refuses. With the
+# dependency genuinely absent, a refusal that still names the mode and the command to run by hand can
+# only have come from the policy.
+run_bare_ro() {
+    env -i PATH=/usr/bin:/bin HOME="$HOME" GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" \
+        GSVTK_TERRA_PY=/usr/bin/false GSVTK_READ_ONLY=1 bash "$CLI" "$@"
+}
+# The CONTROL pair to run_bare_ro: the identical stripped environment, but the interpreter CAN import
+# firecloud, so any difference in outcome can only have come from the mode being refused and not from
+# the machine. (The free modes are controlled under run_bare_ro itself, further down, because they
+# need no interpreter at all — that is the tighter pair: same shim, same missing module.)
 run_readonly() {
     env -i PATH=/usr/bin:/bin HOME="$HOME" GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" \
         GSVTK_TERRA_PY="$PYABS" GSVTK_READ_ONLY=1 bash "$CLI" "$@"
@@ -238,9 +252,13 @@ echo "selftest: cli: every mutating mode refused with the dependency genuinely a
 # /usr/bin/false cannot import firecloud, so IF the whitelist were tested after the interpreter probe
 # every one of these would print "no interpreter with firecloud" instead of a refusal. The check that
 # the output does NOT mention firecloud is what pins the order for real, on any machine.
+# /usr/bin/false cannot import firecloud (see run_bare_ro), so IF the whitelist were tested after the
+# interpreter probe every one of these would print "no interpreter with firecloud" instead of a
+# refusal. The check that the output does NOT mention firecloud is what pins the order for real, on
+# any machine — including one that has the module installed.
 for mode in configs-create configs-validate freeze-copy freeze-attrs rerun-create rerun-validate \
             rerun-submit fetch fetch-compare copy submit attrs create validate profile ""; do
-    out="$(run_readonly terra $mode 2>&1)"; rc=$?
+    out="$(run_bare_ro terra $mode 2>&1)"; rc=$?
     if [ "$rc" -ne 2 ]; then
         fail=$((fail + 1)); printf '  FAIL  terra %s: exit %s, want 2\n' "${mode:-(empty)}" "$rc"
         printf '%s\n' "$out" | head -5 | sed 's/^/          /'
@@ -258,14 +276,20 @@ for mode in configs-create configs-validate freeze-copy freeze-attrs rerun-creat
     fi
 done
 expect 'and the refusal prints the exact command to run in the checkout' 2 \
-    "cd $FAKE && python terra/batch_configs.py create" -- run_readonly terra configs-create
+    "cd $FAKE && python terra/batch_configs.py create" -- run_bare_ro terra configs-create
 expect 'a boot-compute check mode is refused too (it boots a VM, which is not a check)' 2 \
-    'REFUSED' 'check image run_in_image' -- run_readonly check image run_in_image \
+    'REFUSED' 'check image run_in_image' -- run_bare_ro check image run_in_image \
     --image reg/foo:tag --probe /dev/null
 expect 'so is the real build, even though --confirm was typed' 2 \
-    'REFUSED' 'docker/gatk-sv-build.sh my-branch' -- run_readonly build my-branch --confirm
+    'REFUSED' 'docker/gatk-sv-build.sh my-branch' -- run_bare_ro build my-branch --confirm
 expect 'and a bulk download is refused by the same rule' 2 \
-    'REFUSED' 'terra/fetch_outputs.py' -- run_readonly terra fetch --all
+    'REFUSED' 'terra/fetch_outputs.py' -- run_bare_ro terra fetch --all
+
+# The refusal must say so itself, not merely be indistinguishable from one by luck: the CLI states
+# that it consulted no dependency, credential or config value. Asserting that sentence is what stops
+# a future reordering from passing this section on the exit code alone.
+expect 'the refusal states it is policy, not a broken environment' 2 \
+    'no dependency, credential or' 'not a broken environment' -- run_bare_ro terra rerun-submit
 
 echo
 echo "selftest: cli: the controls — the same stripped environment still dispatches the free modes"
@@ -282,6 +306,15 @@ expect 'CONTROL: a comparator is never mutating, and dispatches under read-only'
 expect 'CONTROL: --dry-run on the VM-booting image check is free, so it dispatches' 0 \
     'STUB checks/image-check/run_in_image.sh --dry-run' -- run_readonly check image run_in_image \
     --dry-run --image reg/foo:tag --probe /dev/null
+# The tighter control pair: the SAME shim the 17 refusals above ran under (env -i, PATH with no venv,
+# an interpreter that cannot import firecloud). These reach their script, which proves the refusals
+# above were policy: 17 refusals are also what a CLI in a broken environment prints, and a suite that
+# only ever refuses in an environment where nothing could run has not distinguished the two.
+expect 'CONTROL: the SAME bare shim still dispatches a comparator (no interpreter needed)' 0 \
+    'STUB compare/table_diff.py a.tsv b.tsv' -- run_bare_ro compare table_diff a.tsv b.tsv
+expect 'CONTROL: and the same bare shim still runs the free build plan (--check then --dry-run)' 0 \
+    'STUB docker/gatk-sv-build.sh --check my-branch' \
+    'STUB docker/gatk-sv-build.sh --dry-run my-branch' -- run_bare_ro build my-branch
 
 echo
 echo "selftest: cli: each subcommand reaches the right script (echoed command lines, no network)"
@@ -336,6 +369,10 @@ expect 'and the pre-flight names the resolved target, the cost, and the undo' 0 
     -- run terra configs-create --confirm
 expect 'rerun submit without --confirm is refused with the cost stated' 2 \
     'refusing "terra rerun-submit"' 'batch of VMs' -- run terra rerun-submit --image k=r
+# The gate is not an environment failure in disguise either: under the bare shim (no firecloud, no
+# venv on PATH, env -i) the refusal still names --confirm rather than the missing interpreter.
+expect 'without --confirm the gate survives a MISSING dependency: it names --confirm, not firecloud' 2 \
+    'refusing "terra configs-create"' 'need --confirm' -- run_bare terra configs-create
 expect 'the build says where the images land, what the VM is, and how to undo it' 0 \
     'MUTATING mode' 'IMAGE_REPO' 'e2-standard-8' 'VM-minutes' 'instances delete' \
     -- run build my-branch sv-pipeline --confirm
