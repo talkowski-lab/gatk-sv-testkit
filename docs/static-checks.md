@@ -194,10 +194,18 @@ An unknown target exits nonzero and says what it looked for
 closest names), and a target that nothing reaches prints `NOT REACHED` with the scan count instead of an
 empty table.
 
+`--target` is repeatable, and the tree loads **once** for all of them: N names are N answer blocks in the
+order they were asked, not N ~34 s parses (measured on this tree: two names in one call, one `tree:` line,
+38 s; the same two names as two invocations cost ~72 s). Each block answers for its own name, so an
+unanswered one prints its own `NOT REACHED` and an unresolvable one its own closest-names list — and the
+run exits 2 if *any* name was unknown even when the others answered, because a blast radius that quietly
+covered only the names it recognised is the exact failure this tool exists to prevent. `gsvtk check
+--reach --wf A --wf B` is built on that: one call, one load, one answer per name.
+
 **It is not in `make test`.** A full-tree parse costs ~34 s (miniwdl, whole tree), which is the right
 price for a question you ask deliberately and the wrong price for a gate that must run on every
-change. Its `--selftest` (4 tiny fixtures, chain resolved both directions, orphan named as one) *is*
-in the gate.
+change. Its `--selftest` (4 tiny fixtures, chain resolved both directions, orphan named as one, several
+targets answered by one load in the order asked) *is* in the gate.
 
 ## `svshell_contract_check.py`: the rename that becomes `null`
 
