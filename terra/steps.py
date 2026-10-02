@@ -30,12 +30,48 @@ from __future__ import annotations
 # Steps 06->10 are the batch half of the joint-calling chain. The keys are the number the workspace's
 # method configs are prefixed with -- the same number batch_configs.CONFIGS keys on -- and the values
 # are the WDL/workflow names Dockstore serves at github.com/broadinstitute/gatk-sv/<name>.
+#
+# That last segment is the workflow NAME, not the WDL file basename, and the two are not the same
+# thing upstream. Measured (read-only, `git -C "$GSVTK_GATK_SV_CHECKOUT" archive <ref> wdl | tar -t`
+# plus the `workflow <name>` declaration inside each file) at two refs, a branch head and origin/main:
+# 12 of the 109 WDLs that declare a top-level workflow declare a name other than their file's basename
+# -- wdl/DepthClustering.wdl declares `ClusterDepth`, wdl/PloidyEstimation.wdl declares `Ploidy`,
+# wdl/Genotype_2.wdl declares `Regenotype` (the same twelve at both refs). For the five steps below it
+# was checked per step and each one AGREES: `wdl/GenerateBatchMetrics.wdl` declares
+# `workflow GenerateBatchMetrics`, and likewise FilterBatchSites, FilterBatchSamples, MergeBatchSites
+# and GenotypeBatch. So `workflow()` may serve as that path segment for 06->10 -- and a step added to
+# this map whose file and workflow differ must carry the NAME here, because the basename would 404
+# against Dockstore (`Cannot get dockstore://... from method repo`).
 STEPS: dict[str, str] = {
     "06": "GenerateBatchMetrics",
     "07": "FilterBatchSites",
     "08": "FilterBatchSamples",
     "09": "MergeBatchSites",
     "10": "GenotypeBatch",
+}
+
+
+# The step a caller gets when it does not say: `10-GenotypeBatch`, the stage the rerun tool was
+# written for. Kept here rather than repeated as a literal in a tool's flag default, so "which step
+# is the default" has one answer in the repo.
+DEFAULT_STEP = "10"
+
+# The root entity each step is submitted against -- per-step data a rerun cannot invent. It is NOT
+# uniform: `09-MergeBatchSites` is rooted in `sample_set_set` (one row per cohort; its inputs read
+# `this.sample_sets.<attr>`, one value per member sample_set), while 06/07/08/10 are rooted in
+# `sample_set` (one row per batch). Submit against the wrong type and the batch-level `this.*`
+# bindings resolve to nothing -- at runtime, after the fleet booted, in a message that names no key
+# (docs/terra-head-to-head.md §3).
+#
+# `batch_configs.CONFIGS[*]["rootEntityType"]` carries the same value for the chain builder, and this
+# repo's named failure class is two copies of one value drifting, so `terra/batch_rerun_step.py`
+# RECONCILES the two at resolve time and refuses if they ever disagree, rather than trusting either.
+RERUN_ROOT_ENTITY: dict[str, str] = {
+    "06": "sample_set",
+    "07": "sample_set",
+    "08": "sample_set",
+    "09": "sample_set_set",
+    "10": "sample_set",
 }
 
 
@@ -57,6 +93,41 @@ def workflow(step: str) -> str:
 def step_names() -> list[str]:
     """`["06-GenerateBatchMetrics", ...]` -- the numbered chain in launch order."""
     return [f"{s}-{STEPS[s]}" for s in known_steps()]
+
+
+def root_entity(step: str) -> str:
+    """The entity type `step` is submitted against, or an exit -- never a guessed `sample_set`.
+
+    Defaulting a step that is missing from `RERUN_ROOT_ENTITY` to the majority type would submit it
+    against the wrong row and empty every `this.*` binding, which is the exact defect this table
+    exists to prevent. A missing row is therefore a refusal naming the step and the file to add it to.
+    """
+    try:
+        return RERUN_ROOT_ENTITY[step]
+    except KeyError:
+        raise SystemExit(
+            f"step {step} ({workflow(step)}) has no root entity in terra/steps.py "
+            f"RERUN_ROOT_ENTITY, so nothing can be submitted against it.\n"
+            f"  Known: {', '.join(f'{k}={v}' for k, v in sorted(RERUN_ROOT_ENTITY.items()))}.\n"
+            "  Guessing `sample_set` is not a fallback: 09-MergeBatchSites is `sample_set_set`, and a "
+            "wrong\n  type resolves every this.* binding to nothing at runtime, after the VMs booted.")
+
+
+def rerun(step: str) -> dict:
+    """Everything a rerun of `step` needs, derived here: config name, input prefix, method path.
+
+    `terra/batch_rerun_step.py` used to hold these as module-level literals for step 10 only, which
+    meant "rerun 08" silently reran 10. Deriving them from this map is what makes the five steps one
+    code path: the prefix, the Dockstore path and the config name are all the workflow name in a
+    different coat, and the workflow name lives here.
+    """
+    wf = workflow(step)
+    return {"step": step, "workflow": wf,
+            "config": f"{step}-{wf}",                        # the name batch_configs' CONFIGS keys on
+            "rerun_config": f"{step}-{wf}-rerun",             # the name the rerun POSTs
+            "input_prefix": f"{wf}.",                         # the prefix of every input key
+            "method_path": f"github.com/broadinstitute/gatk-sv/{wf}",
+            "root_entity": root_entity(step)}
 
 
 def match_configs(step: str, names) -> list[str]:
@@ -101,5 +172,7 @@ def config_name(step: str, names) -> str:
 
 if __name__ == "__main__":
     print("# terra/steps.py: the step -> workflow map (the only copy)")
+    print("# step  workflow                         root entity   rerun config")
     for s in known_steps():
-        print(f"{s}  {STEPS[s]}")
+        r = rerun(s)
+        print(f"{s}     {r['workflow']:<32} {r['root_entity']:<13} {r['rerun_config']}")
