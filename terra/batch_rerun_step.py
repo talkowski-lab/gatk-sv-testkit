@@ -218,11 +218,11 @@ def announce(r: dict, mode: str) -> None:
           f"-- the ref the binding check grades too", file=sys.stderr)
     chain, frozen = _upstream(r)
     if chain or frozen:
-        print(f"        reads "
+        print("        reads "
               + (f"chain outputs of: {', '.join(chain)}" if chain else "no chain outputs")
               + (f"  |  frozen baseline files: {len(frozen)} (published by batch_freeze.py)"
                  if frozen else ""), file=sys.stderr)
-        print(f"        prove those attributes exist first: "
+        print("        prove those attributes exist first: "
               f"python terra/batch_check_inputs.py --step {r['step']}   ({mode} does not read "
               "your workspace)", file=sys.stderr)
 
