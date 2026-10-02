@@ -23,9 +23,21 @@ the sibling tools in this directory already report an unusable argument (`batch_
 message, `batch_save_metadata`'s four-flag explicit-target rule), so a reader gets the sentence and an
 exit code rather than a traceback or a shrug.
 
+The MAP is not in this file: `STEPS` and `RERUN_ROOT_ENTITY` are derived at import from
+`profiles/<module>.json`, the same read `batch_configs.CONFIGS` is built from, so a step is added in one
+place and one refusal path covers a profile that will not load. What stays here is the two lookups, the
+default step, and the refusals.
+
     python terra/steps.py        # print the map (offline: no config, no credentials, no network)
 """
 from __future__ import annotations
+
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
+import module_profile  # noqa: E402  (the reader of profiles/<MODULE>.json; kit/ is on sys.path)
 
 # Steps 06->10 are the batch half of the joint-calling chain. The keys are the number the workspace's
 # method configs are prefixed with -- the same number batch_configs.CONFIGS keys on -- and the values
@@ -42,13 +54,50 @@ from __future__ import annotations
 # and GenotypeBatch. So `workflow()` may serve as that path segment for 06->10 -- and a step added to
 # this map whose file and workflow differ must carry the NAME here, because the basename would 404
 # against Dockstore (`Cannot get dockstore://... from method repo`).
-STEPS: dict[str, str] = {
-    "06": "GenerateBatchMetrics",
-    "07": "FilterBatchSites",
-    "08": "FilterBatchSamples",
-    "09": "MergeBatchSites",
-    "10": "GenotypeBatch",
-}
+# The two tables below are DERIVED from `profiles/<module>.json`, the same file `batch_configs.CONFIGS`
+# is built from, so the step -> workflow -> root-entity triple now has one home. They were literals here
+# while that JSON carried the identical three fields per step -- docs/module-profiles.md §9.4's "collapse,
+# don't duplicate", and the reason `batch_rerun_step` carries a `_reconcile` that refuses when the two
+# copies disagree. That reconciliation is now a check on one source rather than an arbitration between
+# two, and `scripts/selftest.d/rerun.sh` pins the agreement step by step, before and after this move.
+#
+# What the profile states, verbatim: `steps[].step` (`06-GenerateBatchMetrics`), `workflow`,
+# `rootEntityType`. The step NUMBER is the two-digit prefix of `step`, the key batch_configs keys CONFIGS
+# on; an entry whose key does not start with one is refused below rather than skipped, because a step map
+# missing a step reads exactly like a chain that does not contain it.
+_PROFILE = module_profile.load()
+
+
+def _tables(profile):
+    """`(step -> workflow, step -> root entity)` from the module profile, or an exit naming the file.
+
+    Never an empty map. An empty one answers "no such step" to every question in this file, which is the
+    shape the whole module argues against, and it would arrive silently: `known_steps()` becomes argparse
+    `choices`, so an empty table turns into a tool that accepts no step at all.
+    """
+    if profile.problems or not profile.configs:
+        raise SystemExit(
+            f"terra/steps.py cannot build the step map: {profile.path} gave no usable steps.\n"
+            f"  {profile.problem or 'the profile carries no steps[] entries'}\n"
+            "  Every tool in this directory reads the step map from here, so none of them run until the\n"
+            "  profile loads; `python kit/module_profile.py validate` names the field at fault.")
+    names: dict[str, str] = {}
+    roots: dict[str, str] = {}
+    for key, spec in profile.configs.items():
+        number, _, tail = str(key).partition("-")
+        if len(number) != 2 or not number.isdigit():
+            raise SystemExit(
+                f"module profile step {key!r} does not start with a two-digit step number, so it has\n"
+                f"  no key in the step map (it names {tail!r} as its workflow). Every tool matches\n"
+                f"  workspace method configs on that number, so an unnumbered entry is invisible to all\n"
+                f"  of them -- add the number, do not delete the entry.")
+        names[number] = str(spec["workflow"])
+        roots[number] = str(spec["rootEntityType"])
+    return names, roots
+
+
+_TABLES = _tables(_PROFILE)
+STEPS: dict[str, str] = _TABLES[0]
 
 
 # The step a caller gets when it does not say: `10-GenotypeBatch`, the stage the rerun tool was
@@ -63,16 +112,12 @@ DEFAULT_STEP = "10"
 # bindings resolve to nothing -- at runtime, after the fleet booted, in a message that names no key
 # (docs/terra-head-to-head.md §3).
 #
-# `batch_configs.CONFIGS[*]["rootEntityType"]` carries the same value for the chain builder, and this
-# repo's named failure class is two copies of one value drifting, so `terra/batch_rerun_step.py`
-# RECONCILES the two at resolve time and refuses if they ever disagree, rather than trusting either.
-RERUN_ROOT_ENTITY: dict[str, str] = {
-    "06": "sample_set",
-    "07": "sample_set",
-    "08": "sample_set",
-    "09": "sample_set_set",
-    "10": "sample_set",
-}
+# It is no longer a second copy: this value comes from the same profile entry `CONFIGS` is built from,
+# which is what §9.4 asked for. `batch_rerun_step._reconcile` still compares the two views and still
+# refuses a disagreement -- it now guards the loader and the derivation rather than arbitrating between
+# two hand-typed tables, which is the kind of drift that made this repo's named failure class in the
+# first place.
+RERUN_ROOT_ENTITY: dict[str, str] = _TABLES[1]
 
 
 def known_steps() -> list[str]:
@@ -87,7 +132,8 @@ def workflow(step: str) -> str:
     except KeyError:
         raise SystemExit(
             f"unknown step {step!r}: this map knows {', '.join(known_steps())} "
-            f"({', '.join(STEPS.values())}). Add it to terra/steps.py -- every tool reads it from here.")
+            f"({', '.join(STEPS.values())}). The map comes from the module profile "
+            f"({_PROFILE.path});\n  add the step there -- every tool reads it from here.")
 
 
 def step_names() -> list[str]:
@@ -106,8 +152,8 @@ def root_entity(step: str) -> str:
         return RERUN_ROOT_ENTITY[step]
     except KeyError:
         raise SystemExit(
-            f"step {step} ({workflow(step)}) has no root entity in terra/steps.py "
-            f"RERUN_ROOT_ENTITY, so nothing can be submitted against it.\n"
+            f"step {step} ({workflow(step)}) has no rootEntityType in the module profile "
+            f"({_PROFILE.path}),\n  so nothing can be submitted against it.\n"
             f"  Known: {', '.join(f'{k}={v}' for k, v in sorted(RERUN_ROOT_ENTITY.items()))}.\n"
             "  Guessing `sample_set` is not a fallback: 09-MergeBatchSites is `sample_set_set`, and a "
             "wrong\n  type resolves every this.* binding to nothing at runtime, after the VMs booted.")

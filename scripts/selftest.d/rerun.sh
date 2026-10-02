@@ -223,7 +223,66 @@ for s in 06 07 08 09 10; do
 done
 run "all five steps were checked (not a loop that ran zero times)" 0 "5" /usr/bin/printf '%s' "$n"
 
-# ------------------------------------------------------ 3. the pin guard fires for OTHER steps too
+# ---------------- 2b. the step map and the config map are ONE fact, checked not assumed
+# docs/module-profiles.md §9.4's remaining copy: the step -> workflow -> root entity triple lived in
+# terra/steps.py as two dicts WHILE profiles/<module>.json carried the same three fields per step
+# (batch_configs.CONFIGS is built from that file, and `batch_rerun_step._reconcile` refuses when the two
+# disagree). Pinned BEFORE the literals move, so it holds on both sides of the change: if a future edit
+# touches one copy and not the other, it fails here rather than at submission time in a message that
+# names no key.
+run "steps.py agrees with the module profile on workflow and root entity, for every step it knows" 0 \
+    "PASS" "$PY" -c "
+import sys; sys.path.insert(0,'terra'); sys.path.insert(0,'kit')
+import steps, module_profile
+prof = module_profile.load()
+assert not prof.problems, 'profile would not load: %s' % prof.problem
+bad = []
+for step in steps.known_steps():
+    key = '%s-%s' % (step, steps.workflow(step))
+    spec = prof.configs.get(key)
+    if not spec:
+        bad.append('%s: steps.py answers for a step the profile does not carry (%s)'
+                   % (key, ', '.join(sorted(prof.configs))))
+        continue
+    if spec['workflow'] != steps.workflow(step):
+        bad.append('%s: workflow %r but the profile says %r' % (key, steps.workflow(step), spec['workflow']))
+    if spec['rootEntityType'] != steps.root_entity(step):
+        bad.append('%s: root entity %r but the profile says %r' % (key, steps.root_entity(step), spec['rootEntityType']))
+assert bad == [], bad
+print('PASS  %d steps, workflow and root entity both read from %s' % (len(steps.known_steps()), prof.path))"
+
+# POSITIVE CONTROL for the derivation, and the reason the equality check above is not a tautology: a
+# module profile naming a SIXTH step changes what the map reports. Hand-typed tables cannot know a step
+# the file does not list, so this case fails on the pre-derivation code -- which is what proves the
+# profile is the source rather than a decoration beside it.
+mkdir -p "$TMP/sixsteps"
+"$PY" - "$TMP/sixsteps/genotyping.json" <<'PY'
+import json, sys
+d = json.load(open("profiles/genotyping.json"))
+s = json.loads(json.dumps(d["steps"][0]))
+s["step"], s["wdl"], s["workflow"] = "11-ExtraStep", "ExtraStep", "ExtraStep"
+s["inputs"] = {"ExtraStep.ped_file": "workspace.cohort_ped_file"}
+s["outputs"] = {"ExtraStep.out": "workspace.extra_out"}
+d["steps"].append(s)
+json.dump(d, open(sys.argv[1], "w"), indent=1)
+PY
+run "a step added to the module profile appears in the step map (the table is data, not literals)" 0 \
+    "11     ExtraStep" env GSVTK_MODULE_DIR="$TMP/sixsteps" "$PY" terra/steps.py
+# The guard on that derivation: an entry with no two-digit prefix must be REFUSED, not skipped. A map
+# quietly missing a step reads exactly like a chain that never had it, which is the failure this repo
+# keeps meeting -- so the sentence has to name the entry and what it would have hidden.
+mkdir -p "$TMP/unnumbered"
+"$PY" - "$TMP/unnumbered/genotyping.json" <<'PY'
+import json, sys
+d = json.load(open("profiles/genotyping.json"))
+d["steps"][0]["step"] = "GenerateBatchMetrics"
+json.dump(d, open(sys.argv[1], "w"), indent=1)
+PY
+run "a step key with no number is refused, not silently dropped from the map" 1 \
+    "does not start with a two-digit step number" \
+    env GSVTK_MODULE_DIR="$TMP/unnumbered" "$PY" terra/steps.py
+
+# -------------------------------------------------------------------- 3. the pin guard fires for OTHER steps too
 # Asserting this for step 10 alone would prove nothing about 07 or 08: the guard reads the *step's*
 # input map, and each step declares a different set of *_docker inputs (07 one, 08 three, 10 three).
 #
@@ -426,7 +485,10 @@ try:
     steps.root_entity("07")
     raise AssertionError("a step with no root entity fell through to a guess")
 except SystemExit as e:
-    assert "07" in str(e) and "RERUN_ROOT_ENTITY" in str(e), e
+    # The refusal must name the step AND where to fix it. It used to point at RERUN_ROOT_ENTITY in this
+    # file; the table is derived from the profile now, so the sentence points at `rootEntityType` in the
+    # profile instead -- same guarantee (a reader can act on it), one fewer stale pointer.
+    assert "07" in str(e) and "rootEntityType" in str(e) and ".json" in str(e), e
 print("PASS 3 guards fired: table disagreement, missing input map, missing root entity")
 PY
 inproc "controls: the disagreement / no-input-map / no-root-entity guards all fire when provoked" \

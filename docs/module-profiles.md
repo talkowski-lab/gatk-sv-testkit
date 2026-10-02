@@ -519,13 +519,25 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    wrong; say which field.
 
 **Where this leaves the migration.** Steps 1-3 are built and gated (`scripts/selftest.d/profiles.sh`,
-`probe_fixes.py`'s two new probes, and the golden). **Steps 4 and 5 are open, deliberately:** the three
-step->workflow copies (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`),
-`batch_fetch_compare.sh`'s 7-name export list, `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path,
-`build_inputs.py`'s `SVShell.` prefix, `wdl_gate.sh`'s default `--wf` set and the jar-probe target+flags are
-**still per-module literals in code**, and the profile schema does not yet carry `export`, `freeze` or
-`compare` (§3 rules 5, 7, 8) because nothing reads them. Both guards on step 4 still apply to whoever does
-it, and §11's remaining questions (1, 2, 3) are unanswered.
+`probe_fixes.py`'s two new probes, and the golden). **Step 4 is partly built, and its shape changed while
+it was being built:** the three step->workflow copies are gone (`terra/steps.py` is the single reader, and
+the lookup that used to die as a bare `StopIteration` now names the step and every pattern it tried), and
+the two tables `steps.py` itself still carried -- step->workflow and the per-step root entity -- are now
+**derived from `profiles/<module>.json`**, the same read `batch_configs.CONFIGS` is built from. One file
+therefore answers "which workflow is step 08 and what row does it run against"; `batch_rerun_step._reconcile`
+survives as a check on the loader and the derivation rather than an arbitration between two hand-typed
+tables, and `rerun.sh` pins the agreement step by step *plus* the control that a step added to the profile
+shows up in the map (that control fails on the literals, which is what makes the agreement check a claim
+about one source rather than a tautology).
+
+Still open in step 4, each with its guard named in item 4 above: `terra/batch_fetch_compare.sh`'s 7-name
+export list, `replay/build_inputs.py`'s `SVShell.` prefix, the jar-probe target+flags, and
+`fetch_baseline.py:160`'s `!! no config for step`, which prints and continues -- its comment at `:108`
+says why it declines `steps.match_configs` (that lookup answers a request for a known step; this one
+enumerates a workspace). `checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item
+4's first guard is that a profile naming only `GenotypeBatch` would silently drop three of the four
+workflows it certifies, in the one tool whose comment says an unchecked workflow must fail. Step 5 stays
+open, and §11's questions (1, 2, 3) are unanswered.
 
 ## 10. What this makes newly possible to get wrong
 

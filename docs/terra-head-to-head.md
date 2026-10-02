@@ -219,8 +219,10 @@ Two non-obvious details that cost real debugging time when wrong:
   with gatk-sv's own `GenotypeBatch.json.tmpl`, which binds `GenotypeBatch.batch` to
   `${this.sample_set_id}`). Submit against the wrong one and the batch-level `this.*` bindings
   resolve to nothing, usually at runtime, after VMs booted.
-  `terra/steps.py` carries the same value for the rerun path and `batch_rerun_step.py` refuses a step
-  where the two tables disagree, because "which one wins" would decide what runs. Its visible
+  `terra/steps.py` derives the same value for the rerun path from the same profile entry, and
+  `batch_rerun_step.py` still refuses a step whose two views disagree -- the comparison now catches a
+  loader or derivation bug rather than two people editing two files, which is the case it was written for.
+  Its visible
   consequence: `--step 09 submit` **refuses** unless you pass `--entity <cohort-name>`, because
   `GSVTK_BATCH` names a `sample_set` row and guessing a cohort row is exactly the accepted-submission
   that binds nothing. The refusal comes before the target resolution, so it also sends nothing.
