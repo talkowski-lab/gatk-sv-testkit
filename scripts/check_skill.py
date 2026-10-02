@@ -288,6 +288,18 @@ def check_tree(skill_dir: Path, label: str = "", cli: Path = None) -> list[str]:
             bad.append(f"{pre}scripts/gsvtk no longer execs $REPO/gsvtk, so it is not driving the repo "
                        f"CLI -- and the trust gate it does keep is then all that stands between an "
                        f"agent and a checkout nobody resolved")
+        # A shim that names a TOOL is a second dispatcher even without a cmd_terra() to find: the
+        # script it picks and the flags it adds are the whole contract, and the copy inside the skill
+        # is the one nobody runs when they change the CLI, so it goes stale quietly. Comment lines are
+        # excluded, because the shim's own header cites scripts/check_skill.py and a guard that fires
+        # on a citation is a guard that gets deleted rather than one that works.
+        code = "\n".join(ln for ln in shim.splitlines() if not ln.lstrip().startswith("#"))
+        routed = sorted(set(re.findall(
+            r"\b(?:terra|checks|docker|compare|replay|examples)/[\w.-]+\.(?:py|sh)\b", code)))
+        if routed:
+            bad.append(f"{pre}scripts/gsvtk dispatches to {', '.join(routed)} itself. Tool routing is "
+                       f"the repo ./gsvtk's job now; a target named in the skill is a second "
+                       f"dispatcher, which is what the split removed")
 
     if cli.is_file():
         wl = whitelist(cli)
@@ -368,12 +380,13 @@ def live_refusals(skill_dir: Path) -> list[str]:
 
 
 def control(skill_dir: Path) -> list[str]:
-    """Three mutations that MUST each be reported. Proof the comparisons above are not vacuous.
+    """Four mutations that MUST each be reported. Proof the comparisons above are not vacuous.
 
-    One copy, three single-edit variants: the version pair pulled apart, the read-only stamp deleted,
-    and the dispatcher restored into the shim. Each is checked for ITS OWN finding, because "the
-    control produced at least one problem" is also satisfied by an unrelated finding -- and then a
-    guard that never fires still passes, which is the failure this function exists to close.
+    One copy, four single-edit variants: the version pair pulled apart, the read-only stamp deleted,
+    the dispatcher restored into the shim as a function, and the dispatcher restored as a bare exec of
+    a tool script. Each is checked for ITS OWN finding, because "the control produced at least one
+    problem" is also satisfied by an unrelated finding -- and then a guard that never fires still
+    passes, which is the failure this function exists to close.
     """
     tmp = Path(tempfile.mkdtemp(prefix="skillctl-"))
     bad: list[str] = []
@@ -398,6 +411,11 @@ def control(skill_dir: Path) -> list[str]:
     run_mutation("two-dispatchers",
                  ("scripts/gsvtk", lambda t: t + "\ncmd_terra() { :; }\n"),
                  "two dispatchers")
+    run_mutation("shim-routes-a-tool",
+                 ("scripts/gsvtk",
+                  lambda t: t.replace('exec "$REPO/gsvtk" "$@"',
+                                      'exec "$REPO/python3" "$REPO/terra/recon.py" "$@"', 1)),
+                 "second dispatcher")
     shutil.rmtree(tmp, ignore_errors=True)
     return bad
 
@@ -432,7 +450,7 @@ def main(argv: list[str]) -> int:
     print(f"check_skill: 7 claim groups verified in {here} "
           f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, the shim/exec/"
           f"read-only-flag split, override flags still implemented, no home paths, bash -n) + the "
-          f"three-mutation control, each graded by its own finding")
+          f"four-mutation control, each graded by its own finding")
     return 0
 
 
