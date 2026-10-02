@@ -239,8 +239,9 @@ smoke:
 # harness ever goes vacuous again; keep new assertions there for that reason.
 selftest:
 	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
-	@$(SHELL) scripts/selftest.d/cli.sh "$(PYTHON)"   # the ./gsvtk entry point, own tally
-	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)" # rerun any step of the batch chain, own tally
+	@$(SHELL) scripts/selftest.d/cli.sh "$(PYTHON)"      # the ./gsvtk entry point, own tally
+	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)"    # rerun any step of the batch chain, own tally
+	@$(SHELL) scripts/selftest.d/profiles.sh "$(PYTHON)" # module profiles: golden vs loader, own tally
 
 lint: syntax
 

@@ -71,6 +71,11 @@ DEFAULTS: dict[str, tuple[str, str, bool]] = {
     "FROZEN_SUFFIX": ("frz", "entity-attribute suffix for frozen baseline inputs", False),
     "NEW_SUFFIX": ("new", "entity-attribute suffix for this chain's outputs", False),
     "BATCH": ("all_samples", "sample_set entity name carrying the batch-level attributes", False),
+    # The module the loops drive, and where its profile lives. One name for the concept: `module`.
+    # "profile" already means the env file AND the upstream QC tool (`PROFILE_BIN`), and §6 of
+    # docs/module-profiles.md deletes the second resolver this key would otherwise need.
+    "MODULE": ("genotyping", "module the loops drive: its profile is <MODULE_DIR>/<MODULE>.json", False),
+    "MODULE_DIR": ("", "directory holding module profiles (derived: <repo>/profiles)", False),
     "WORK": ("", "scratch tree for staging/, runs/, manifests/, recon/, outputs/", False),
 }
 
@@ -179,6 +184,11 @@ def resolve() -> dict[str, tuple[str, str]]:
                                            "derived from PROJECT")
     if not resolved["WORK"][0]:
         resolved["WORK"] = (str(REPO_ROOT / "work"), "default")
+    # Derived rather than a literal default so the answer travels with the checkout it points into:
+    # a shipped absolute path would be wrong on every other machine, and `show` prints this one as the
+    # directory it will actually read (docs/module-profiles.md §6: `show` answers which module and why).
+    if not resolved["MODULE_DIR"][0]:
+        resolved["MODULE_DIR"] = (str(REPO_ROOT / "profiles"), "derived: <repo>/profiles")
     return resolved
 
 
@@ -224,11 +234,23 @@ def cmd_env(a):
 
 
 def cmd_show(a):
-    for key, (value, prov) in sorted(resolve().items()):
+    r = resolve()
+    for key, (value, prov) in sorted(r.items()):
         _default, _help, required = DEFAULTS[key]
         flag = " " if value else ("!" if required else "-")
         sys.stdout.write(f"{flag} {PREFIX}{key:<20} {value or '(unset)':<52} [{prov}]\n")
     sys.stdout.write("\n! = required and missing   - = optional and unset\n")
+    # The module line is the same answer with the same provenance as every other key, spelled out as
+    # the FILE it resolves to, because `show` is the one place that can say "this module, because the
+    # key came from <where>" and whether the profile it points at is even there. A missing module is
+    # printed here and refused by the loops (`kit/module_profile.py` exits 4 naming every field a
+    # working profile carries) -- a diagnostic does not decide policy by exiting nonzero.
+    mod, mod_prov = r["MODULE"]
+    mdir, dir_prov = r["MODULE_DIR"]
+    target = os.path.join(mdir, f"{mod}.json") if mod and mdir else "(no MODULE set)"
+    state = "present" if target.endswith(".json") and os.path.isfile(target) else \
+        "MISSING -- the loops refuse this module until it is written"
+    sys.stdout.write(f"\nmodule {mod} [{mod_prov}] -> {target} [{dir_prov}]: {state}\n")
 
 
 def cmd_work(a):

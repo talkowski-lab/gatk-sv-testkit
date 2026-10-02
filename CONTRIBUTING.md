@@ -56,6 +56,11 @@ checks/     static checks: WDL launchability, WDL semantics, sv_shell JSON contr
 compare/    comparators for keyed tables, matrices, VCF fields, sets and bundles, plus an
             artifact tally that refuses to report agreement on nothing
 kit/        the config layer that every tool reads; bash 3.2, no dependencies
+profiles/   one JSON per module: which WDL each step runs, what it binds, what the ref does not.
+            Data, not code, and `kit/module_profile.py` is its only reader — no shell parses these
+            (docs/module-profiles.md §3). The placeholder profile the goldens in
+            `scripts/selftest.d/golden/` are regenerated from sits beside them in
+            `scripts/selftest.d/fixtures/`.
 replay/     rebuild a launchable input JSON from a captured successful run
 scripts/    the publish guard, the WDL fetcher, and the gate's own tooling
 examples/   worked drivers from a real investigation, kept as recipes

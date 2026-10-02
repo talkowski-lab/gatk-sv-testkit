@@ -1,9 +1,13 @@
 # Supporting any gatk-sv module: loops, profiles, and one question per oracle
 
 > [!IMPORTANT]
-> **Status: proposal, revision 2.** Nothing here runs today. Every command in a `PROPOSED` block
-> names a flag or file that does not exist yet, so this doc is fenced off from the rest of `docs/`,
-> where CONTRIBUTING's "never document a flag you did not run" holds.
+> **Status: revision 3 — §9 steps 1, 2 and 3 are shipped; steps 4 and 5 are not.** The proposal is now
+> partly a description of this checkout: `profiles/genotyping.json` exists, `kit/module_profile.py` is
+> its only reader, `batch_configs.py`'s maps are read from it, and `check` reads upstream's
+> `.json.tmpl` files. What still does not exist is the collapsing of the duplicate step maps and the
+> per-module literals (§9 step 4) and a second module (§9 step 5), so those sections stay proposal, and
+> every command in a `PROPOSED` block below still names a flag or file that is not here — CONTRIBUTING's
+> "never document a flag you did not run" still decides what is fenced and what is not.
 >
 > **Revision 1 was reviewed adversarially by three independent reviewers and it was wrong in four
 > load-bearing places.** §13 lists each overturned claim, the measurement that overturned it, and
@@ -195,18 +199,18 @@ Nine rules, most of them review-derived:
    flight, there must be a way to tell a stale reader from a stale file. Precedent: the skill's
    `version` and `scripts/gsvtk`'s `VERSION` are checked as a pair by `scripts/check_skill.py`.
 
-**Format: still JSON, with one honest concession.** The floor is Python 3.9
+**Format: JSON, and that is decided (§11 q5).** The floor is Python 3.9
 (`undef_module_refs.py:32`, `kit/config.sh:24`), so `tomllib` (3.11+) is out; neither requirements file has a YAML
 dep. Rev 1's other argument, "`compare/` is stdlib-only", is **false**
 (`compare/gq_scale_compare.py:24` imports `numpy`) and is retracted here. What rev 1 missed is that
-`kit/gsvtk-config:96-98` already parses `KEY=value` with *one* parser for bash and Python, with a
-docstring saying it chose that grammar so no parser is needed in shell. Profiles need `{frz}`/`{new}`
-and `@`-expansion, and §5's consumers include **bash** (`checks/wdl_gate.sh`,
-`checks/image-check/*.sh`). So JSON buys a second implementation of the same expansion semantics in
-shell, which CONTRIBUTING names as the root cause of the worst bugs here. Either profiles move to
-the existing `KEY=value` grammar, or `check_profiles.py` must prove the two expanders agree
-byte-for-byte on a shared fixture. §11 q5 leaves that open deliberately rather than pretending the
-nesting depth decides it.
+`kit/gsvtk-config` already parses `KEY=value` with *one* parser for bash and Python, with a docstring
+saying it chose that grammar so no parser is needed in shell. Profiles need `{frz}`/`{new}` and
+`@`-expansion, and §5's consumers include **bash** (`checks/wdl_gate.sh`, `checks/image-check/*.sh`). That
+is the whole concession, and the decision spends it the other way: instead of a second expander in shell,
+**shell does not read profiles at all**. `kit/module_profile.py` expands the tokens once, for every
+consumer, and a bash consumer that needs the data asks it for flat output. `docs/config.md` names what
+happens when two readers disagree about one value ("an empty comparison, not an error"); this is how that
+stays impossible here.
 
 ## 4. The oracle question: what was measured, and what rev 1 got wrong
 
@@ -220,18 +224,29 @@ on steps 06/07/08 (the two callers `CALLERS` excludes for that cohort). So a tra
 "upstream − excluded callers + branch-only extras": a rule rather than data, and one key in 64 was news.
 
 **Overturned claim 1: "the templates are not parseable as JSON."** They are, one substitution and
-all **28 parse cleanly** with `json.loads`:
+all **28 parse cleanly** with `json.loads`. That mechanism **ships**: `JINJA_RE` /
+`read_template()` in `terra/batch_configs.py` are these two lines, and `check` prints one per-step
+verdict (`DERIVED` / `JINJA-NEUTRALISED` / `NO TEMPLATE` / `CANNOT PARSE` / `NOT READ`) from them:
 
 ```python
-# PROPOSED-MECHANISM: ran here; 28/28 parse, 0 failures
 NEUTRAL = re.compile(r"\{\{.*?\}\}", re.S)
 obj = json.loads(NEUTRAL.sub("null", open(tmpl).read()))      # {{ x | tojson }} -> null
 ```
 
+Reproduce the read on any checkout (never a render — `--tmpl-dir` is the same read against a dirty
+tree or a fixture directory):
+
+```bash
+GSVTK_BRANCH=main python terra/batch_configs.py check | grep -E 'template|optional-bound'
+```
+
 8 of the 28 templates contain a Jinja expression (in my 5-step chain: only
 `GenerateBatchMetrics.json.tmpl`, whose `chr_x`/`chr_y` are `{{ reference_resources.chr_x | tojson }}`).
-Rev 1 hit `JSONDecodeError: … line 11 column 34`, reproduced it, and generalized from one file to a
-rejection of the source. The real reason not to *render* templates is different and stronger:
+Measured here on the five chain steps at `main` and on the operator's dev tree, identically: **22 / 10 /
+11 / 10 / 16 keys bound upstream = 69**, one `JINJA-NEUTRALISED` (step 06, 2 values read as `null`),
+four `DERIVED`, **zero `NO TEMPLATE`**. Rev 1 hit `JSONDecodeError: … line 11 column 34`, reproduced
+it, and generalized from one file to a rejection of the source. The real reason not to *render*
+templates is different and stronger:
 upstream's renderer is **bundle-dependent**: `gatk-sv/scripts/inputs/build_inputs.py` skips a whole
 template when a referenced value is undefined and defaults `ref_panel → ref_panel_empty`,
 `test_batch → test_batch_empty`. A faithful render answers "what did *this values profile* bind",
@@ -315,20 +330,25 @@ generated view available is structurally incapable of carrying the *why*, and th
 §1 says transcription costs. `_why_*` (§3.6) fixes that at the data layer instead, and `cat` becomes
 the human view.
 
-What survives, and it is the part that actually decides the experience:
+What survives, and it is the part that actually decides the experience — **shipped**:
 
-- **Default the module.** `MODULE` (default `genotyping`) and `MODULE_DIR` (derived: `<repo>/profiles`)
-  go into `kit/gsvtk-config`'s `DEFAULTS` in the same commit that reads them, with a
-  [config.md](config.md) row: CONTRIBUTING's "one resolver, one precedence chain". Rev 1's
+- **Default the module: done.** `MODULE` (default `genotyping`) and `MODULE_DIR` (derived:
+  `<repo>/profiles`, so the default resolves with no profile and no absolute path ships) go into
+  `kit/gsvtk-config`'s `DEFAULTS`, with the [config.md](config.md) row in the same commit:
+  CONTRIBUTING's "one resolver, one precedence chain". Rev 1's
   `$GSVTK_MODULE_PROFILES`-then-`<repo>/profiles` search is a second resolver and is deleted. So is
   the word "profile" for this concept: it already means the env file *and* the upstream QC tool
   (`PROFILE_BIN`, `compare/profile_summarize.py`). Say `module`.
-- **`show` answers "which module, and why that one"**, because it already prints provenance for every
-  other value. No new subcommand, one registered key.
+- **`show` answers "which module, and why that one": done**, as one appended line on the door that
+  already prints provenance for every other value — `module genotyping [default] ->
+  <repo>/profiles/genotyping.json [derived: <repo>/profiles]: present`. No new subcommand.
 - **A missing module names the file to write and the questions it answers**, `exit 4`, per
   CONTRIBUTING's "name the missing thing", and the list must be complete, which rev 1's was not (it
   named 5 of the 9 fields a working profile needs, so following the error text produced a profile that
-  could not drive a chain).
+  could not drive a chain). **Done**, and completeness is asserted rather than intended:
+  `probe_module_changes_output` and `scripts/selftest.d/profiles.sh` both fail unless the refusal names
+  `schema_version`, `callers`, `steps`, `step`, `wdl`, `workflow`, `rootEntityType`, `inputs`, `outputs`,
+  `branch_only_inputs` and `_why_*`.
 - **Provenance on every verdict**: reuse `stamp` rather than inventing it.
 - **Agent-facing output is one flag on an existing command** (`show --json`), not a parallel command.
 - **A profile loaded from outside the tracked set must print that it was taken**, with its path and
@@ -370,13 +390,15 @@ Plus three that rev 1 lacked and review forced:
   ref's template value and prints `SEMANTIC divergence from upstream wiring: key, upstream=X,
   profile=Y` on stderr; `show` marks divergent bindings; a probe pins the print. CONTRIBUTING: a new
   mutator needs a guard **and a probe**: a profile field that redirects a run is one.
-- **`--help` stays zero-config.** `CONFIGS` becoming a file read at import would make `--help`
-  depend on repo data, which breaks the helpsweep contract and `probe_help_writes_nothing`
+- **`--help` stays zero-config: satisfied, and pinned.** `CONFIGS` becoming a file read at import would
+  make `--help` depend on repo data, which breaks the helpsweep contract and `probe_help_writes_nothing`
   (which runs `batch_configs.py` and `diff_rd_states.py` with a near-empty profile and requires exit
   0 *and* zero directories created: `diff_rd_states.py:26,31-32` computes its defaults at import for
-  exactly this reason). So: profiles load lazily, in the command body, from a loader that never
-  raises and never creates; helpsweep gains a fixture module and must pass with `MODULE_DIR` pointed
-  at an empty directory.
+  exactly this reason). So: `module_profile.load()` runs at import but **never raises, never exits and
+  never creates a file** — it returns findings instead, and the commands that need a table call
+  `require_module()` (`show`/`check`/`create`/`validate`/`body`), which is also where the exit 4 lives.
+  `usage()` is reached before any of it, helpsweep passes unchanged, and `profiles.sh` asserts that a
+  read-only profile load creates no directory.
 
 ## 8. Non-goals (unchanged, and the reason the doc is worth keeping)
 
@@ -417,24 +439,64 @@ report; call binding present → `EXTRA`/`MISSING` still fire, so the fix cannot
 Still open here, and only meaningful once profiles exist: *check* `Workflow.Call.input` against the
 sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`workflow` split.
 
-1. **Golden first.** Capture `GSVTK_BRANCH=<ref> batch_configs.py show` and `body()` per config as a
-   golden file *before* anything moves, then move, then require byte-for-byte equality, then retire
-   the golden. Rev 1 claimed the existing probes already guard the map's contents; they do not: the
-   fixture WDLs are **generated from the map under test** (`probe_fixes.py:503`, `:532` iterate
-   `bc.CONFIGS` to synthesize the "declared" side), so a binding lost in the move disappears from both
-   sides and the probe stays green. The probes validate the comparison machinery, which is worth a
-   lot; they have never validated the table's contents.
-2. **Move data, constraint-first.** `CONFIGS`/`BRANCH_ONLY_INPUTS` stay module-level dicts of
-   identical shape, populated by a lazy loader that never raises or creates at import. Five probes
-   reach into these as module attributes and must survive **unrewritten**: `probe_adapt_drops`,
-   `probe_drop_flag_guard`, `probe_map_vs_wdl`, `probe_rerun_map_guard`, and `_fixture_tree` /
-   `_fixture_wdl`. Rev 1's "change no behaviour" was honest in intent and wrong in cost: moving the
-   dict out from under them forces rewrites, and `selftest.sh:278` pins the count at 12.
-3. **Derive where it is safe, grade the gap.** `check` strict-parses each step's template at the ref
-   (printing `DERIVED` / `JINJA-NEUTRALISED` / `NO TEMPLATE` per step, never rendering), and adds the
-   two new findings: required-but-unbound (already exists) and **optional-bound-upstream-but-omitted**
-   (new, non-fatal, exit 1 once profiles are the source). Expect exactly the `dragen`/`melt` and
-   branch-only deltas of §4; anything else is a real finding.
+1. **Golden first: done, and it is the check that catches what the probes cannot.**
+   `scripts/golden_configs.py` captures `batch_configs.py show` and `body()` for all five configs into
+   `scripts/selftest.d/golden/configs-show.txt` + `configs-body.json`, from the checked-in placeholder
+   profile `scripts/selftest.d/fixtures/genotyping.profile.env` — so it regenerates byte-for-byte on a
+   machine with no user profile, no checkout and no network. Measured at capture: **5 configs, 64 input
+   bindings, 36 output bindings, `show` 106 lines** (§14's "105 lines" predates `call_cache_line()`, which
+   added the line it now counts). Because the trap is that a check which cannot fail is not a check, the
+   tool's `--control` mode asserts the untouched capture **passes**, then deletes one input binding from
+   step 06 and one output binding from step 10 out of a copy of the table and requires the comparison to
+   **fail** both times — and `scripts/selftest.d/profiles.sh` asserts that control every run
+   (`profiles selftest: 15 ok, 0 failed`). The golden is *not* retired yet, as this step's original text
+   imagined: it stays while `CONFIGS` is populated from data, because it is the only content check the
+   loader has. **Merge note:** the rerun lane holds `scripts/selftest.d/golden/rerun-step10-body.json`
+   (2473 bytes) captured from the same placeholder coordinates (`your-namespace` /
+   `GATK-SV-head-to-head` / `your-branch-under-test`). Both goldens carry the step-10 map, so they are
+   **reconciled at merge** — re-run both captures against the merged tree rather than trusting that two
+   independently pinned byte captures agree.
+2. **Move data, constraint-first: done, byte-for-byte.** `profiles/genotyping.json`
+   (`schema_version: 1`) carries what the code carried: the five steps with **`wdl` and `workflow` as
+   separate fields** (measured independently in the sibling lane: 12 of the 109 workflow-bearing WDLs at
+   `main` declare a name different from their file — `DepthClustering→ClusterDepth`,
+   `Genotype_2→Regenotype` — while all five chain steps agree, which is exactly why agreeing fields must
+   not be merged), `rootEntityType`, the **complete** `inputs`/`outputs` maps, the caller list, the
+   branch-only key set, and the 12-line rationale for `GenotypeBatch.training_vcf` as
+   `_why_GenotypeBatch.training_vcf` plus `_why_unbound` for the two keys deliberately left to WDL
+   defaults. `CALLERS` and `BRANCH_ONLY_INPUTS` stay module-level attributes of **identical shape**
+   (`list` / `dict[str, set[str]]`), populated by `kit/module_profile.load()`, which never raises, never
+   exits and never creates a file; `require_module()` is where an unusable profile exits 4. The hard
+   contract held: `batch_configs.CONFIGS` is still a module-level dict attribute, `terra/steps.py` and
+   `terra/batch_rerun_step.py` were not touched, and the five probes that reach in as attributes
+   (`probe_adapt_drops`, `probe_drop_flag_guard`, `probe_map_vs_wdl`, `probe_rerun_map_guard`,
+   `_fixture_tree`/`_fixture_wdl`) pass **unrewritten**.
+   `{frz}`/`{new}`/`@` are expanded **in that one Python file** — see §11 q5, decided. Two new probes pin
+   it: `profile_loader_refusals` (4 unusable-profile classes, tracked profile as the control) and
+   `module_changes_output` (§7's behavioural gate: changing `MODULE` changes what `show` prints, and an
+   absent module exits 4 naming **all** fields), which took `probe_fixes.py` from 18 to 20.
+3. **Derive where it is safe, grade the gap: done, with the real counts.** `check` strict-parses each
+   step's `.json.tmpl` at the ref — the one substitution from §4, `json.loads` strict, keys taken from the
+   parsed object and **never** scraped with a regex, for the reason `_declared_inputs()` gives (nested
+   `mem_gb`/`disk_gb` objects were once miscounted that way) — and prints the per-step verdict. New
+   non-fatal finding: **`optional-bound-upstream-but-omitted`**.
+   Measured against a real read-only checkout (`GSVTK_GATK_SV_CHECKOUT`, `git archive` only, nothing
+   written), identical at `main` and at the operator's dev tree:
+
+   | step | verdict | keys bound upstream | bound by the profile | optional-bound-upstream-but-omitted |
+   |---|---|---|---|---|
+   | 06-GenerateBatchMetrics | `JINJA-NEUTRALISED` (2 values) | 22 | 20 | `dragen_vcf`, `melt_vcf` |
+   | 07-FilterBatchSites | `DERIVED` | 10 | 8 | `dragen_vcf`, `melt_vcf` |
+   | 08-FilterBatchSamples | `DERIVED` | 11 | 9 | `dragen_vcf`, `melt_vcf` |
+   | 09-MergeBatchSites | `DERIVED` | 10 | 10 | — |
+   | 10-GenotypeBatch | `DERIVED` | 16 | 17 | — |
+
+   **69 upstream vs 64 profile, 63 shared, one profile-only (`GenotypeBatch.training_vcf`), six omitted —
+   and the six are exactly the two callers `callers` excludes, on the three steps that bind them.** That is
+   §4's delta reproduced by the shipped derivation rather than by a reviewer's throwaway script, and
+   "anything else is a real finding" holds: nothing outside that set fired. No step printed `NO TEMPLATE`;
+   `NO TEMPLATE` and `CANNOT PARSE` are exercised by fixtures in `scripts/selftest.d/profiles.sh`, because
+   the genotyping chain cannot produce them.
 4. **Collapse, don't duplicate.** Delete the **three** step→workflow copies
    (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`) into one reader fed
    by the module, and fold in `batch_fetch_compare.sh`'s export list (7 names),
@@ -456,6 +518,15 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    two named code changes, each listed here before the work starts.** If it needs more, the schema is
    wrong; say which field.
 
+**Where this leaves the migration.** Steps 1-3 are built and gated (`scripts/selftest.d/profiles.sh`,
+`probe_fixes.py`'s two new probes, and the golden). **Steps 4 and 5 are open, deliberately:** the three
+step->workflow copies (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`),
+`batch_fetch_compare.sh`'s 7-name export list, `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path,
+`build_inputs.py`'s `SVShell.` prefix, `wdl_gate.sh`'s default `--wf` set and the jar-probe target+flags are
+**still per-module literals in code**, and the profile schema does not yet carry `export`, `freeze` or
+`compare` (§3 rules 5, 7, 8) because nothing reads them. Both guards on step 4 still apply to whoever does
+it, and §11's remaining questions (1, 2, 3) are unanswered.
+
 ## 10. What this makes newly possible to get wrong
 
 - **A binding that silently changes which pipeline runs**: the single highest-value omission in
@@ -467,10 +538,12 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
 - **`@`-over-`callers` shrinking a cohort.** Excluded callers must print as an explicit "not bound: …"
   line in `show`. `select_all` makes this more than cosmetic: `GenerateBatchMetrics.wdl:66,69`
   feed `dragen_vcf`/`melt_vcf` into `select_all([...])`, so omitting them changes the merged VCF count.
-- **Two expanders for `{frz}`/`{new}`.** Today three Python/bash consumers already share the grammar
-  and `docs/config.md:94` already names the failure ("if they disagree you get an empty comparison,
-  not an error"). Profiles add a data-level consumer in both languages; §3's format note is the
-  mitigation and §11 q5 is the open decision.
+- **Two expanders for `{frz}`/`{new}`: closed by §11 q5, not by a probe.** Today three Python/bash
+  consumers already share the grammar and `docs/config.md:94` already names the failure ("if they
+  disagree you get an empty comparison, not an error"). Profiles would have added a data-level consumer in
+  both languages; instead the expansion is Python-only (`kit/module_profile.py`), so there is no second
+  expander to drift. What is left to keep honest is the *suffix value* itself: one config key, read by
+  everyone.
 - **Out-of-repo modules are unaudited**: §6's print-the-sha rule; `make audit` only sees `git ls-files`.
 - **Parallel profile edits** are not a problem (a nested-JSON binding diff is as reviewable as a
   dict-literal diff); the real cost was the stranded rationale, which `_why_*` fixes.
@@ -480,6 +553,8 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
 - **Still no new dependency**, and none of this boots compute or reaches the network.
 
 ## 11. Open questions
+
+*(q5 is decided and recorded below; 1, 2 and 3 are still questions, and steps 4 and 5 of §9 are still work.)*
 
 1. Does `branch_only_inputs` generalize at all, or is it genotyping-shaped? It reads as a band-aid for
    "the map I copied is a snapshot of one ref". The honest model: the module is *written against* a
@@ -497,8 +572,16 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    `root_entity: participant` would be **read and ignored** by the freeze/submit loops: the worst
    kind of "supported". Either that loop is parameterized first, or it stays out of scope and says so.
 4. *(answered **no** by review)* `wdl_flat.py` as a profile field; see §8.
-5. **JSON with two expanders, or `KEY=value` with one?** §3's format concession. This is the decision
-   most likely to change the shape of everything above, so it should be made before step 1, not during.
+5. ~~**JSON with two expanders, or `KEY=value` with one?**~~ **DECIDED: JSON, and Python is the only
+   reader.** The operator decided it before step 1, and the reason is the load-bearing part: the two-
+   expander risk in §10 is not closed by making two expanders agree, it is closed by there being **one**.
+   `{frz}`/`{new}` and `@`-over-callers expand in `kit/module_profile.py` and nowhere else; no shell file
+   ever parses `profiles/`. A future bash consumer asks a Python subcommand for flat shell-friendly output
+   (`kit/module_profile.py --print` is that door already, unadvertised) rather than growing a second
+   expander, so §10's failure mode is unreachable by construction instead of by a probe. The `KEY=value`
+   half of the argument was real and stays respected: the two config keys the tokens stand for are still
+   `GSVTK_FROZEN_SUFFIX`/`GSVTK_NEW_SUFFIX`, read through the one resolver, so bash and Python still
+   disagree about nothing (`docs/config.md`).
 
 ## 12. Defects this review confirmed in shipped code
 
@@ -567,14 +650,18 @@ still the decision that gates it.
 ## 14. Reviewing this doc
 
 ```bash
-GSVTK_BRANCH=main python terra/batch_configs.py show        # the maps a module would replace
-GSVTK_BRANCH=main python terra/batch_configs.py show | wc -l  # measured: 105 lines
-checks/wdl_gate.sh --help                                   # the --wf list §3 moves (+ §12 defect 3)
+GSVTK_BRANCH=main python terra/batch_configs.py show        # the maps a module now replaces
+GSVTK_BRANCH=main python terra/batch_configs.py show | wc -l  # measured: 106 (105 before call_cache_line)
+bash scripts/selftest.d/profiles.sh .venv/bin/python        # the golden, the refusals, the controls
+GSVTK_BRANCH=main python terra/batch_configs.py check | grep -i template   # the derivation, per step
+checks/wdl_gate.sh --help                                   # the --wf list §9 step 4 moves (+ §12 defect 3)
 make help                                                  # the phases §7 adds to
 ```
 
 Interpreter: one with `firecloud` installed (`make setup`), and `GSVTK_BRANCH` set: `show` names the
-branch in every Dockstore URI and refuses to guess it.
+branch in every Dockstore URI and refuses to guess it. `check` also wants `GSVTK_GATK_SV_CHECKOUT`: it
+reads `wdl/` and `inputs/templates` at that ref with `git archive`, and prints `NOT READ` for a source it
+could not reach rather than implying it compared both.
 
 Related: [config.md](config.md) (one resolver, one precedence chain),
 [static-checks.md](static-checks.md) (findings as a diff),
