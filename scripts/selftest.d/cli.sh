@@ -149,6 +149,26 @@ skipped() {
     printf '  SKIP  %s\n' "$2"
 }
 
+# count DESC PATTERN WANT CMD... — how many output LINES contain PATTERN. `expect` can only prove a
+# needle is present, and "one tree load answers N names" is a claim about a COUNT: one call carrying
+# both flags and two calls each carrying one both contain the same needles. grep -c exits 1 when it
+# finds nothing, so its status is ignored and only the printed number is read (bash 3.2, no set -e).
+count() {
+    local desc="$1" pat="$2" want="$3"; shift 3
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done   # the same `--` marker expect uses
+    [ "$#" -gt 0 ] && shift
+    local out got
+    out="$("$@" 2>&1)"
+    got="$(printf '%s\n' "$out" | grep -cF -- "$pat")"
+    if [ "${got:-0}" -ne "$want" ]; then
+        fail=$((fail + 1))
+        printf '  FAIL  %s — %s line(s) contain %s, wanted exactly %s\n' "$desc" "${got:-0}" "$pat" "$want"
+        printf '%s\n' "$out" | head -8 | sed 's/^/          /'
+    else
+        ok=$((ok + 1)); printf '  ok    %s\n' "$desc"
+    fi
+}
+
 # ---------------------------------------------------------------- the stand-in tree
 # A copy of the entry point plus a kit/ and one stand-in per dispatched script. The stand-ins print
 # the path they were reached as and the arguments they were given -- which is the whole point: the
@@ -464,6 +484,78 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     }
     check 'REAL composition, no stub anywhere: check --reach answers the question it advertises' \
         real_reach
+
+    # The same composition proof for SEVERAL names, on the same two-node tree: the dispatcher used to
+    # run one wdl_reach process per name, so two names cost two whole-tree parses. `tree:` is printed
+    # once per parse, which makes it the counter — and it is counted here, on the real tool over a real
+    # tree, because a stub cannot testify that it loaded the tree once. Foo answers with its call edge,
+    # Bar with its own NOT REACHED: if the second block were the first one echoed, or missing, one of
+    # the two counts or the order check fails.
+    #
+    # Both needles are ANCHORED (`^tree: `), and that is not pedantry: the first unanchored draft of
+    # this count read 2 loads for a run that did one, because the NOT REACHED detail line ends
+    # `… under /tmp/…/reach-tree: 3 nodes, 3 edges` and the fixture's own directory name completed the
+    # needle. An assertion that counts a path suffix is an assertion that can never go green.
+    real_reach_two() {
+        local out rc n_tree n_block n1 n2
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+                 bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo --wf Bar 2>&1)"; rc=$?
+        if [ "$rc" -gt 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
+        n_tree="$(printf '%s\n' "$out" | grep -cE '^tree: ')"
+        if [ "${n_tree:-0}" -ne 1 ]; then
+            printf 'two names cost %s tree load(s); the point of the change is exactly ONE:\n%s\n' \
+                   "${n_tree:-0}" "$out"; return 1
+        fi
+        n_block="$(printf '%s\n' "$out" | grep -cE '^target: ')"
+        if [ "${n_block:-0}" -ne 2 ]; then
+            printf 'two names produced %s answer block(s), not 2:\n%s\n' "${n_block:-0}" "$out"; return 1
+        fi
+        printf '%s\n' "$out" | grep -qF 'calls task Bar at Foo.wdl:3' || {
+            printf 'the answer for the first name is missing:\n%s\n' "$out"; return 1; }
+        printf '%s\n' "$out" | grep -qF 'NOT REACHED — nothing in the tree is reached by Foo.wdl::Bar' || {
+            printf 'the second name did not get its OWN answer (it reaches nothing, and must say so):\n%s\n' \
+                   "$out"; return 1; }
+        n1="$(printf '%s\n' "$out" | grep -nF -- 'target: Foo.wdl::Foo [workflow]' | head -1 | cut -d: -f1)"
+        n2="$(printf '%s\n' "$out" | grep -nF -- 'target: Foo.wdl::Bar [task]' | head -1 | cut -d: -f1)"
+        if [ -z "$n1" ] || [ -z "$n2" ] || [ "$n1" -ge "$n2" ]; then
+            printf 'the answers are not in the order asked (Foo at %s, Bar at %s):\n%s\n' \
+                   "${n1:-none}" "${n2:-none}" "$out"; return 1
+        fi
+        printf '%s\n' "$out" | grep -qF 'name both a tree and a target' && {
+            printf 'the tool refused instead of answering:\n%s\n' "$out"; return 1; }
+        return 0
+    }
+    check 'REAL composition, two names: ONE tree load (tree: counted once), both blocks answered in order' \
+        real_reach_two
+
+    # Unknown-among-many, asserted through a PIPE on purpose. In the Python selftest both streams are
+    # captured in-process and keep call order whatever happens; only a pipe can reorder them, because
+    # stdout is block-buffered when it is not a terminal. So this is the one place that proves the
+    # flush before the unknown-name report: without it, Foo's answer block lands AFTER the complaint
+    # about NoSuchThing and the printed order stops being the order asked.
+    real_reach_unknown() {
+        local out rc n1 n2
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+                 bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo --wf NoSuchThing 2>&1)"; rc=$?
+        # 1, not 2: wdl_reach exits 2 on an unknown name and the CLI reports a checker's nonzero as
+        # findings (its 2 means "nothing ran"). What is being proved is WHICH names got answered.
+        if [ "$rc" -ne 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
+        printf '%s\n' "$out" | grep -qF "unknown target 'NoSuchThing'" || {
+            printf 'the unknown name was not reported by name:\n%s\n' "$out"; return 1; }
+        printf '%s\n' "$out" | grep -qF 'UNKNOWN TARGETS' || {
+            printf 'the run never said which names went unanswered:\n%s\n' "$out"; return 1; }
+        printf '%s\n' "$out" | grep -qF 'calls task Bar at Foo.wdl:3' || {
+            printf 'the name that DID resolve was not answered:\n%s\n' "$out"; return 1; }
+        n1="$(printf '%s\n' "$out" | grep -nF -- 'target: Foo.wdl::Foo [workflow]' | head -1 | cut -d: -f1)"
+        n2="$(printf '%s\n' "$out" | grep -nF -- "unknown target 'NoSuchThing'" | head -1 | cut -d: -f1)"
+        if [ -z "$n1" ] || [ -z "$n2" ] || [ "$n1" -ge "$n2" ]; then
+            printf 'the answer (line %s) did not come before the unknown report (line %s) — out of order:\n%s\n' \
+                   "${n1:-none}" "${n2:-none}" "$out"; return 1
+        fi
+        return 0
+    }
+    check 'REAL composition, piped: an unknown name is reported by name and does not swallow or reorder the answered one' \
+        real_reach_unknown
 else
     skipped "reach-real" "miniwdl absent: the reach answer needs the WDL module, so the composition proof cannot run (a SKIP here is not a pass in CI)"
 fi
@@ -471,10 +563,26 @@ fi
 expect 'a target is FORWARDED: --wf NAME becomes wdl_reach --target NAME' 0 \
     'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch' \
     -- run check --reach --repo /tmp --wf GenotypeBatch
-expect 'two names are two answers, not one name silently dropped' 0 \
-    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch' \
-    'STUB checks/wdl_reach.py --repo /tmp --target MakeCohortVcf' \
+# This assertion used to require TWO stub lines, one per name, because that is what the dispatcher
+# did: `for t in "${reach_targets[@]}"; do wdl_reach --target "$t"; done`. That loop paid the tree
+# load once per name (~35 s each on a gatk-sv tree), and `wdl_reach.py --target` is now repeatable,
+# so the contract flipped: N names are ONE call carrying N --target flags, and the tool prints one
+# answer block per name. `expect` can only prove a needle is PRESENT, and a single line carrying both
+# flags satisfies both needles just as well as two lines do — so the COUNT is the assertion here.
+# Two stub lines for two names is now the regression, not the pass.
+expect 'two names are ONE call carrying BOTH --target flags (one tree load, not two)' 0 \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch --target MakeCohortVcf' \
     -- run check --reach --repo /tmp --wf GenotypeBatch --wf MakeCohortVcf
+expect 'and the banner names every target it asked for, not just the first' 0 \
+    '=== wdl_reach.py GenotypeBatch, MakeCohortVcf ===' \
+    -- run check --reach --repo /tmp --wf GenotypeBatch --wf MakeCohortVcf
+count 'ONE wdl_reach invocation answers both names (a second call is the ~35 s regression)' \
+    'STUB checks/wdl_reach.py' 1 \
+    -- run check --reach --repo /tmp --wf GenotypeBatch --wf MakeCohortVcf
+expect 'a single name is unchanged: one call, one flag, the same banner as ever' 0 \
+    '=== wdl_reach.py GenotypeBatch ===' \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch' \
+    -- run check --reach --repo /tmp --wf GenotypeBatch
 expect 'and --reach with no target is a usage error, stated as one' 2 \
     'check --reach needs a target: pass --wf NAME' -- run check --reach
 absent 'refused BEFORE any checker ran (a usage error must not spend a scan)' 2 \
