@@ -482,6 +482,25 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
   `gsutil cat` the task's `gcs_localization.sh` and see the CRAMs in it. Pass a `Boolean` computed at
   the call site when you only need presence.
 
+**Two more omissions, both found by trusting a client that was not wrong, only incomplete.**
+
+- `GET …/methodconfigs` answers `[]` for a workspace that holds configs, from fiss **and** from raw
+  REST, until you add `?allRepos=true` — then the same call returned 6 of 6. This is the case the
+  two-client agreement above does not catch: both clients agree on the empty answer, so
+  `workspace_configs()` reports nothing and raises nothing. Verified against
+  `broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966`.
+- A finished submission's `outputFiles` is **empty**, so its outputs cannot be enumerated from the
+  submission record at all. Derive the paths from saved Cromwell metadata (`outputs`) and swap the
+  submission/Cromwell uuids. `gsutil ls -R` over the run tree is not a fallback: call caching leaves
+  thousands of `cacheCopy` objects there and one such listing ran past 300 s without finishing.
+
+And the one that reads like a missing entity: the submission POST takes `entityType`/`entityName`
+at the **top level** and returns them **nested** under `submissionEntity`, so the 400 it throws and
+the `None` it reads back are the same trap from two directions (`troubleshooting.md` carries both
+rows). Nothing about `BatchEvidenceMerging` is unlaunchable for the same reason — that WDL is simply
+absent from `.github/.dockstore.yml`, so it has no Dockstore handle, and the only published route
+to it is `GatherBatchEvidence`, which drags the gCNV models, CNMops files and all five callsets.
+
 ## 9. Reading one task's artifacts, and fetching an output by its name
 
 Two `curl`-shaped jobs that every review hand-rolled, now tools. Both are provable offline because
