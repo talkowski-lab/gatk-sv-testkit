@@ -227,10 +227,63 @@ run exits 2 if *any* name was unknown even when the others answered, because a b
 covered only the names it recognised is the exact failure this tool exists to prevent. `gsvtk check
 --reach --wf A --wf B` is built on that: one call, one load, one answer per name.
 
+### `--images`: which dockers a change forces, and which workflows are wired to someone else's image
+
+```bash
+checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target CountSamples --images
+checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target mantatloccheck.sh \
+    --images --inputs-root "$GSVTK_GATK_SV_CHECKOUT"      # read already-rendered JSONs, render nothing
+```
+
+Reach tells you which workflows a change reaches; the review question is what has to be *built*, and the
+scary half of it: a reaching workflow bound to an image your commit did not produce runs the pre-change
+code and prints nothing suspicious. `--images` prints, per reaching workflow, the `*_docker` inputs it
+binds, the value, and which of the four places that hold it answered — the workflow's own declaration
+(a `WDL default`), a **rendered input JSON** (`inputs/build/**`), a **module profile**
+(`profiles/<module>.json`, i.e. a Terra chain) — plus `inputs/values/dockers.json` as context on whether
+the value is the one committed into the tree. Nothing is invented: a workflow that binds no container
+input prints `binds NO docker input`, a binding whose value is a `${workspace.x}` placeholder or a
+computed WDL default prints `UNRESOLVED` with the reason and is **counted**, and every count that could
+hide an omission (`43 workflow(s) in this answer, 43 listed`, `from 45 answer node(s) …`, `131 binding(s)
+whose value is not a literal image`) is printed next to the answer.
+
+Then the distinction, in counted buckets, over the whole answer:
+
+| bucket | what it means | how it is decided |
+| --- | --- | --- |
+| `[0] NOT A BUILD OF THE COMMIT UNDER REVIEW` | a run binding it tests a **pre-change** image | the tag is release-shaped (date-prefixed, or `vN`) — `docs/docker-builds.md` reserves those for production pushes |
+| `[1] BUILT FROM A DIFFERENT COMMIT` | a stale branch build | the tag is `<branch>-<sha>` as `docker/gatk-sv-build.sh` mints it, and the sha it carries is not the commit under review |
+| `[2] BUILT FROM THE COMMIT UNDER REVIEW` | this one does contain your change | same shape, sha matches (the checkout answers it, or `--head-sha` does) |
+| `[3] CANNOT SAY` | untagged, or neither convention | printed, never folded into `[2]` |
+
+Measured on the real tree (`Utils.wdl::CountSamples`, a shared-library task, one load):
+`43 workflow(s) in this answer, 43 listed`, **15 distinct images across 147 bindings** — 10 published
+(`[0]`), 3 branch-minted but from a different commit (`[1]`, including `gatk:mw-gatk-sv-53d5c2d`, which
+11 workflows bind), 2 untagged (`[3]`), **0 built from the commit under review**, and 131 bindings that
+are Terra workspace attributes rather than images. Wall clock 41 s against 38 s for the same command
+without `--images` (both `load=33-34 s`; the rest is gatk-sv's own renderer, run once, ~1.6 s).
+
+Two couplings worth naming. The JSON layer is `checks/wdl_inputs_check.py --render-only` invoked as a
+subprocess — that file's flags, its `GSVTK-RENDER status=… jsons=… dest=…` line and the layout it leaves
+behind are the contract, and if any of it changes the answer degrades to a named skip with `UNRESOLVED`
+values, never to a fabricated image. And bucket `[1]` trusts the tag's sha-shaped suffix: for third-party
+images (`genomes-in-the-cloud:2.3.2-1510681135`, `vapor:header-hash-2fc8f12`) that suffix is a build
+timestamp rather than a gatk-sv commit, so the printed reason always quotes the tag and the sha it was
+taken from — read it, don't trust the bucket label.
+
+A run that asked for images and could not read any value source prints `IMAGE ANSWER INCOMPLETE` and
+exits 2: "no images involved" and "I could not tell you" must not print the same way. A caller who did
+not pass `--images` gets exactly the old bytes — the same artifact document apart from `argv` and
+`load_seconds`, asserted by `scripts/selftest.d/reach.sh`.
+
 **It is not in `make test`.** A full-tree parse costs ~34 s (miniwdl, whole tree), which is the right
 price for a question you ask deliberately and the wrong price for a gate that must run on every
 change. Its `--selftest` (4 tiny fixtures, chain resolved both directions, orphan named as one, several
-targets answered by one load in the order asked) *is* in the gate.
+targets answered by one load in the order asked) *is* in the gate, and `scripts/selftest.d/reach.sh` is
+the 30-assertion phase for `--images` — seven synthetic WDLs, four synthetic input JSONs, a synthetic
+`dockers.json` and a synthetic module profile, no checkout, no network, no jar; it runs standalone today
+with `bash scripts/selftest.d/reach.sh .venv/bin/python`, and its one line in the `selftest:` recipe is
+still pending.
 
 ## `svshell_contract_check.py`: the rename that becomes `null`
 
