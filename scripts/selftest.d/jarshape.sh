@@ -196,7 +196,9 @@ if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     [ "$fail" -eq 0 ] || exit 1
     exit 0
 fi
-for f in "$REQ_7F" "$REQ_01" "$STRUCT_FIX" "$MATRIX" "$MATRIX_WDL"; do
+for f in "$REQ_7F" "$REQ_01" "$STRUCT_FIX" "$MATRIX" "$MATRIX_WDL" \
+         "$FIX/womtool84-validate-not-specified.txt" "$FIX/womtool84-validate-coercion.txt" \
+         "$FIX/womtool84-validate-extra-key.txt"; do
     if [ ! -f "$f" ]; then
         printf '  FAIL  the fixture %s is missing; nothing below this line can be graded\n' "${f#"$ROOT"/}"
         printf '\njarshape selftest: 0 passed, 1 failed, 0 skipped\n'
@@ -336,16 +338,21 @@ want "the knob is documented in the tool's own --help" 0 \
     env -u WOMTOOL_JAR -u GSVTK_WOMTOOL_INPUTS_JSON "$PY" "$TOOL" --help
 
 # 8. THE JAR'S OTHER OUTPUT: `womtool validate` words, and which of them are comparable with the
-#    key-set layer. Both messages below are VERBATIM from womtool-84 on gatk-sv refs — the first from
-#    7fbf1171 (the bug), the second from the Terra workflow_configuration at 01107996, where every
-#    required key IS present and womtool rejects the file because it also coerces values, which the
-#    key-set layer never reads. Calling the second one a disagreement between the two mirrors would
-#    send a reader to fix a mirror that is answering a different question, so `rejection_class` sorts
-#    them and `checks/wdl_inputs_check.py` reports them apart.
-msg_keys="$TMP/msg-keys.txt"
-msg_value="$TMP/msg-value.txt"
-printf '%s\n' "Required workflow input 'IntegrateGDVcf.sample_id' not specified" > "$msg_keys"
-printf '%s\n' "Failed to evaluate input 'ploidy_tables' (reason 1 of 1): No coercion defined from \"\${this.sample_sets.ploidy_table}\" of type 'spray.json.JsString' to 'Array[File]'" > "$msg_value"
+#    key-set layer. All three messages are fixtures now, each one VERBATIM womtool-84 output on gatk-sv
+#    `01107996` / `7fbf1171`: the missing-required one, the value-coercion one (every required key
+#    present), and the extra-key one —
+#
+#      WARNING: Unexpected input provided: IntegrateGDVcf.this_key_does_not_exist_in_the_wdl
+#
+#    which is what happens when an input file names a key the WDL never declared. That third one is the
+#    offline layer's real blind spot (it compares required keys INTO the JSON and never the JSON's keys
+#    back into the WDL), and it is measured rather than supposed: the capture came from adding one bogus
+#    key to a real rendered test JSON and re-running CI's command. Measured cost of the gap on these
+#    two refs: 0 extra keys across all 29 Terra workflow_configurations and both rendered IntegrateGDVcf
+#    test JSONs.
+msg_keys="$FIX/womtool84-validate-not-specified.txt"
+msg_value="$FIX/womtool84-validate-coercion.txt"
+msg_extra="$FIX/womtool84-validate-extra-key.txt"
 
 if "$PY" -c 'import WDL' >/dev/null 2>&1; then
     cat > "$TMP/classify.py" <<'PY'
@@ -361,16 +368,24 @@ spec = importlib.util.spec_from_file_location(
 wic = importlib.util.module_from_spec(spec)
 sys.modules["wdl_inputs_check"] = wic
 spec.loader.exec_module(wic)
-print("CLASS=%s" % wic.rejection_class(open(path_to_msg).read()))
+text = open(path_to_msg).read()
+print("CLASS=%s" % wic.rejection_class(text))
+print("HEADLINE=%s" % wic.headline(text)[:60])
 PY
     want "the measured 'not specified' rejection is the key-presence question" 0 "CLASS=keys" -- \
         "$PY" "$TMP/classify.py" "$ROOT" "$msg_keys"
     want "the measured coercion rejection is NOT, and is not mistaken for it" 0 "CLASS=value" -- \
         "$PY" "$TMP/classify.py" "$ROOT" "$msg_value"
+    want "the measured extra-key rejection is its own class, not keys and not value" 0 \
+        "CLASS=extras" -- "$PY" "$TMP/classify.py" "$ROOT" "$msg_extra"
+    want "and its own line is the one picked as the headline, not a banner" 0 \
+        "HEADLINE=WARNING: Unexpected input provided: IntegrateGDVcf.this_key_" -- \
+        "$PY" "$TMP/classify.py" "$ROOT" "$msg_extra"
 
-    #    And the branch that decision drives, end to end, with no jar: the same tree, the same input
+    #    And the branch each decision drives, end to end, with no jar: the same tree, the same input
     #    JSON, the offline layer clean, and only womtool's WORDS changing. A value-class rejection must
-    #    print OUT-OF-LAYER and not DISAGREES; a key-class one must still be called a disagreement.
+    #    print OUT-OF-LAYER and not DISAGREES; an extra-key one must name the gap; a key-class one must
+    #    still be called a disagreement.
     mkdir -p "$TMP/tree" "$TMP/in/inputs/build/ref_panel_1kg/test/Wad" "$TMP/bin"
     cat > "$TMP/tree/Wad.wdl" <<'WDL'
 version 1.0
@@ -419,6 +434,11 @@ STUB
     want "and is reported as out-of-layer, still failing, still quoting womtool's own words" 1 \
         "OUT-OF-LAYER" "Does not perform" "No coercion defined from" \
         "GSVTK-WOMTOOL wf=Wad status=RUN pairs=1 failures=1" -- run_cls "$msg_value" 1
+    want_no "an extra-key rejection is neither a DISAGREES nor out-of-layer" 1 \
+        "DISAGREES" "OUT-OF-LAYER" -- run_cls "$msg_extra" 1
+    want "and names the gap it falls through, quoting womtool's own words" 1 \
+        "EXTRAS-GAP" "Unexpected input provided" "does not ask" "Unexpected input" \
+        "GSVTK-WOMTOOL wf=Wad status=RUN pairs=1 failures=1" -- run_cls "$msg_extra" 1
     want "a key-class womtool rejection against a clean key set IS still a DISAGREES" 1 \
         "DISAGREES" "start there" -- run_cls "$msg_keys" 1
     want_no "and womtool passing a clean key set prints neither of those verdicts" 0 \

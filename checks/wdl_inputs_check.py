@@ -263,7 +263,7 @@ def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True)
 # what is wrong is picked by shape, not position, because "the first line" is a jar-not-found message
 # more often than it is the answer.
 ERROR_MARKS = ("not specified", "unrecognized", "out-of-place", "error", "invalid", "exception",
-               "failed", "unable", "mismatch")
+               "failed", "unable", "mismatch", "unexpected input")
 
 # Which QUESTION a rejection asks, because only one of them is this file's question. Measured with the
 # jar CI pins (womtool-84, `java -jar womtool-84.jar validate`) against gatk-sv `01107996`:
@@ -280,19 +280,33 @@ ERROR_MARKS = ("not specified", "unrecognized", "out-of-place", "error", "invali
 # type-checking", precisely because Terra configs are `${this.x}` placeholders. So a value-class
 # rejection is reported as what it is, and a DISAGREES is only claimed when both sides answered the
 # same question. womtool's verdict still prints and still fails the run either way.
-KEY_MARKS = ("not specified", "unrecognized", "unrecognised", "out-of-place", "no such key",
-             "required workflow input")
+#
+# The third class is the gap this file has always had and now names. Measured by adding one key to a
+# real rendered test JSON and re-running the same command (gatk-sv `01107996`):
+#
+#     WARNING: Unexpected input provided: IntegrateGDVcf.this_key_does_not_exist_in_the_wdl
+#     (expected inputs: [...])                                      rc=1
+#
+# An input file naming a key the WDL never declares is a KEY question, but it is not the question this
+# file asks — it compares REQUIRED keys against the JSON, never the JSON's keys back against the WDL —
+# so a rejection of this class must not be reported as the mirror being wrong either. Nothing here
+# invents an extras check: it names what womtool saw and says which layer does not cover it.
+KEY_MARKS = ("not specified", "no such key", "required workflow input")
+EXTRAS_MARKS = ("unexpected input", "unrecognized", "unrecognised", "out-of-place")
 VALUE_MARKS = ("failed to evaluate input", "no coercion defined", "coercion", "was not found in the",
                "not a valid", "illegal")
 
 
 def rejection_class(text: str) -> str:
-    """'keys' (which inputs the JSON names — this file's question), 'value' (what a value evaluates
-    to — not this file's question), or 'other'. First match wins toward 'keys', because a rejection
-    that mentions a missing input IS comparable no matter what else it says."""
+    """'keys' (a required input the JSON does not name — this file's question), 'extras' (a key the
+    JSON names that the WDL does not declare — a key question this file does NOT ask), 'value' (what a
+    value evaluates to), or 'other'. Order matters: a rejection that names a missing required input is
+    comparable no matter what else it says."""
     low = text.lower()
     if any(mark in low for mark in KEY_MARKS):
         return "keys"
+    if any(mark in low for mark in EXTRAS_MARKS):
+        return "extras"
     if any(mark in low for mark in VALUE_MARKS):
         return "value"
     return "other"
@@ -311,11 +325,13 @@ def womtool_run(wdl_dir: str, name: str, pairs: list, jar: str, java: str) -> di
     """CI's own command per pair: `java -jar $WOMTOOL_JAR validate <wdl> -i <json>`.
 
     Local and offline — womtool parses, it launches nothing. The verdict is the exit code plus
-    womtool's own first error line, so a finding here reads like the CI log. `value_failures` counts
-    the subset of those failures that are NOT the key-presence question (see rejection_class): they
-    still count as failures, and they are not comparable with this file's answer.
+    womtool's own first error line, so a finding here reads like the CI log. `class_counts` sorts the
+    failures by the question each rejection asks (see rejection_class): every class still counts as a
+    failure, and only the 'keys' class is comparable with this file's answer. `value_failures` is the
+    non-comparable total (`value` + `other`).
     """
-    base = {"pairs": 0, "failures": 0, "value_failures": 0, "lines": []}
+    base = {"pairs": 0, "failures": 0, "value_failures": 0, "lines": [],
+            "class_counts": {"keys": 0, "extras": 0, "value": 0, "other": 0}}
     if not jar:
         return dict(base, status="SKIPPED", reason="no-jar", detail="WOMTOOL_JAR is unset")
     if not os.path.isfile(jar):
@@ -333,14 +349,18 @@ def womtool_run(wdl_dir: str, name: str, pairs: list, jar: str, java: str) -> di
             proc = subprocess.run(cmd, cwd=wdl_dir, capture_output=True, text=True, timeout=600)
         except (OSError, subprocess.SubprocessError) as exc:
             res["failures"] += 1
+            res["class_counts"]["other"] += 1
+            res["value_failures"] += 1
             res["lines"].append("womtool could not run (%s): %s" % (" ".join(cmd), exc))
             continue
         first = headline(proc.stdout + proc.stderr)
         if proc.returncode == 0:
             res["lines"].append("womtool validate rc=0 %s" % ppath)
         else:
+            cls = rejection_class(proc.stdout + proc.stderr)
             res["failures"] += 1
-            if rejection_class(proc.stdout + proc.stderr) != "keys":
+            res["class_counts"][cls] += 1
+            if cls != "keys":
                 res["value_failures"] += 1
             res["lines"].append("womtool validate rc=%s %s\n      %s" % (proc.returncode, ppath, first))
     return res
@@ -448,7 +468,20 @@ def report(name: str, res: dict, wom: dict) -> int:
         rc = 1
     if wom["status"] == "RUN":
         ours, theirs = res["status"] == "FINDING", wom["failures"] > 0
-        if theirs and wom["value_failures"] == wom["failures"]:
+        counts = wom.get("class_counts") or {}
+        if theirs and counts.get("extras", 0) == wom["failures"]:
+            # The named offline gap, when it fires: a key the input file names and the WDL does not
+            # declare. womtool sees it; this layer never looks that direction.
+            print("  EXTRAS-GAP womtool rejected %s pair(s) because the input JSON names a key the WDL "
+                  % wom["failures"])
+            print("        does not declare, which is the question this layer does not ask: it compares")
+            print("        REQUIRED keys into the JSON and never the JSON's keys back into the WDL. So")
+            print("        this file says %s and womtool says %s because neither mirror is wrong — one of" %
+                  ("clean" if not ours else "missing-keys", "extra keys"))
+            print("        them was never asked. CI's -t half DOES ask it (terra_validation.py prints")
+            print("        \"Unexpected input\"), and the test-dir half gets it from womtool, which is")
+            print("        why the womtool verdict above is the one to act on.")
+        elif theirs and wom["value_failures"] == wom["failures"]:
             # Every rejection asked a question this file does not ask. Named rather than folded into a
             # DISAGREES, because "one of the two mirrors is wrong" would send a reader to fix a mirror
             # that is answering a different question (see rejection_class).
