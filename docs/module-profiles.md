@@ -57,7 +57,7 @@ code, in more places than revision 1 admitted.
 | `terra/stage_inputs.py:10,346` | `genotyped_depth_vcf` inside a generic tool's *help and error text* |
 | `checks/wdl_gate.sh:61` | `WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)` |
 | `checks/image-check/*.sh` | `GenotypeSVs` **and the flags it probes** (`jar_flag_probe.sh:52`: `rd-depth-table rd-pesr-table rd-table`) |
-| `replay/build_inputs.py:57,159-214` | the #961 rename, and a hardcoded `SVShell.` prefix: the replay loop is not parameterized by workflow at all |
+| `replay/build_inputs.py:57,159-214` | ~~the #961 rename, and a hardcoded `SVShell.` prefix: the replay loop is not parameterized by workflow at all~~ — **this row is stale; both literals in it are gone.** `wdl_inputs()` returns `f"{wf.name}."` out of the miniwdl-loaded document (`:86-101`), so the prefix is the arm's own root workflow (`SVShell` for the cohort arm, `GATKSVPipelineSingleSample` for the single-sample one), and the private #961 rename table was deleted as "not this file's business" (9c9c910). What is left in the file is `LOCAL_PREFIX` (`:61`), a Cromwell staging convention rather than a module fact. Pinned by a control that cannot pass on the literal it replaced (eee444c): two fixture WDLs, one named `SVShell` and one not, must produce different prefixes from the same code path — wired at `scripts/selftest.sh:271`, and a NAMED skip when the interpreter has no miniwdl |
 | `compare/compare_batch_tables.py:38-55` | 7 table roles, 3 readers, tolerances, `RENAMES`, the 10× `SRQ`/`PEQ` scale note |
 | `compare/diff_rd_states.py:26,31-32` | baseline/new VCF defaults, computed **at import** |
 | `Makefile:242`, `kit/gsvtk-config:57` | an audit pattern; "used when running the java genotyper" |
@@ -500,7 +500,9 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
 4. **Collapse, don't duplicate.** Delete the **three** step→workflow copies
    (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`) into one reader fed
    by the module, and fold in `batch_fetch_compare.sh`'s export list (7 names),
-   `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path, `build_inputs.py`'s `SVShell.` prefix,
+   `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path, `build_inputs.py`'s `SVShell.` prefix
+   (**done, and by a different route than this step assumed**: the prefix is not folded into a profile
+   read, it is read out of the WDL document the caller already passed — see §1's row for that file),
    `wdl_gate`'s default set and the jar-probe target+flags. Two guards on this step, both from review:
    the default `--wf` set stays the script's own list with profiles *added* (a profile naming only
    `GenotypeBatch` would silently drop `SVShell`, `GATKSVPipelineSingleSample` and `MakeCohortVcf`,
@@ -563,10 +565,27 @@ Still open in step 4, one bullet per item, each saying what is actually blocking
   in rd-depth-table rd-pesr-table rd-table`) with the VM target in `run_in_image.sh`'s `$RUN_TARGET` —
   `checks/**`, which a concurrent lane owns. Recorded here rather than quietly dropped, because a
   still-open item that looks finished costs the next reader a whole lane to rediscover.
-* `replay/build_inputs.py`'s `SVShell.` prefix and `fetch_baseline.py`'s `!! no config for step` — the
-  two remaining names in item 4's list. Both have moved since the paragraph above was written, and each
-  is taken up on its own immediately below rather than in a list, because "still open" that is already
-  shut is worse than an absent list.
+* **`replay/build_inputs.py`'s `SVShell.` prefix: shut — and it shut on 2026-09-25, before the paragraph
+  above was written.** "Still open" that is already shut is worse than an absent list, because the next
+  reader spends a lane rediscovering it, so this bullet exists to stop that. What the code does now:
+  `wdl_inputs()` loads the WDL the caller passed with miniwdl and returns
+  (`f"{wf.name}.", declared_inputs`) — the prefix IS the loaded document's root workflow name, so a
+  single-sample arm gets `GATKSVPipelineSingleSample.`-keyed JSON instead of JSON its submission could
+  not read. The five literals came out in 9c9c910 (*"the prefix comes from the WDL you passed, and the
+  #961 rename is not this file's business"*), which also deleted the file's private copy of the
+  `genotyping_rd_table` rename. The proof came later, in eee444c, and its shape is the reason to copy it:
+  asserting "the keys say `SVShell.`" would have passed on the very literal that caused the bug, so the
+  control is **two fixture WDLs, one whose workflow really is named `SVShell` and one that is not, both
+  loaded, expected to differ**: the first must yield `MyCoolPipeline.` (a name the file never mentions),
+  the second must yield `SVShell.` — the same string the literal carried, reached by loading a document
+  instead of reciting a constant. Runs at `scripts/selftest.sh:271`, inside the `import WDL` guard that
+  prints a named SKIP (never a silent ok) when miniwdl is absent.
+
+  The §9 item-4 list above and §1's row for this file are corrected in place rather than deleted: the
+  inventory of "what is genotyping-specific" is also a record of what stopped being specific, and the
+  commit that closed a row is the thing a reader needs when the row reopens for a new module.
+* `fetch_baseline.py`'s `!! no config for step` — the last name in item 4's list, and it has moved too;
+  taken up separately below for the same reason.
 
 `checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item 4's first guard is that
 a profile naming only `GenotypeBatch` would silently drop three of the four workflows it certifies, in
