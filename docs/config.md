@@ -87,11 +87,14 @@ workspace) or safely derivable.
 | `GSVTK_FROZEN_SUFFIX` | `frz` | freeze, configs, fetch | attribute suffix for frozen baseline inputs |
 | `GSVTK_NEW_SUFFIX` | `new` | configs, fetch | attribute suffix for this chain's outputs |
 | `GSVTK_BATCH` | `all_samples` | freeze, configs, rerun, fetch+compare, `fetch_baseline.py --entity`, `stage_inputs.py --attrs`, `diff_rd_states.py` | the `sample_set` entity holding batch-level attributes. Every reader now takes it from here; when the configured row is absent from a frozen manifest, `stage_inputs.py` stops and names the rows that exist rather than selecting nothing at exit 0 |
+| `GSVTK_MODULE` / `_MODULE_DIR` | `genotyping` / `<repo>/profiles` | `batch_configs.py` (all five maps come from there), `kit/module_profile.py` | which module the loops drive, and the file that says so: `GSVTK_MODULE_DIR/GSVTK_MODULE.json`. `show` prints both with their provenance plus the resolved path, so "which module, and why that one" is one line. An unusable or absent profile exits 4 from the loops, naming the file and every field a working profile carries. **Python is the only reader** (`kit/module_profile.py` expands `{frz}`/`{new}` and `@`-over-callers once); no shell file parses `profiles/` | 
 | `GSVTK_WORK` | `<repo>/work` | everything that writes | scratch: staged inputs, runs, manifests, fetched outputs |
 
 Set the two suffixes once and keep them consistent: `batch_configs.py` writes outputs to
 `*{NEW_SUFFIX}` and `batch_fetch_compare.sh` reads the new side from the same suffix. If they
-disagree you get an empty comparison instead of an error, which is worse.
+disagree you get an empty comparison instead of an error, which is worse. A module profile spells the
+same two keys as the tokens `{frz}`/`{new}`, and `kit/module_profile.py` is the one place that expands
+them — deliberately, so there is never a second expander for the two readers above to disagree with.
 
 ## Tool config that is not in the profile
 

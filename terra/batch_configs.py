@@ -49,6 +49,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
 sys.path.insert(0, HERE)
 import config  # noqa: E402
+import module_profile  # noqa: E402  (the reader of profiles/<MODULE>.json; kit/ is on sys.path)
 import terra  # noqa: E402
 from terra import fapi  # noqa: E402  # via terra: one friendly missing-dependency message
 
@@ -78,29 +79,27 @@ def require_target(writes=False):
                                     allow="--allow-shared-target" in sys.argv)
     return NS, WS, BRANCH
 
-# Attribute suffixes: baseline inputs in, this chain's outputs out.
-FZ = "_" + config.get("FROZEN_SUFFIX", "frz")
-NW = "_" + config.get("NEW_SUFFIX", "new")
+# Attribute suffixes are read by the profile loader (`kit/module_profile.py`), which is the one place
+# that turns a profile's `{frz}`/`{new}` tokens into `_frz`/`_new`; this file used to interpolate them
+# into 100 binding strings by hand, which is the same two config keys parsed in two places.
 # A path, not a directory: `show` and `--help` import this module and must create nothing.
 # create() makes the directory when it actually writes.
 DUMP = str(config.work_path("manifests") / "batch_configs.json")
 
-
-# Inputs that exist only on the branch under test. Data, not prose, so `check` can distinguish
-# "known branch-only input" from "this key is news to us", and so the fix is written next to the key:
+# The three tables below are DATA, and the data now lives in `profiles/<MODULE>.json`
+# (`GSVTK_MODULE`, `GSVTK_MODULE_DIR`; docs/module-profiles.md §3). What used to sit here was 64 input
+# and 36 output bindings, the caller list, the branch-only key set, and a 12-line rationale for one of
+# those keys -- all of it a hand-copy of upstream facts, which is what §1 calls the cost of
+# transcription. That cost is paid once now, in the profile, and the rationale travels with the key it
+# explains as a `_why_*` sibling instead of being stranded here as a comment.
 #
-#   GenotypeBatch.training_vcf   from "Train PE/SR genotyping on a separate batch-level VCF". main's
-#                                GenotypeBatch declares 21 inputs (18 + 3 dockers) and trains PE/SR
-#                                from `vcf` itself; the branch declares 26, adding training_vcf,
-#                                genotype_args, training_args, n_RD_genotype_bins and
-#                                fail_on_degenerate_sr_cutoffs. This map binds only training_vcf --
-#                                the other four have WDL defaults -- so it is the single key a
-#                                main-shaped run has to drop. It was posted against a main-derived
-#                                ref and rejected as an extra input; that is what happened, and this
-#                                table is why `check` can name it instead of just failing.
-BRANCH_ONLY_INPUTS: dict[str, set[str]] = {
-    "10-GenotypeBatch": {"GenotypeBatch.training_vcf"},
-}
+# `BRANCH_ONLY_INPUTS` keeps the shape this file has always offered: a dict keyed by config name whose
+# values are sets of FULL binding keys ("GenotypeBatch.training_vcf"), so `check` can still distinguish
+# "known branch-only input" from "this key is news to us", and `--drop-branch-only-inputs` still finds
+# the same keys. The rationale for the one key this module carries is in the profile beside it.
+BRANCH_ONLY_INPUTS: dict[str, set[str]] = {}
+
+
 
 
 def dockstore(workflow: str) -> dict:
@@ -111,153 +110,39 @@ def dockstore(workflow: str) -> dict:
             "methodUri": f"dockstore://{path.replace('/', '%2F')}/{BRANCH}"}
 
 
-# --------------------------------------------------------------------------------------
-# Input maps follow inputs/templates/terra_workspaces/cohort_mode/workflow_configurations/*
-# on the branch, with frozen inputs read from *_frz and chain outputs from *_new.
-# Optional (File?) inputs with no value are simply omitted.
-# --------------------------------------------------------------------------------------
-CALLERS = ["manta", "wham", "scramble"]  # dragen/melt produced nothing in this cohort
 
-CONFIGS = {
-    "06-GenerateBatchMetrics": {
-        "workflow": "GenerateBatchMetrics",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "GenerateBatchMetrics.batch": "this.sample_set_id",
-            "GenerateBatchMetrics.pe_file": f"this.merged_PE{FZ}",
-            "GenerateBatchMetrics.sr_file": f"this.merged_SR{FZ}",
-            "GenerateBatchMetrics.baf_file": f"this.merged_BAF{FZ}",
-            "GenerateBatchMetrics.rd_file": f"this.merged_bincov{FZ}",
-            "GenerateBatchMetrics.median_file": f"this.median_cov{FZ}",
-            "GenerateBatchMetrics.ped_file": "workspace.cohort_ped_file",
-            "GenerateBatchMetrics.depth_vcf": f"this.clustered_depth_vcf{FZ}",
-            **{f"GenerateBatchMetrics.{c}_vcf": f"this.clustered_{c}_vcf{FZ}" for c in CALLERS},
-            "GenerateBatchMetrics.primary_contigs_list": "workspace.primary_contigs_list",
-            "GenerateBatchMetrics.chr_x": "workspace.chr_x",
-            "GenerateBatchMetrics.chr_y": "workspace.chr_y",
-            "GenerateBatchMetrics.rmsk": "workspace.rmsk",
-            "GenerateBatchMetrics.segdups": "workspace.segdups",
-            "GenerateBatchMetrics.reference_dict": "workspace.reference_dict",
-            "GenerateBatchMetrics.gatk_docker": "workspace.gatk_docker",
-            "GenerateBatchMetrics.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "GenerateBatchMetrics.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-        },
-        "outputs": {
-            "GenerateBatchMetrics.metrics": f"this.metrics{NW}",
-            "GenerateBatchMetrics.metrics_file_batchmetrics": f"this.metrics_file_batchmetrics{NW}",
-            "GenerateBatchMetrics.ploidy_table": f"this.ploidy_table{NW}",
-        },
-    },
-    "07-FilterBatchSites": {
-        "workflow": "FilterBatchSites",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "FilterBatchSites.batch": "this.sample_set_id",
-            "FilterBatchSites.evidence_metrics": f"this.metrics{NW}",
-            "FilterBatchSites.depth_vcf": f"this.clustered_depth_vcf{FZ}",
-            **{f"FilterBatchSites.{c}_vcf": f"this.clustered_{c}_vcf{FZ}" for c in CALLERS},
-            "FilterBatchSites.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "FilterBatchSites.N_IQR_cutoff_plotting": "6",
-        },
-        "outputs": {
-            "FilterBatchSites.sites_filtered_depth_vcf": f"this.sites_filtered_depth_vcf{NW}",
-            "FilterBatchSites.sites_filtered_manta_vcf": f"this.sites_filtered_manta_vcf{NW}",
-            "FilterBatchSites.sites_filtered_scramble_vcf": f"this.sites_filtered_scramble_vcf{NW}",
-            "FilterBatchSites.sites_filtered_wham_vcf": f"this.sites_filtered_wham_vcf{NW}",
-            "FilterBatchSites.cutoffs": f"this.cutoffs{NW}",
-            "FilterBatchSites.scores": f"this.scores{NW}",
-            "FilterBatchSites.RF_intermediate_files": f"this.RF_intermediate_files{NW}",
-            "FilterBatchSites.sites_filtered_sv_counts": f"this.sites_filtered_sv_counts{NW}",
-            "FilterBatchSites.sites_filtered_sv_count_plots": f"this.sites_filtered_sv_count_plots{NW}",
-            "FilterBatchSites.sites_filtered_outlier_samples_preview": f"this.sites_filtered_outlier_samples_preview{NW}",
-            "FilterBatchSites.sites_filtered_outlier_samples_with_reason": f"this.sites_filtered_outlier_samples_with_reason{NW}",
-            "FilterBatchSites.sites_filtered_num_outlier_samples": f"this.sites_filtered_num_outlier_samples{NW}",
-        },
-    },
-    "08-FilterBatchSamples": {
-        "workflow": "FilterBatchSamples",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "FilterBatchSamples.batch": "this.sample_set_id",
-            "FilterBatchSamples.N_IQR_cutoff": "10000",
-            "FilterBatchSamples.depth_vcf": f"this.sites_filtered_depth_vcf{NW}",
-            **{f"FilterBatchSamples.{c}_vcf": f"this.sites_filtered_{c}_vcf{NW}" for c in CALLERS},
-            "FilterBatchSamples.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "FilterBatchSamples.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "FilterBatchSamples.linux_docker": "workspace.linux_docker",
-        },
-        "outputs": {
-            "FilterBatchSamples.outlier_filtered_depth_vcf": f"this.outlier_filtered_depth_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_depth_vcf_index": f"this.outlier_filtered_depth_vcf_index{NW}",
-            "FilterBatchSamples.outlier_filtered_manta_vcf": f"this.outlier_filtered_manta_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_scramble_vcf": f"this.outlier_filtered_scramble_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_wham_vcf": f"this.outlier_filtered_wham_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_pesr_vcf": f"this.outlier_filtered_pesr_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_pesr_vcf_index": f"this.outlier_filtered_pesr_vcf_index{NW}",
-            "FilterBatchSamples.filtered_batch_samples_file": f"this.filtered_batch_samples_file{NW}",
-            "FilterBatchSamples.outlier_samples_excluded_file": f"this.outlier_samples_excluded_file{NW}",
-        },
-    },
-    "09-MergeBatchSites": {
-        "workflow": "MergeBatchSites",
-        "rootEntityType": "sample_set_set",
-        "inputs": {
-            "MergeBatchSites.cohort": "this.sample_set_set_id",
-            "MergeBatchSites.pesr_vcfs": f"this.sample_sets.outlier_filtered_pesr_vcf{NW}",
-            "MergeBatchSites.depth_vcfs": f"this.sample_sets.outlier_filtered_depth_vcf{NW}",
-            "MergeBatchSites.ploidy_tables": f"this.sample_sets.ploidy_table{NW}",
-            "MergeBatchSites.reference_fasta": "workspace.reference_fasta",
-            "MergeBatchSites.reference_fasta_fai": "workspace.reference_index",
-            "MergeBatchSites.reference_dict": "workspace.reference_dict",
-            "MergeBatchSites.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "MergeBatchSites.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "MergeBatchSites.gatk_docker": "workspace.gatk_docker",
-        },
-        "outputs": {
-            "MergeBatchSites.merge_batch_sites_vcf": f"workspace.merge_batch_sites_vcf{NW}",
-            "MergeBatchSites.merge_batch_sites_vcf_index": f"workspace.merge_batch_sites_vcf_index{NW}",
-        },
-    },
-    "10-GenotypeBatch": {
-        "workflow": "GenotypeBatch",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "GenotypeBatch.batch": "this.sample_set_id",
-            # sites to genotype = PESR+depth merged by step 09 (production wiring);
-            # PE/SR *training* sites = this batch's own filtered PESR VCF from step 08
-            "GenotypeBatch.vcf": f"workspace.merge_batch_sites_vcf{NW}",
-            "GenotypeBatch.training_vcf": f"this.outlier_filtered_pesr_vcf{NW}",
-            "GenotypeBatch.rf_cutoffs": f"this.cutoffs{NW}",
-            "GenotypeBatch.median_coverage": f"this.median_cov{FZ}",
-            "GenotypeBatch.rd_file": f"this.merged_bincov{FZ}",
-            "GenotypeBatch.pe_file": f"this.merged_PE{FZ}",
-            "GenotypeBatch.sr_file": f"this.merged_SR{FZ}",
-            "GenotypeBatch.reference_dict": "workspace.reference_dict",
-            "GenotypeBatch.training_intervals": "workspace.depth_training_bed",
-            "GenotypeBatch.ploidy_table": f"this.ploidy_table{NW}",
-            "GenotypeBatch.depth_exclusion_intervals": "workspace.bin_exclude",
-            "GenotypeBatch.pesr_exclusion_intervals": "workspace.pesr_exclude_list",
-            "GenotypeBatch.contig_list": "workspace.primary_contigs_list",
-            "GenotypeBatch.gatk_docker": "workspace.gatk_docker",
-            "GenotypeBatch.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "GenotypeBatch.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            # n_RD_genotype_bins (100000) and fail_on_degenerate_sr_cutoffs (true) come from
-            # the WDL defaults - the point of the branch is that these are now correct by default.
-        },
-        "outputs": {
-            "GenotypeBatch.genotyped_depth_vcf": f"this.genotyped_depth_vcf{NW}",
-            "GenotypeBatch.genotyped_depth_vcf_index": f"this.genotyped_depth_vcf_index{NW}",
-            "GenotypeBatch.genotyped_pesr_vcf": f"this.genotyped_pesr_vcf{NW}",
-            "GenotypeBatch.genotyped_pesr_vcf_index": f"this.genotyped_pesr_vcf_index{NW}",
-            "GenotypeBatch.genotyping_rd_depth_table": f"this.genotyping_rd_depth_table{NW}",
-            "GenotypeBatch.genotyping_rd_pesr_table": f"this.genotyping_rd_pesr_table{NW}",
-            "GenotypeBatch.genotyping_pe_table": f"this.genotyping_pe_table{NW}",
-            "GenotypeBatch.genotyping_sr_table": f"this.genotyping_sr_table{NW}",
-            "GenotypeBatch.genotyping_sr_cutoff_diagnostics": f"this.genotyping_sr_cutoff_diagnostics{NW}",
-            "GenotypeBatch.regeno_coverage_medians": f"this.regeno_coverage_medians{NW}",
-        },
-    },
-}
+# ---------------------------------------------------------------------------------------------
+# The maps: read from the module profile, then held as module-level dicts.
+#
+# Input maps follow inputs/templates/terra_workspaces/cohort_mode/workflow_configurations/* on the
+# branch, with frozen inputs read from the `{frz}` suffix and chain outputs from the `{new}` one --
+# both suffix tokens expand from GSVTK_FROZEN_SUFFIX / GSVTK_NEW_SUFFIX, in ONE place
+# (`kit/module_profile.py`), and `@` fans out over the profile's caller list. The profile lists the
+# keys upstream produced nothing for (dragen/melt in this cohort) rather than binding them.
+#
+# Why these are still plain dicts at module level, populated here rather than fetched per call:
+# five probes and `terra/batch_rerun_step.py` read `CONFIGS` as an attribute, and `docs/module-
+# profiles.md` §7's zero-config rule says `--help` must not depend on repo data. So the load happens
+# once, through a loader that never raises and never creates a file, and a profile that cannot be used
+# shows up as EMPTY tables plus a `PROFILE` full of findings -- which the commands that need a table
+# report with `require_module()` (exit 4, naming the file and every field). An empty `CONFIGS` is
+# therefore never a pass: `show` prints nothing, `check` refuses 0 configs, and `body()` refuses.
+PROFILE = module_profile.load()
+CONFIGS: dict = PROFILE.configs
+CALLERS: list = PROFILE.callers
+BRANCH_ONLY_INPUTS.update(PROFILE.branch_only_inputs)
+
+
+def require_module(tag: str = "") -> None:
+    """Refuse, by name and in full, when this run has no usable module profile.
+
+    Called by the commands that build or compare a config, never at import: `--help` and `--selftest`
+    answer with zero configuration, and `helpsweep` proves it. An unusable profile exits 4 naming the
+    file, what is wrong with it, and every field a working profile carries -- not a subset, because the
+    first error text here named 5 of the fields a profile needed and following it produced a file that
+    could not drive a chain (docs/module-profiles.md §6).
+    """
+    PROFILE.require(tag or "batch_configs")
 
 
 # `--drop-branch-only-inputs`: build a ref-shaped config by removing bindings the ref does not
@@ -354,6 +239,7 @@ def call_cache(tag: str = "") -> bool:
 
 
 def body(name: str) -> dict:
+    require_module("body")
     spec = CONFIGS[name]
     # dict(): spec["inputs"] IS the module-level table. Pruning without copying would delete the key
     # from CONFIGS for the rest of the process -- so `show` after one adapted `create` would report a
@@ -361,7 +247,10 @@ def body(name: str) -> dict:
     # the map it sits beside.
     inputs = _adapt_inputs(name, spec, dict(spec["inputs"]))
     return {"namespace": NS, "name": name, "rootEntityType": spec["rootEntityType"],
-            "methodRepoMethod": dockstore(spec["workflow"]),
+            # `wdl`, not `workflow`: the Dockstore path is the WDL FILE basename, and the declared
+            # workflow name is a separate fact (they differ for 12 of the 109 workflow-bearing WDLs at
+            # main -- DepthClustering/ClusterDepth, Genotype_2/Regenotype). docs/module-profiles.md §3.
+            "methodRepoMethod": dockstore(spec["wdl"]),
             # Rawls rejects the body without it (400 "missing required member
             # 'methodConfigVersion'"); the server bumps it on every overwrite.
             "methodConfigVersion": 1,
@@ -383,6 +272,7 @@ def call_cache_line() -> str:
 
 
 def show():
+    require_module("show")
     print(call_cache_line())
     for name in CONFIGS:
         b = body(name)
@@ -756,7 +646,8 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
     bad = 0
     ncomp = 0
     label = ref or _verify_ref() or "the ref under test"
-    for tgt in configs_to_check(only):
+    targets = configs_to_check(only)
+    for tgt in targets:
         name, workflow = tgt["name"], tgt["workflow"]
         try:
             declared, required = _declared_inputs(wdl_dir, workflow)
@@ -862,6 +753,7 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
 
 
 def cmd_check() -> int:
+    require_module("check")
     ref = _flag_value("--against") or BRANCH
     wd = _flag_value("--wdl-dir")
     if not wd:
@@ -913,6 +805,7 @@ def preflight(tag: str) -> None:
 
 
 def create():
+    require_module("create")
     preflight("create")                    # offline: a config Terra will reject must not be POSTed
     print(call_cache_line())               # the mode that is about to be POSTed, not the default
     out = {}
@@ -935,6 +828,7 @@ def validate():
     """Terra resolves the Dockstore WDL and reports per-input binding: the cheapest real gate
     before spending money. Response shape is extraInputs / invalidInputs / invalidOutputs /
     missingInputs / validInputs - there is no boolean 'valid' key."""
+    require_module("validate")
     preflight("validate")                  # free + offline first; this step costs a round-trip each
     bad = 0
     for name in CONFIGS:
