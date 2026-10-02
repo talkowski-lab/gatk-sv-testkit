@@ -565,6 +565,15 @@ check(man.get("steps_missing") == ["05", "07", "08", "09"] and len(man.get("step
       % (man.get("steps_missing"), len(man.get("steps") or {})))
 check("PARTIAL" in out,
       "and the log tells the human the manifest is PARTIAL rather than leaving silence to interpret")
+# What was TRIED, not just that nothing was found: `pick_config` deliberately does not use
+# `steps.match_configs`, so the sentence cannot borrow that tool's three-pattern message -- it has to
+# state its own one pattern and the size of the haystack it searched. Without this, "no config for step
+# 05" is one character away from "this workspace has no configs at all".
+check("starts with '05-'" in out and "starts with '07-'" in out
+      and "2 method config" in out,
+      "a skipped step names the pattern it tried and how many config names it looked at, so an empty "
+      "answer cannot be read as \"the workspace is empty\"",
+      "lines carrying '!!': %s" % sum(1 for l in out.splitlines() if "!!" in l))
 
 rc2, out2, man2 = run(["06", "07", "08", "09", "10"],
                       ["06-GenerateBatchMetrics", "07-FilterBatchSites", "08-FilterBatchSamples",
@@ -580,7 +589,7 @@ print("fetch_baseline counted-gap guard: %d ok, %d failed"
 sys.exit(1 if bad else 0)
 PY
 want "fetch_baseline records a counted, named, PARTIAL hole for every step a workspace lacks, and exits 1" 0 \
-    "fetch_baseline counted-gap guard: 9 ok, 0 failed" -- \
+    "fetch_baseline counted-gap guard: 10 ok, 0 failed" -- \
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/baseline-work" \
     GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/" \
     "$PY" "$TMP/fetch-baseline-guard.py" "$ROOT" "$TMP/baseline-work"
