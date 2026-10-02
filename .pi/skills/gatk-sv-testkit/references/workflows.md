@@ -223,6 +223,9 @@ file in this repo:
 ```bash
 # "what breaks if I change this file?" (script edges included; a full-tree parse is ~34 s)
 ./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --reverse --target Structs.wdl
+# several questions at once: --target is repeatable and the tree loads ONCE, so N names cost one
+# ~34 s parse and not N of them. Each name gets its own answer block, in the order asked.
+./checks/wdl_reach.py --dir "$GSVTK_GATK_SV_CHECKOUT" --target MakeCohortVcf --target GenotypeBatch
 
 # "what does production actually pin?" read from gatk-sv's dockerfiles at a ref, git show only
 ./scripts/prod_pins.py --repo "$GSVTK_GATK_SV_CHECKOUT" --ref origin/main

@@ -45,7 +45,7 @@ Three rules, and the order between them is the point:
    nothing, so they dispatch under `GSVTK_READ_ONLY=1` without `--confirm`.
 
 `make test` runs the offline assertions behind all of this: `bash
-scripts/selftest.d/cli.sh .venv/bin/python` prints the suite's own tally (88 assertions) and every
+scripts/selftest.d/cli.sh .venv/bin/python` prints the suite's own tally (108 assertions) and every
 mode below that is named there is checked reaching the file it claims to reach, against stand-in
 scripts that echo the resolved command line.
 
@@ -62,7 +62,7 @@ scripts that echo the resolved command line.
 | You type | It runs | Free? |
 |---|---|---|
 | `gsvtk locate` / `tools` / `doctor [--redact]` / `repo` / `version` | the config layer and `command -v`, nothing else | free |
-| `gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]` | `checks/wdl_gate.sh`, `checks/svshell_contract_check.py`, `checks/svshell_jq_plumbing_scan.py`, and with the two opt-in flags `checks/wdl_semantics.py` and `checks/wdl_reach.py` | free, offline. `--reach` needs at least one `--wf NAME`, which IS the target: `wdl_reach` answers one named file/workflow/task/script at a time and has no default target, so `--reach` alone is refused as a usage error before any checker runs. With no `--repo`, the tree both opt-in checkers scan is `GSVTK_GATK_SV_CHECKOUT` from the resolver -- the same source `svshell_contract_check.py` already used |
+| `gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]` | `checks/wdl_gate.sh`, `checks/svshell_contract_check.py`, `checks/svshell_jq_plumbing_scan.py`, and with the two opt-in flags `checks/wdl_semantics.py` and `checks/wdl_reach.py` | free, offline. `--reach` needs at least one `--wf NAME`, which IS the target: `wdl_reach` has no default target, so `--reach` alone is refused as a usage error before any checker runs. Every name goes to `checks/wdl_reach.py` as one repeated `--target` in ONE run, because the tree load (~35 s on a gatk-sv tree) is the whole cost and one process per name paid it N times: you get one `tree:` provenance line and one answer block per name, in the order you listed them. A name the tree does not know is reported by name with its own closest matches, and the run exits nonzero without swallowing the names that did answer. With no `--repo`, the tree both opt-in checkers scan is `GSVTK_GATK_SV_CHECKOUT` from the resolver -- the same source `svshell_contract_check.py` already used |
 | `gsvtk check image <run_in_image\|svshell_image_check\|jar_flag_probe> ...` | `checks/image-check/*.sh` | **boots a GCE VM**: `--dry-run` is free, the probe needs `--confirm` |
 | `gsvtk build <branch> [image ...]` | `docker/gatk-sv-build.sh --check` then `--dry-run` | free — this default *is* the preview |
 | `gsvtk build <branch> [image ...] --confirm` | `docker/gatk-sv-build.sh <branch> [image ...]` | **VM + registry push** |
