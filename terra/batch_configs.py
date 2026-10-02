@@ -84,6 +84,16 @@ def require_target(writes=False):
 # Attribute suffixes are read by the profile loader (`kit/module_profile.py`), which is the one place
 # that turns a profile's `{frz}`/`{new}` tokens into `_frz`/`_new`; this file used to interpolate them
 # into 100 binding strings by hand, which is the same two config keys parsed in two places.
+#
+# The INTERPOLATION moved; the NAMES did not. `FZ`/`NW` have been public attributes of this module for
+# as long as they existed, and readers still resolve them as attributes rather than re-deriving them:
+# `batch_rerun_step.announce()` classifies every binding of the step it is about to submit as a chain
+# output or a frozen input by testing its suffix against these two, and `scripts/probe_fixes.py` pins
+# that. So they are answers THIS module owes, and they are taken from the loader's own answer rather
+# than from `config.get` a second time -- one place per key is the whole reason the interpolation moved.
+_SUFFIXES = module_profile.suffixes()
+FZ = _SUFFIXES["frz"]
+NW = _SUFFIXES["new"]
 # A path, not a directory: `show` and `--help` import this module and must create nothing.
 # create() makes the directory when it actually writes.
 DUMP = str(config.work_path("manifests") / "batch_configs.json")

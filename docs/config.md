@@ -111,6 +111,7 @@ Things that are per-invocation rather than per-user stay as flags or their own v
 | `PROFILE_BIN` | `batch_fetch_compare.sh` | an installed `gatk-sv-profile` |
 | `GSV_WDL_VERSION` | `terra/batch_rerun_step.py` | override the Dockstore version, e.g. to pin a SHA-pinned tag. It is also the ref the rerun pre-check compares bindings against, not `GSVTK_BRANCH`, which may name something else entirely, and grading the wrong ref means scoring a document that nothing runs |
 | `CAPTURED`, `IMAGES` | `examples/replay_reference_run.sh` | local copy of that task's Cromwell `script`, and the per-arm image map |
+| `GSVTK_READ_ONLY`, `GSVTK_HOME`, `GSVTK_TERRA_PY`, `GSVTK_SKILL_VERSION` | `gsvtk`, its skill shim, `scripts/check_skill.py` | the CLI's four transport knobs: the agent's read-only contract, the checkout path when discovery would otherwise have to guess, an interpreter that has `firecloud`, and the skill's stamped version. Only `GSVTK_READ_ONLY` carries a promise, and [cli.md](cli.md) states once what it refuses -- this row exists so the settings reference still indexes the variable, not to say it a second time |
 | `RESULTS` | `batch_fetch_compare.sh` | scratch root; `OUTPUTS`/`STAGING` and its other knobs (`TERRA_PY`, `GSUTIL`, `GATK_BIN`, `XMX`, `NUM_WORKERS`, `LABEL_A`, `LABEL_B`, `REF_DICT`, `CONTIG_LIST`, `BASELINE_PESR_VCF`, `NS`, `WS`, `ENTITY`) derive from it or are named in that script's own header |
 
 ## Work directory

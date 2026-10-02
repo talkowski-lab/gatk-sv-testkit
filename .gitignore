@@ -43,6 +43,11 @@ compare_*/
 __pycache__/
 *.py[cod]
 .venv*/
+# `.venv*/` needs a DIRECTORY, so it does not match the `.venv` SYMLINK that exists in a linked git
+# worktree (where the interpreter is shared rather than copied). Left unignored, `git add -A` stages it
+# as mode 120000 and its blob content IS the absolute path of whoever made the worktree -- a machine
+# coordinate entering the tracked set, which is what `make audit` exists to stop. Name it exactly.
+.venv
 venv/
 .mypy_cache/
 .ruff_cache/
