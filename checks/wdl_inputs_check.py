@@ -265,6 +265,38 @@ def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True)
 ERROR_MARKS = ("not specified", "unrecognized", "out-of-place", "error", "invalid", "exception",
                "failed", "unable", "mismatch")
 
+# Which QUESTION a rejection asks, because only one of them is this file's question. Measured with the
+# jar CI pins (womtool-84, `java -jar womtool-84.jar validate`) against gatk-sv `01107996`:
+# `validate` does not stop at key presence — it also EVALUATES and COERCES every value the JSON hands
+# it, so a Terra workflow_configuration whose `Array[File]` input carries the placeholder
+# `"${this.sample_sets.ploidy_table}"` comes back
+#
+#     Failed to evaluate input 'ploidy_tables' (reason 1 of 1): No coercion defined from
+#     '"${this.sample_sets.ploidy_table}"' of type 'spray.json.JsString' to 'Array[File]'
+#
+# with every required key present. That is not one mirror calling the other wrong: this file reads key
+# sets and never a value (module docstring), and CI does not put that question to these files either
+# — `validate.sh -t` runs `terra_validation.py`, whose own docstring says "Does not perform
+# type-checking", precisely because Terra configs are `${this.x}` placeholders. So a value-class
+# rejection is reported as what it is, and a DISAGREES is only claimed when both sides answered the
+# same question. womtool's verdict still prints and still fails the run either way.
+KEY_MARKS = ("not specified", "unrecognized", "unrecognised", "out-of-place", "no such key",
+             "required workflow input")
+VALUE_MARKS = ("failed to evaluate input", "no coercion defined", "coercion", "was not found in the",
+               "not a valid", "illegal")
+
+
+def rejection_class(text: str) -> str:
+    """'keys' (which inputs the JSON names — this file's question), 'value' (what a value evaluates
+    to — not this file's question), or 'other'. First match wins toward 'keys', because a rejection
+    that mentions a missing input IS comparable no matter what else it says."""
+    low = text.lower()
+    if any(mark in low for mark in KEY_MARKS):
+        return "keys"
+    if any(mark in low for mark in VALUE_MARKS):
+        return "value"
+    return "other"
+
 
 def headline(text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -279,9 +311,11 @@ def womtool_run(wdl_dir: str, name: str, pairs: list, jar: str, java: str) -> di
     """CI's own command per pair: `java -jar $WOMTOOL_JAR validate <wdl> -i <json>`.
 
     Local and offline — womtool parses, it launches nothing. The verdict is the exit code plus
-    womtool's own first error line, so a finding here reads like the CI log.
+    womtool's own first error line, so a finding here reads like the CI log. `value_failures` counts
+    the subset of those failures that are NOT the key-presence question (see rejection_class): they
+    still count as failures, and they are not comparable with this file's answer.
     """
-    base = {"pairs": 0, "failures": 0, "lines": []}
+    base = {"pairs": 0, "failures": 0, "value_failures": 0, "lines": []}
     if not jar:
         return dict(base, status="SKIPPED", reason="no-jar", detail="WOMTOOL_JAR is unset")
     if not os.path.isfile(jar):
@@ -306,6 +340,8 @@ def womtool_run(wdl_dir: str, name: str, pairs: list, jar: str, java: str) -> di
             res["lines"].append("womtool validate rc=0 %s" % ppath)
         else:
             res["failures"] += 1
+            if rejection_class(proc.stdout + proc.stderr) != "keys":
+                res["value_failures"] += 1
             res["lines"].append("womtool validate rc=%s %s\n      %s" % (proc.returncode, ppath, first))
     return res
 
@@ -412,7 +448,25 @@ def report(name: str, res: dict, wom: dict) -> int:
         rc = 1
     if wom["status"] == "RUN":
         ours, theirs = res["status"] == "FINDING", wom["failures"] > 0
-        if ours != theirs:
+        if theirs and wom["value_failures"] == wom["failures"]:
+            # Every rejection asked a question this file does not ask. Named rather than folded into a
+            # DISAGREES, because "one of the two mirrors is wrong" would send a reader to fix a mirror
+            # that is answering a different question (see rejection_class).
+            print("  OUT-OF-LAYER all %s womtool rejection(s) are about a VALUE it could not evaluate,"
+                  % wom["failures"])
+            print("        not about which inputs the JSON names. This check reads key sets and never a")
+            print("        value, so it neither predicts that rejection nor contradicts it — and CI does")
+            print("        not put that question to Terra workflow_configurations either: validate.sh's")
+            print("        -t half is terra_validation.py, which says of itself \"Does not perform")
+            print("        type-checking\", because those files are ${this.x} placeholders. The womtool")
+            print("        verdict above stands and still fails this run; it is not a verdict on this")
+            print("        check's answer.")
+            if res["missing"]:
+                print("        And because womtool stops at its first error per pair, on these file(s) it")
+                print("        never reached key presence: the %s MISSING-INPUT line(s) above are"
+                      % len(res["missing"]))
+                print("        confirmed by neither side.")
+        elif ours != theirs:
             rc = 1
             print("  DISAGREES this check says %s and womtool says %s for the same %d file(s). One of"
                   % ("missing-keys" if ours else "clean", "missing-keys" if theirs else "clean",

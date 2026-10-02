@@ -335,7 +335,100 @@ want "the knob is documented in the tool's own --help" 0 \
     "GSVTK_WOMTOOL_INPUTS_JSON=<file>" "no jar, no java" "scripts/selftest.d/jarshape.sh" -- \
     env -u WOMTOOL_JAR -u GSVTK_WOMTOOL_INPUTS_JSON "$PY" "$TOOL" --help
 
-# 8. WITH A JAR IN HAND, THE CAPTURE IS A CAPTURE: re-run womtool on the shape-matrix WDL and require
+# 8. THE JAR'S OTHER OUTPUT: `womtool validate` words, and which of them are comparable with the
+#    key-set layer. Both messages below are VERBATIM from womtool-84 on gatk-sv refs — the first from
+#    7fbf1171 (the bug), the second from the Terra workflow_configuration at 01107996, where every
+#    required key IS present and womtool rejects the file because it also coerces values, which the
+#    key-set layer never reads. Calling the second one a disagreement between the two mirrors would
+#    send a reader to fix a mirror that is answering a different question, so `rejection_class` sorts
+#    them and `checks/wdl_inputs_check.py` reports them apart.
+msg_keys="$TMP/msg-keys.txt"
+msg_value="$TMP/msg-value.txt"
+printf '%s\n' "Required workflow input 'IntegrateGDVcf.sample_id' not specified" > "$msg_keys"
+printf '%s\n' "Failed to evaluate input 'ploidy_tables' (reason 1 of 1): No coercion defined from \"\${this.sample_sets.ploidy_table}\" of type 'spray.json.JsString' to 'Array[File]'" > "$msg_value"
+
+if "$PY" -c 'import WDL' >/dev/null 2>&1; then
+    cat > "$TMP/classify.py" <<'PY'
+import importlib.util
+import os
+import sys
+
+ROOT, path_to_msg = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(ROOT, "checks"))
+sys.path.insert(0, os.path.join(ROOT, "kit"))
+spec = importlib.util.spec_from_file_location(
+    "wdl_inputs_check", os.path.join(ROOT, "checks", "wdl_inputs_check.py"))
+wic = importlib.util.module_from_spec(spec)
+sys.modules["wdl_inputs_check"] = wic
+spec.loader.exec_module(wic)
+print("CLASS=%s" % wic.rejection_class(open(path_to_msg).read()))
+PY
+    want "the measured 'not specified' rejection is the key-presence question" 0 "CLASS=keys" -- \
+        "$PY" "$TMP/classify.py" "$ROOT" "$msg_keys"
+    want "the measured coercion rejection is NOT, and is not mistaken for it" 0 "CLASS=value" -- \
+        "$PY" "$TMP/classify.py" "$ROOT" "$msg_value"
+
+    #    And the branch that decision drives, end to end, with no jar: the same tree, the same input
+    #    JSON, the offline layer clean, and only womtool's WORDS changing. A value-class rejection must
+    #    print OUT-OF-LAYER and not DISAGREES; a key-class one must still be called a disagreement.
+    mkdir -p "$TMP/tree" "$TMP/in/inputs/build/ref_panel_1kg/test/Wad" "$TMP/bin"
+    cat > "$TMP/tree/Wad.wdl" <<'WDL'
+version 1.0
+
+workflow Wad {
+  input {
+    File vcf
+  }
+  call T { input: vcf = vcf }
+  output { File out = T.out }
+}
+
+task T {
+  input { File vcf }
+  command <<< echo hi > out.txt >>>
+  output { File out = "out.txt" }
+  runtime { docker: "ubuntu:22.04" }
+}
+WDL
+    printf '{\n  "Wad.vcf": "gs://somewhere/x.vcf.gz"\n}\n' \
+        > "$TMP/in/inputs/build/ref_panel_1kg/test/Wad/Wad.json"
+    cat > "$TMP/bin/java" <<'STUB'
+#!/bin/sh
+# Stands in for `java -jar womtool.jar validate <wdl> -i <json>`: prints the message it is handed and
+# exits with the rc it is handed. The message files are verbatim womtool-84 output, so the words this
+# layer has to sort are the real ones while nothing here needs java.
+while [ $# -gt 0 ]; do
+    case "$1" in -jar) jar="$2"; shift 2;; *) shift;; esac
+done
+[ -f "$jar" ] || { echo "Error: Unable to access jarfile $jar"; exit 1; }
+[ -n "${WOMTOOL_STUB_MSG:-}" ] && [ -f "$WOMTOOL_STUB_MSG" ] && cat "$WOMTOOL_STUB_MSG"
+echo "Validation successful"
+exit "${WOMTOOL_STUB_RC:-1}"
+STUB
+    chmod +x "$TMP/bin/java"
+    : > "$TMP/fake-womtool.jar"
+    run_cls() {
+        env GSVTK_CONFIG="$TMP/no-config.env" GSVTK_WORK="$TMP/work" \
+            WOMTOOL_JAR="$TMP/fake-womtool.jar" JAVA="$TMP/bin/java" \
+            WOMTOOL_STUB_MSG="$1" WOMTOOL_STUB_RC="${2:-1}" \
+            "$PY" "$ROOT/checks/wdl_inputs_check.py" \
+            --wdl-dir "$TMP/tree" --inputs-root "$TMP/in" --wf Wad
+    }
+    want_no "a value-class womtool rejection is not called a DISAGREES" 1 \
+        "DISAGREES" -- run_cls "$msg_value" 1
+    want "and is reported as out-of-layer, still failing, still quoting womtool's own words" 1 \
+        "OUT-OF-LAYER" "Does not perform" "No coercion defined from" \
+        "GSVTK-WOMTOOL wf=Wad status=RUN pairs=1 failures=1" -- run_cls "$msg_value" 1
+    want "a key-class womtool rejection against a clean key set IS still a DISAGREES" 1 \
+        "DISAGREES" "start there" -- run_cls "$msg_keys" 1
+    want_no "and womtool passing a clean key set prints neither of those verdicts" 0 \
+        "OUT-OF-LAYER" "DISAGREES" -- run_cls "$msg_keys" 0
+else
+    printf '  SKIP  jarshape: %s cannot import miniwdl (WDL), so womtool-84 validate output was not classified (python -m pip install -r requirements-dev.txt)\n' "$PY"
+    skipped=$((skipped + 1))
+fi
+
+# 9. WITH A JAR IN HAND, THE CAPTURE IS A CAPTURE: re-run womtool on the shape-matrix WDL and require
 #    the parsed JSON to equal what is checked in, so a fixture that drifted from the tool is caught
 #    rather than trusted. Where there is no jar this is a NAMED, COUNTED SKIP, because a check that
 #    could not run is not a check that passed.
