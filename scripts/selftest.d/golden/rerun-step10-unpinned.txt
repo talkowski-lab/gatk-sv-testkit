@@ -1,7 +1,5 @@
 image inputs are not fully pinned -- a submit with these runs whatever the workspace
   attribute points at today, which is exactly what this tool exists to prevent:
-    unpinned:  GenotypeBatch.gatk_docker
     unpinned:  GenotypeBatch.sv_base_mini_docker
-    unpinned:  GenotypeBatch.sv_pipeline_docker
   pass --image KEY=REF for each one (see --help), or --allow-unpinned-docker if you
   genuinely want the attribute-resolved images for this rerun.

@@ -274,7 +274,18 @@ that Terra's `localize()` does not supply.
 `terra/batch_rerun_step.py` refuses every mode **except `show`** while no image is pinned:
 either `--image KEY=REF` per call, or an explicit `GSVTK_IMAGE_REPO`/`GSVTK_GATK_IMAGE_REPO` in the
 profile. A value merely *derived* from your project does not count, because "derived from the
-project" is not a statement about which code ran. `show` is deliberately allowed unpinned so you
+project" is not a statement about which code ran; an explicit one with no tag does not count either,
+since `.../sv-pipeline` floats to whatever is current at pull time.
+
+**The profile can only ever name two of the four images.** `GSVTK_GATK_IMAGE_REPO` pins `gatk_docker`
+and `GSVTK_IMAGE_REPO` pins `sv_pipeline_docker`, and there is no profile key for `sv_base_mini_docker`
+or `linux_docker` -- so `--step 07` (one docker) can be pinned from the profile alone while 06/08/09/10
+always need at least one `--image`. `show` states which source each pin came from, on the
+`image pins:` line: `--image`, `profile/env`, `UNPINNED`, or a workspace attribute under
+`--allow-unpinned-docker`. That line exists because a profile ref and a per-call ref land in the body as
+the same quoted string, and a ref that has sat in a config file since your last branch is weaker
+evidence than one you stated now -- so it is named as what it is rather than being allowed to look like
+fresh evidence. `show` is deliberately allowed unpinned so you
 can inspect the body before deciding. Unpinned images are the one class of mistake that otherwise
 looks like a successful submission followed by an `ImagePullBackupFailed` on every shard, or
 worse, a green run of someone else's code.

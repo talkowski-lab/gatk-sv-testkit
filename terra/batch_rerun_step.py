@@ -134,12 +134,31 @@ def parse_images(argv: list[str], prefix: str = "") -> dict:
     return out
 
 
+def _stated(source: str) -> bool:
+    """Did the user STATE this value, or did the resolver ARRIVE at it? One source of that answer.
+
+    The bug this function exists to keep fixed: the test used to be `source in ("env", "profile")`,
+    and `config.resolve()` labels a profile value `profile:<path>` (measured: `profile:/srv/x.env`)
+    and a project-derived one `derived from PROJECT` -- never the bare words. So the `profile` half of
+    that tuple matched NOTHING, and a pin named in the profile, which this docstring and
+    docs/terra-head-to-head.md §4 both promise counts, never satisfied the guard. Matching the whole
+    label was also unreadable: two of the four labels carry data after a colon.
+
+    Measured labels, all four, so this line is not a guess again: `env`, `profile:<path>`,
+    `derived from PROJECT`, `unset`. Only the first two are a statement by the user, and refusing the
+    last two is the entire purpose -- a registry path the resolver inferred from the project id says
+    nothing about which code ran, which is the question a rerun exists to answer.
+    """
+    return source == "env" or source.startswith("profile:")
+
+
 def images_from_config(prefix: str = "") -> dict:
     """Fall back to an image the profile names EXPLICITLY.
 
-    Only an explicit `GSVTK_IMAGE_REPO` / `GSVTK_GATK_IMAGE_REPO` counts. A value merely
-    *derived* from the project is not a statement about which code ran, and guessing here is
-    exactly the failure this tool exists to prevent -- so a derived default still stops.
+    Only an explicit `GSVTK_IMAGE_REPO` / `GSVTK_GATK_IMAGE_REPO` counts, whether it arrives from the
+    environment or from a profile file (`_stated`). A value merely *derived* from the project is not a
+    statement about which code ran, and guessing here is exactly the failure this tool exists to
+    prevent -- so a derived default still stops.
     """
     res = config.resolve()
     out = {}
@@ -147,12 +166,16 @@ def images_from_config(prefix: str = "") -> dict:
         value, source = res.get(ck, ("", ""))
         # An untagged registry path is not a pin: `.../sv-pipeline` floats to whatever is current at
         # pull time, so the "which code ran" question has no answer afterwards.
-        if value and source in ("env", "profile") and ":" in value.rsplit("/", 1)[-1]:
+        if value and _stated(source) and ":" in value.rsplit("/", 1)[-1]:
             out[f"{prefix}{key}"] = f'"{value}"'
     return out
 
 
 IMAGES: dict[str, str] = {}
+# Which *_docker inputs THIS call named with --image. Kept apart from IMAGES because both a --image ref
+# and a profile ref land in the body as the same quoted literal, and `announce` has to say which one
+# this rerun is standing on (see _image_provenance).
+CLI_IMAGE_KEYS: set = set()
 CONFIRMED = False        # set only by an explicit --confirm on the command line
 ALLOW_UNPINNED = False   # set only by an explicit --allow-unpinned-docker
 WDL_VERSION = os.environ.get("GSV_WDL_VERSION") or config.get("BRANCH")
@@ -203,6 +226,40 @@ def _upstream(r: dict) -> tuple:
     return sorted(chain), sorted(frozen)
 
 
+def _image_provenance(r: dict) -> str:
+    """Where each `*_docker` pin of THIS step came from, stated in every mode.
+
+    Needed because a profile pin and a `--image` pin arrive in the body as the same quoted literal, and
+    since `_stated` was fixed both satisfy the guard. After that, the only thing separating a ref the
+    user stated for THIS rerun from one that has been sitting in a config file since the last branch is
+    this line -- so a stale pin is visible at the moment of submission rather than looking exactly like
+    fresh evidence. `--allow-unpinned-docker` makes a workspace attribute a legal answer, so it is named
+    here too rather than left to be inferred from its absence.
+
+    Only `gatk_docker` and `sv_pipeline_docker` have a profile key at all (`GSVTK_GATK_IMAGE_REPO`,
+    `GSVTK_IMAGE_REPO`); `sv_base_mini_docker` and `linux_docker` exist in no profile vocabulary, so on
+    steps 06/08/09/10 they can only ever arrive by `--image` -- which is why the profile route can never
+    fully pin a four-image step and `UNPINNED` here is not automatically a bug.
+    """
+    from_config = set(images_from_config(r["input_prefix"]))
+    parts = []
+    for key in sorted(k for k in (tc.CONFIGS[r["config"]].get("inputs") or {})
+                      if k.endswith("_docker")):
+        name = key.split(".")[-1]
+        if key in CLI_IMAGE_KEYS:
+            src = "--image"
+        elif key in from_config:
+            src = "profile/env"
+        elif key in IMAGES:
+            src = "UNKNOWN-SOURCE"      # in the body, from neither: unreachable, and say so if reached
+        elif ALLOW_UNPINNED:
+            src = "workspace attribute (--allow-unpinned-docker)"
+        else:
+            src = "UNPINNED"
+        parts.append(f"{name}={src}")
+    return "   ".join(parts)
+
+
 def announce(r: dict, mode: str) -> None:
     """Say which step this resolved to, on STDERR: `show | jq` must stay valid JSON.
 
@@ -215,7 +272,8 @@ def announce(r: dict, mode: str) -> None:
           f"        root entity {r['root_entity']}  "
           f"(row: {r['entity'] or 'UNRESOLVED: pass --entity <name>'})\n"
           f"        Dockstore {r['method_path']} @ {WDL_VERSION or 'GSVTK_BRANCH unset'} "
-          f"-- the ref the binding check grades too", file=sys.stderr)
+          f"-- the ref the binding check grades too\n"
+          f"        image pins: {_image_provenance(r)}", file=sys.stderr)
     chain, frozen = _upstream(r)
     if chain or frozen:
         print("        reads "
@@ -466,6 +524,7 @@ if __name__ == "__main__":
             argv.append(a); i += 1
 
     globals()["IMAGES"] = parse_images(specs, resolved()["input_prefix"])
+    globals()["CLI_IMAGE_KEYS"] = set(IMAGES)
     globals()["CONFIRMED"] = confirm
     # Called for its refusal only, at dispatch, so `--call-cache --no-call-cache` is refused by THIS
     # tool in any mode before anything is built, POSTed or submitted. The value itself is read where it

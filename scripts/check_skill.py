@@ -423,6 +423,29 @@ USAGE = "usage: check_skill.py [SKILL_DIR]   (default .pi/skills/gatk-sv-testkit
         "Checks the shipped skill's claims against the wrapper it documents. Exit 0 = coherent.\n"
 
 
+def stamp_always(skill_dir: Path) -> list[str]:
+    """The shim stamps EVERY invocation, so a subcommand added later cannot run without provenance.
+
+    The defect this retires: the stamp lived inside a `case` that listed the mode names, and both
+    branches `exec` the same command -- so the list's only observable effect was that a future
+    `gsvtk <new-mode>` would run WITHOUT the line that tells a reader which checkout answered. That is a
+    failure with no symptom, which is the class this file exists to catch.
+
+    Graded behaviourally rather than by grepping the shim: a mode the CLI has never heard of is run
+    through the shim, and the stamp must still appear. Falsified by restoring the `case` -- this finding
+    fires on the unknown mode and nothing else changes.
+    """
+    shim = skill_dir / "scripts" / "gsvtk"
+    env = {"GSVTK_HOME": str(REPO), "PATH": "/usr/bin:/bin"}
+    r = subprocess.run([str(shim), "stamp-probe-not-a-real-mode"], capture_output=True, text=True,
+                       env=env, errors="replace", timeout=60, cwd=str(REPO))
+    out = r.stdout + r.stderr
+    if "read-only wrapper" not in out:
+        return [f"the shim printed no stamp line for a mode it does not recognise (exit {r.returncode}): "
+                f"a mode list gating the stamp means every mode someone forgets to add runs unstamped"]
+    return []
+
+
 def main(argv: list[str]) -> int:
     if any(a in ("-h", "--help") for a in argv):        # not argparse: the one positional is a path
         sys.stdout.write(USAGE)
@@ -437,7 +460,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     skill_md = [skill / "SKILL.md"] + sorted((skill / "references").glob("*.md"))
-    problems = (check_tree(skill) + live_refusals(skill) + control(skill)
+    problems = (check_tree(skill) + live_refusals(skill) + control(skill) + stamp_always(skill)
                 + check_safety_flags(REPO, [p for p in skill_md if p.is_file()]))
     here = skill.relative_to(REPO) if skill.is_relative_to(REPO) else skill
     for p in problems:
@@ -447,9 +470,10 @@ def main(argv: list[str]) -> int:
         return 1
     # The claim-group count is not a boast about coverage, it is the count the assertions above
     # actually run; if a group ever parses to nothing it reports a problem instead of vanishing.
-    print(f"check_skill: 7 claim groups verified in {here} "
+    print(f"check_skill: 8 claim groups verified in {here} "
           f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, the shim/exec/"
-          f"read-only-flag split, override flags still implemented, no home paths, bash -n) + the "
+          f"read-only-flag split, the stamp being unconditional for unknown modes, override flags still "
+          f"implemented, no home paths, bash -n) + the "
           f"four-mutation control, each graded by its own finding")
     return 0
 

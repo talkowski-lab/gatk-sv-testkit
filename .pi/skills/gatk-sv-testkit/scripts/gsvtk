@@ -120,10 +120,14 @@ export GSVTK_READ_ONLY=1 GSVTK_SKILL_VERSION="$VERSION"
 # Stamp the shim itself on stderr before handing over; the repo CLI stamps the resolved
 # `path @ sha` on stderr for every command that runs repo code, so the pair lands in the transcript
 # in the order a reader wants it. stderr, because `cd "$(scripts/gsvtk repo)"` captures stdout.
-case "${1:-help}" in
-  check|gate|build|terra|compare|replay|help|-h|--help)
-    printf 'skill   gsvtk %s (read-only wrapper) -> %s\n' "$VERSION" "$REPO/gsvtk" >&2 ;;
-esac
+#
+# This used to be a `case "${1:-help}" in check|gate|build|terra|compare|replay|help|...)` list, and the
+# list was the defect: both branches exec the same thing, so the only behavior it could produce was a
+# command that runs repo code WITHOUT a stamp -- which is precisely what the stamp exists to prevent,
+# and it would have appeared the day someone added a subcommand here and not there. An unknown mode
+# still gets a line, because the CLI is about to refuse it and a transcript that says which wrapper ran
+# is worth having even then. Unconditional: nothing to forget to update.
+printf 'skill   gsvtk %s (read-only wrapper) -> %s\n' "$VERSION" "$REPO/gsvtk" >&2
 
 cd "$REPO" || die "cd failed: $REPO"
 exec "$REPO/gsvtk" "$@"

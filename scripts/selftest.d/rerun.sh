@@ -226,11 +226,16 @@ run "all five steps were checked (not a loop that ran zero times)" 0 "5" /usr/bi
 # ------------------------------------------------------ 3. the pin guard fires for OTHER steps too
 # Asserting this for step 10 alone would prove nothing about 07 or 08: the guard reads the *step's*
 # input map, and each step declares a different set of *_docker inputs (07 one, 08 three, 10 three).
-run "step 07 refuses unpinned *_docker, naming its own key" 1 "unpinned:  FilterBatchSites.sv_pipeline_docker" \
-    "$PY" terra/batch_rerun_step.py --step 07 show
+#
+# These expectations CHANGED when the profile route was fixed (see _stated in batch_rerun_step.py).
+# `GSVTK_IMAGE_REPO` / `GSVTK_GATK_IMAGE_REPO` in this fixture are tagged, so they now satisfy the guard,
+# which they never used to: step 07's ONE docker is therefore pinned by the profile alone and 07 builds,
+# and step 09's remaining hole is `sv_base_mini_docker` rather than `gatk_docker`. Steps 08 and 09 still
+# refuse, because `sv_base_mini_docker` and `linux_docker` exist in no profile vocabulary at all and can
+# only arrive by --image. Do not "restore" the old needles: they asserted that a stated pin did not count.
 run "step 08 refuses unpinned *_docker, naming its own keys" 1 "unpinned:  FilterBatchSamples.linux_docker" \
     "$PY" terra/batch_rerun_step.py --step 08 show
-run "step 09 refuses too (a sample_set_set step is not exempt)" 1 "unpinned:  MergeBatchSites.gatk_docker" \
+run "step 09 refuses on the docker no profile can name" 1 "unpinned:  MergeBatchSites.sv_base_mini_docker" \
     "$PY" terra/batch_rerun_step.py --step 09 show
 # POSITIVE CONTROL: the same step, once its one docker really is pinned, builds its body.
 # shellcheck disable=SC2086
@@ -238,6 +243,39 @@ run "control: step 07 builds its body once its one docker is tagged" 0 "07-Filte
     "$PY" terra/batch_rerun_step.py --step 07 show $PIN07
 run "an image pinned but UNTAGGED is refused as a floating reference, not a pin" 1 "pinned but untagged" \
     "$PY" terra/batch_rerun_step.py --step 07 show --image sv_pipeline_docker=$R/sv-pipeline
+
+# --------------------- 3b. a pin the PROFILE states counts, and one it infers does not
+# The defect: the guard asked `source in ("env", "profile")` while config.resolve() answers
+# `profile:<path>` and `derived from PROJECT`, so the documented profile route (this file's own fixture,
+# docs/terra-head-to-head.md §4) matched nothing and every profile pin fell through to a refusal. Falsified
+# by reverting `_stated` to that tuple: "profile-stated pin satisfies the guard" flips to a failure (exit 1)
+# while every refusal case above stays green, which is the shape of a control that is watching this and
+# only this.
+run "profile-stated pin satisfies the guard (step 07 builds with no --image)" 0 "$R/gatk-sv:YOUR_TAG" \
+    "$PY" terra/batch_rerun_step.py --step 07 show
+run "and it says so: that pin is announced as profile/env, not --image" 0 "sv_pipeline_docker=profile/env" \
+    "$PY" terra/batch_rerun_step.py --step 07 show
+run "a --image pin is announced as --image (a profile ref cannot impersonate a per-run flag)" 0 \
+    "sv_pipeline_docker=--image" \
+    "$PY" terra/batch_rerun_step.py --step 07 show --image sv_pipeline_docker=$R/sv-pipeline:OTHER_TAG
+# A profile value with no tag is a registry path that floats to whatever is current at pull time, so it
+# is not a pin AT ALL: it never enters IMAGES, and the step falls into the ordinary `unpinned` refusal
+# rather than the `untagged` one -- a distinction worth naming, because both refusals are correct and
+# only one of them mentions the profile.
+printf 'GSVTK_TERRA_NAMESPACE=your-namespace\nGSVTK_TERRA_WORKSPACE=w\nGSVTK_BRANCH=b\nGSVTK_IMAGE_REPO=%s/sv-pipeline\n' "$R" > "$TMP/untagged.env"
+run "a profile value with NO TAG is no pin at all, so the step refuses as unpinned" 1 \
+    "unpinned:  FilterBatchSites.sv_pipeline_docker" \
+    env GSVTK_CONFIG="$TMP/untagged.env" "$PY" terra/batch_rerun_step.py --step 07 show
+# The four labels config.resolve() can answer, asserted at the predicate itself: two count, two must not.
+run "_stated() accepts exactly the two labels a user stated (measured set, not a guess)" 0 "PASS" \
+    "$PY" -c "
+import sys; sys.path.insert(0,'terra')
+import batch_rerun_step as r
+good = ['env', 'profile:/srv/x.env']
+bad  = ['derived from PROJECT', 'unset', 'profile', 'profilex:/x', '']
+assert all(r._stated(s) for s in good), [s for s in good if not r._stated(s)]
+assert not any(r._stated(s) for s in bad), [s for s in bad if r._stated(s)]
+print('PASS')"
 # The captured refusal, reproduced: the exact command from the golden's README (no --image at all).
 # The offline belt is dropped for THIS capture only, because terra.py prints one note on stderr when
 # GSVTK_TERRA_API_ROOT differs from the default and the byte compare is about the tool's own words.
