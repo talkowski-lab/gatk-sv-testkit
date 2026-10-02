@@ -7,6 +7,7 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 |---|---|---|
 | A call site that never binds a required input | `miniwdl check` treats `IncompleteCall` as a warning and exits 0 | `wdl_gate.sh` |
 | A call site passing an input the callee never declared | typechecking does not compare call sites across files | `wdl_gate.sh` |
+| A required workflow input that the repo's own input JSON never binds | no WDL validator opens an input file, and `IncompleteCall` stays 0 because the call site *does* bind it — the caller who never will is Cromwell, at submission time. CI's `Test with WOMtool` step catches it; nothing here used to | `wdl_gate.sh` (`MISSING-INPUTS`, via `wdl_inputs_check.py`) |
 | A renamed `sv_shell` JSON key with a reader left behind | `jq -r '.missing'` yields the string `null`, forwarded as `--flag null`, failing stages later | `svshell_contract_check.py`, `svshell_jq_plumbing_scan.py` |
 | A workflow-scope `write_*`, a `File` input only ever tested with `defined()`, a `pipefail` pipe whose reader exits early, or a command block that is not valid bash | to a WDL validator a command block is a string, and "this File is only tested for" is a localization fact, not a type error | `wdl_semantics.py` |
 | A shipped image whose jar predates the flags its WDL passes | the image is built from a pinned commit, not your branch | `image-check/` |
@@ -65,9 +66,11 @@ reports a result that is neither the old bug nor the new one.
 The output is a count per ref, meant to be **diffed**:
 
 ```
-WORKFLOW                       REF              EXIT   INCOMPLETECALL   STALE-BINDINGS
-SVShell                        main@9a34dc12    0      2                0
-SVShell                        main@77c1e0b2    0      3                1
+WORKFLOW                       REF              EXIT   INCOMPLETECALL   STALE-BINDINGS   MISSING-INPUTS
+SVShell                        main@9a34dc12    0      2                0                NO-INPUT-JSON
+SVShell                        main@77c1e0b2    0      3                1                NO-INPUT-JSON
+IntegrateGDVcf                 7fbf1171         0      0                0                1
+IntegrateGDVcf                 01107996         0      0                0                0
 ```
 
 (Pick refs where **both** sides actually contain the workflow you named: `--strict` now fails with an
@@ -80,6 +83,28 @@ A rise in `INCOMPLETECALL` means a call site stopped binding something; a rise i
 value: against gatk-sv as it stands there are a few `IncompleteCall` warnings that are deliberate,
 so a raw nonzero is not a failure; *the change in the column* is. `--strict` makes nonzero the
 exit status when you want a hard gate.
+
+`MISSING-INPUTS` is not a delta column, and the two `IntegrateGDVcf` rows are why. At `7fbf1171` the
+WDL declares `String sample_id` (required, `wdl/IntegrateGDVcf.wdl:31`) while
+`inputs/templates/test/IntegrateGDVcf/IntegrateGDVcf.json.tmpl` contains **zero** occurrences of
+`sample_id`; `01107996` made it `String?`. miniwdl reported `0 IncompleteCall` on both — correctly,
+because the call site *does* bind `sample_id`, and the party that never will is the one supplying the
+input file — and gatk-sv's CI rejected `7fbf1171` with `Required workflow input 'IntegrateGDVcf.sample_id'
+not specified`. The gate ran half of that CI step and reported the result as a pass.
+
+So the gate now renders the ref's own default input JSONs (`checks/wdl_inputs_check.py` git-archives
+`inputs/` + `scripts/inputs/` into `$WORK` and runs gatk-sv's `build_default_inputs.sh`; the checkout is
+never written to) and asks whether every input the workflow *requires* appears in the key set of the
+JSONs gatk-sv's own `validate.sh` would pair with it — including the Terra configs CI validates with
+`-t`, which `--no-terra` drops. **Key sets, never values**: womtool grades presence, so a bound value
+is this check's blind spot on purpose (that question is `terra/batch_check_inputs.py`'s), and no
+rendered path is ever opened. A nonzero `MISSING-INPUTS` is a hard finding with or without `--strict`,
+because CI is red on it. `NO-INPUT-JSON` means CI itself has no input JSON for that workflow: printed,
+counted in the closing note, and deliberately *not* a `--strict` failure, since parity with CI at a ref
+is the promise and CI is green on such a ref. With `WOMTOOL_JAR` exported every pair also gets CI's
+exact `java -jar $WOMTOOL_JAR validate` and the two answers are compared; without it the layer prints a
+named, counted `SKIPPED` row that `--strict` fails on. See [troubleshooting](troubleshooting.md) for the
+CI log line this column exists to predict.
 
 ## `wdl_semantics.py`: does it RUN, or does it only typecheck?
 

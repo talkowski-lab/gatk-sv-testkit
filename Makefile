@@ -242,6 +242,7 @@ selftest:
 	@$(SHELL) scripts/selftest.d/cli.sh "$(PYTHON)"      # the ./gsvtk entry point, own tally
 	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)"    # rerun any step of the batch chain, own tally
 	@$(SHELL) scripts/selftest.d/profiles.sh "$(PYTHON)" # module profiles: golden vs loader, own tally
+	@$(SHELL) scripts/selftest.d/womtool.sh "$(PYTHON)"  # CI's womtool half: bindings vs rendered JSONs, own tally
 
 lint: syntax
 
