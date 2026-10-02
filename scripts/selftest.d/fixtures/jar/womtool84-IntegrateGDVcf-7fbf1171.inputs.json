@@ -1,0 +1,22 @@
+{
+  "IntegrateGDVcf.ConcatVcfs.allow_overlaps": "Boolean (optional, default = false)",
+  "IntegrateGDVcf.runtime_attr_override_concat": "WomCompositeType {\n cpu_cores -> Int?\nmax_retries -> Int?\nboot_disk_gb -> Int?\ndisk_gb -> Int?\nmem_gb -> Float?\npreemptible_tries -> Int? \n}? (optional)",
+  "IntegrateGDVcf.runtime_attr_override_prepare": "WomCompositeType {\n cpu_cores -> Int?\nmax_retries -> Int?\nboot_disk_gb -> Int?\ndisk_gb -> Int?\nmem_gb -> Float?\npreemptible_tries -> Int? \n}? (optional)",
+  "IntegrateGDVcf.vcf_index": "File",
+  "IntegrateGDVcf.ConcatVcfs.sites_only": "Boolean (optional, default = false)",
+  "IntegrateGDVcf.ConcatVcfs.generate_index": "Boolean (optional, default = true)",
+  "IntegrateGDVcf.gd_output_tarballs": "Array[File]",
+  "IntegrateGDVcf.sv_base_mini_docker": "String",
+  "IntegrateGDVcf.runtime_attr_override_integrate": "WomCompositeType {\n cpu_cores -> Int?\nmax_retries -> Int?\nboot_disk_gb -> Int?\ndisk_gb -> Int?\nmem_gb -> Float?\npreemptible_tries -> Int? \n}? (optional)",
+  "IntegrateGDVcf.sv_pipeline_docker": "String",
+  "IntegrateGDVcf.integrate_args": "String? (optional)",
+  "IntegrateGDVcf.sample_id": "String",
+  "IntegrateGDVcf.prefix": "String",
+  "IntegrateGDVcf.ploidy_tables": "Array[File]",
+  "IntegrateGDVcf.vcf": "File",
+  "IntegrateGDVcf.ConcatVcfs.sort_vcf_list": "Boolean (optional, default = false)",
+  "IntegrateGDVcf.par_bed": "File",
+  "IntegrateGDVcf.gd_table": "File",
+  "IntegrateGDVcf.contig_list": "File"
+}
+
