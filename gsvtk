@@ -313,6 +313,22 @@ cmd_check() {
   ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0; reach_targets=()
   while [ $# -gt 0 ]; do
     case "$1" in
+      --help|-h)    printf '%s\n' "usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR]"
+                   printf '%s\n' "                  [--compare-to REF] [--semantics] [--reach]"
+                   printf '%s\n' ''
+                   printf '%s\n' '  <ref>            run wdl_gate.sh against that ref (its per-ref count is the output)'
+                   printf '%s\n' '  --wf NAME        workflow(s) to gate; repeatable. With --reach, NAME is also the'
+                   printf '%s\n' '                   reach target -- one answer per name, so --reach needs at least one'
+                   printf '%s\n' '  --strict         gate: treat warnings as findings'
+                   printf '%s\n' '  --repo DIR       tree the python checkers read (default: GSVTK_GATK_SV_CHECKOUT)'
+                   printf '%s\n' '  --compare-to REF jq plumbing scan: fail only on nulls this ref introduced'
+                   printf '%s\n' '  --semantics      wdl_semantics.py (tree-wide, opt-in: it is slow, not free)'
+                   printf '%s\n' '  --reach          wdl_reach.py per --wf NAME: what that name reaches (--reverse is'
+                   printf '%s\n' '                   not exposed here; run the tool directly for that)'
+                   printf '%s\n' ''
+                   printf '%s\n' 'Exit codes: 0 clean, 1 a checker reported findings (findings are not a verdict),'
+                   printf '%s\n' '          2 usage error (nothing ran), 3 a prerequisite is missing.'
+                   return 0;;
       --wf)         wfargs+=(--wf "${2:?--wf needs a workflow name}")
                     reach_targets+=("${2:?--wf needs a workflow name}"); shift 2;;
       --strict)     wfargs+=(--strict); shift;;

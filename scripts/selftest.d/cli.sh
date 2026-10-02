@@ -414,6 +414,13 @@ else
         -- run check base-ref --semantics --reach --wf SVShell --repo /tmp
     expect 'an unknown check flag is refused, not forwarded to someone who would misread it' 2 \
         'check: unknown flag --wfdf' -- run check base-ref --wfdf
+    # `check --help` used to be one of those unknown flags: the subcommand's own usage was unreachable
+    # from the subcommand, and the entry point's exit-code table promises 0 for --help. A user who
+    # cannot read the flags has to guess them, and guessing `--reach` needs a target is how the bug
+    # above got reported instead of avoided.
+    expect 'check --help prints the check synopsis and exits 0' 0 \
+        'usage: gsvtk check' '  --reach' 'Exit codes:' -- run check --help
+    expect 'and -h is the same page' 0 'usage: gsvtk check' -- run check -h
     expect "a checker's findings come back as exit 1, not 0 (findings are not a verdict)" 1 \
         'STUB checks/svshell_contract_check.py' -- env STUB_RC=1 GSVTK_CONFIG="$TMP/empty.env" \
         GSVTK_WORK="$TMP/work" GSVTK_TERRA_PY="$PYABS" bash "$CLI" check
