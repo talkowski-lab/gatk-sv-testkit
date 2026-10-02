@@ -1,0 +1,979 @@
+#!/usr/bin/env bash
+# gsvtk — the command-line entry point for gatk-sv-testkit.
+#
+# WHY THIS EXISTS
+#   Every tool here was a script you ran from the repo root, and the only dispatcher was the
+#   read-only wrapper inside the shipped agent skill. So two things were true at once: a person had
+#   to know which of ~35 scripts answers their question, and the safety rules (read-only by default,
+#   --confirm to write, name the target before you write) existed only on the agent's side of that
+#   wrapper. This file moves both into the repo: one dispatcher, one read-only contract, and the
+#   direct-script form still works — every tool keeps its own --help, its own gates and its own exit
+#   codes. Nothing here replaces a script; it routes to them. docs/cli.md is the same contract in
+#   prose, with the command-to-tool map.
+#
+# WHAT THE SKILL KEEPS (one dispatcher, not two)
+#   .pi/skills/gatk-sv-testkit/scripts/gsvtk is now a thin shim: locate the checkout, run its
+#   GSVTK_TRUSTED_REPOS check, stamp its own version and the resolved `path @ sha`, then exec THIS
+#   program with GSVTK_READ_ONLY=1. Behaviour lives here; the trust gate and the read-only stamp
+#   live there.
+#
+# THE READ-ONLY CONTRACT (docs/cli.md)
+#   1. GSVTK_READ_ONLY=1 or a global --read-only refuses every mode that POSTs, boots compute or
+#      bulk-downloads. The refusal is checked BEFORE any dependency or config probe, on purpose: a
+#      refusal that depends on whether firecloud happens to be installed is a claim about the
+#      machine, not about the contract, and it teaches people to "fix the environment" until the
+#      refusal goes away. Exit 2, name the mode, print the exact command to run yourself.
+#   2. Mutating modes additionally require --confirm, and print what gets created, where it lands
+#      (the resolved workspace / registry path), what it costs and how to undo it, BEFORE acting.
+#      This is an OUTER gate: it never absorbs or bypasses a tool's own --confirm / --write /
+#      --allow-shared-target guard. --confirm is forwarded only where the target tool documents that
+#      flag itself; a tool that gates on --write still needs --write typed out.
+#   3. Plan modes stay free everywhere: --check / --dry-run (and a fetch --verify, which re-hashes
+#      what is already on disk) print or check without transferring, so they dispatch under
+#      GSVTK_READ_ONLY=1 without --confirm.
+#
+# EXIT CODES — the table the agent skill publishes, unchanged:
+#   0 clean | 1 findings or a real failure | 2 usage error / refused mode |
+#   3 missing dependency (named, with the install or the export to run) |
+#   4 missing required config (the resolver's own code; see docs/config.md)
+# No-args and any unknown subcommand print the usage and exit 2. --help is the only path that
+# prints the usage and exits 0.
+#
+# bash 3.2-compatible (macOS default): no mapfile, no associative arrays, no ${v,,}.
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+VENV=".venv/bin/python"
+VENVBIN=".venv/bin"
+
+READ_ONLY="${GSVTK_READ_ONLY:-}"
+CONFIRM=0
+STRIPPED=()
+
+die() { printf 'gsvtk: %s\n' "$*" >&2; exit 2; }
+
+# The resolver is the only thing allowed to answer "what is your project / workspace / registry"
+# (CONTRIBUTING: one resolver, one precedence chain), so this program reads GSVTK_* from the
+# environment for exactly four TRANSPORT knobs — GSVTK_READ_ONLY, GSVTK_HOME (in the skill shim),
+# GSVTK_TERRA_PY, GSVTK_SKILL_VERSION — and asks kit/gsvtk-config for every real value. Those four
+# are per-invocation intent, not per-user config, so they live with the CLI contract rather than in
+# the profile reference: docs/cli.md states what GSVTK_READ_ONLY refuses and shows the refusal, and
+# `gsvtk tools` prints which interpreter was resolved for each loop, which is the answer a wrong
+# GSVTK_TERRA_PY would otherwise have you guess at.
+cfg() { ( cd "$ROOT" && ./kit/gsvtk-config get "$1" 2>/dev/null ); }
+
+# join "$@" — space-joined copy of the arguments, for PRINTING a command only. Execution always
+# passes the real array, so a path with a space cannot be re-split by the display form.
+join() { local out="" a; for a in "$@"; do out="$out$a "; done; printf '%s' "${out% }"; }
+
+# The right interpreter, not a hardcoded personal path: terra/ needs firecloud and compare/ needs
+# numpy/pandas/pysam, none of which exist outside the checkout's venv (or whatever you activated).
+py_for() {
+  case "$1" in
+    terra)  if [ -n "${GSVTK_TERRA_PY:-}" ] && "$GSVTK_TERRA_PY" -c 'import firecloud' 2>/dev/null; then
+              printf '%s' "$GSVTK_TERRA_PY"     # explicit beat: venvs move, and one per purpose
+            elif [ -x "$ROOT/$VENV" ] && "$ROOT/$VENV" -c 'import firecloud' 2>/dev/null; then
+              printf '%s' "$ROOT/$VENV"
+            elif python3 -c 'import firecloud' 2>/dev/null; then
+              printf 'python3'
+            else
+              return 1
+            fi ;;
+    *)      if [ -x "$ROOT/$VENV" ]; then printf '%s' "$ROOT/$VENV"; else printf 'python3'; fi ;;
+  esac
+}
+
+# miniwdl resolution belongs to the checkout: `kit/gsvtk-config miniwdl` resolves $MINIWDL -> PATH
+# -> the bin next to the interpreter -> <repo>/.venv/bin and exits 0 with empty output when there is
+# none. Ask it rather than duplicating the order, because two resolvers with different precedence is
+# how one says "found" while the other says "install it". The fallback below is that order minus the
+# interpreter sibling, for a tree without the subcommand.
+miniwdl_bin() {
+  if [ -f "$ROOT/kit/gsvtk-config" ]; then
+    m="$( (cd "$ROOT" && ./kit/gsvtk-config miniwdl) 2>/dev/null )"
+    [ -n "$m" ] && { printf '%s' "$m"; return 0; }
+    [ -n "${MINIWDL:-}" ] && return 1        # asked for explicitly and the checkout says unusable
+  fi
+  if [ -n "${MINIWDL:-}" ] && command -v "$MINIWDL" >/dev/null 2>&1; then printf '%s' "$MINIWDL"
+  elif command -v miniwdl >/dev/null 2>&1; then printf 'miniwdl'
+  elif [ -x "$ROOT/$VENVBIN/miniwdl" ]; then printf '%s' "$ROOT/$VENVBIN/miniwdl"
+  else return 1; fi
+}
+
+git_sha() { git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no-commit'; }
+git_dirty() { [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ] && printf ' +dirty'; }
+
+# Every command that runs repo code states which checkout it is standing in, on stderr, so "which
+# tree produced this" is in the transcript without anyone remembering to ask. stderr, not stdout:
+# `cd "$(gsvtk repo)"` and friends capture stdout.
+stamp() {
+  printf 'repo  %s @ %s%s\n' "$ROOT" "$(git_sha)" "$(git_dirty)" >&2
+}
+
+read_only_on() { [ -n "$READ_ONLY" ] && [ "$READ_ONLY" != "0" ]; }
+
+# ------------------------------------------------------------------ the gates
+# is_plan_only "$@" — does this argument list only ask for a plan? --check / --dry-run are this
+# repo's two spellings for "print what you would do and create nothing", and both stay dispatchable
+# under read-only without --confirm because the tools that take them touch nothing.
+is_plan_only() {
+  local a
+  for a in "$@"; do
+    case "$a" in --check|--dry-run) return 0 ;; esac
+  done
+  return 1
+}
+
+# has_flag FLAG "$@" — is the flag present in the forwarded argument list?
+has_flag() {
+  local want="$1"; shift
+  local a
+  for a in "$@"; do [ "$a" = "$want" ] && return 0; done
+  return 1
+}
+
+# strip_confirm "$@" — fill STRIPPED with the arguments minus this gate's own --confirm. Used when
+# the target tool does NOT document --confirm and would reject it as an unknown argument.
+strip_confirm() {
+  STRIPPED=()
+  local a
+  for a in "$@"; do [ "$a" = "--confirm" ] && continue; STRIPPED+=("$a"); done
+}
+
+# refuse_readonly MODE TARGET-COMMAND [detail] — the refusal, BEFORE any dependency or config check.
+# It says three things on purpose: what was refused, that nothing was consulted or created, and the
+# exact command for a human to run in the checkout.
+refuse_readonly() {
+  local mode="$1" command="$2" detail="${3:-}"
+  printf 'gsvtk: REFUSED — %s POSTs, boots compute, or bulk-downloads, and this run is read-only.\n' \
+    "$mode" >&2
+  [ -n "$detail" ] && printf '       %s\n' "$detail" >&2
+  printf '       Nothing was submitted, downloaded or created, and no dependency, credential or\n' >&2
+  printf '       config value was consulted: this is a policy refusal, not a broken environment.\n' >&2
+  printf '       Read-only is the default because one whole-chain rerun is a fleet of VMs and Terra\n' >&2
+  printf '       has no per-workspace budget cap (CONTRIBUTING: "Mutating vs read-only").\n' >&2
+  printf '       To do it, step out of read-only and run it yourself, in the checkout:\n' >&2
+  printf '         cd %s && %s\n' "$ROOT" "$command" >&2
+  printf '       (or drop GSVTK_READ_ONLY / the --read-only flag and add --confirm: the outer gate\n' >&2
+  printf '        still wants the write spelled out before it acts.)\n' >&2
+  exit 2
+}
+
+# need_confirm MODE DETAIL — the outer gate for a mutating mode. The inner gate stays the tool's.
+need_confirm() {
+  local mode="$1" detail="$2"
+  if [ "$CONFIRM" = 1 ]; then return 0; fi
+  printf 'gsvtk: refusing "%s" — it %s, and mutating modes need --confirm.\n' "$mode" "$detail" >&2
+  printf '       Nothing was created, POSTed, booted or downloaded.\n' >&2
+  printf '       Ask the free version of the same question first: show / plan / check / --dry-run\n' >&2
+  printf '       print the target and the object count without writing anything.\n' >&2
+  printf '       Run it when you mean it:\n' >&2
+  printf '         gsvtk %s --confirm\n' "$mode" >&2
+  printf "       (the tool's own gate still applies: --write, --allow-shared-target, and whatever\n" >&2
+  printf '        preflight it prints before it POSTs. This gate does not replace those.)\n' >&2
+  exit 2
+}
+
+# announce_write WHAT WHERE COST UNDO — the four things printed BEFORE a write happens.
+# No price is quoted anywhere in this repo: there is no rate lookup here, because your billing
+# account, discounts and spot pricing are not visible from a git checkout. Cost is named as machine
+# type, object size or VM-minutes, and you multiply by your own rate.
+announce_write() {
+  printf 'gsvtk: MUTATING mode — what happens next, before it happens:\n' >&2
+  printf '  what   %s\n' "$1" >&2
+  printf '  where  %s\n' "$2" >&2
+  printf '  cost   %s\n' "$3" >&2
+  printf '  undo   %s\n' "$4" >&2
+}
+
+# A Terra target that is not configured prints the key to set, never an empty path: an unset target
+# is the resolver's exit 4, not a request with a hole in its URL.
+ws_target() {
+  local ns ws
+  ns="$(cfg TERRA_NAMESPACE)"; ws="$(cfg TERRA_WORKSPACE)"
+  if [ -z "$ns" ] || [ -z "$ws" ]; then
+    printf '(unset — GSVTK_TERRA_NAMESPACE / GSVTK_TERRA_WORKSPACE: the tool exits 4 naming them)'
+  else
+    printf '%s/%s' "$ns" "$ws"
+  fi
+}
+
+# ------------------------------------------------------------------ locate / doctor / tools
+cmd_locate() {
+  printf 'gsvtk     repo CLI @ %s%s\n' "$(git_sha)" "$(git_dirty)"
+  [ -n "${GSVTK_SKILL_VERSION:-}" ] && \
+    printf 'skill     %s (read-only wrapper)\n' "$GSVTK_SKILL_VERSION"
+  printf 'repo      %s\n' "$ROOT"
+  if [ -d "$ROOT/.git" ]; then
+    printf 'git       %s @ %s\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
+      "$(git_sha)"
+    [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ] && \
+      printf '          working tree has uncommitted changes (docs may not match code)\n'
+  fi
+  if [ -x "$ROOT/$VENV" ]; then printf 'venv      present (%s)\n' "$VENV"; else
+    printf 'venv      MISSING — run: cd %s && make setup\n' "$ROOT"; fi
+  for t in jq gsutil gcloud bcftools; do
+    command -v "$t" >/dev/null 2>&1 && printf 'tool      %s\n' "$t" || printf 'tool      %s absent\n' "$t"
+  done
+  if wdlbin="$(miniwdl_bin)"; then printf 'tool      miniwdl (%s)\n' "$wdlbin"
+  else printf 'tool      miniwdl absent\n'; fi
+}
+
+# Values, or only which ones are set. --redact is the transcript-safe view and the one to use when
+# reporting state; plain doctor prints the real coordinates, because that is what you go to a
+# terminal for.
+cmd_doctor() {
+  # --redact is the only flag, so anything else is a typo — and the branch a typo falls into is the
+  # one that prints live project / workspace / registry values. A misspelling must never be able to
+  # choose the leaky path silently; `check` refuses unknown flags for the same reason with less to
+  # lose.
+  case "${1:-}" in
+    '')       redact=0 ;;
+    --redact) redact=1 ;;
+    *)        die "doctor: unknown flag '$1' (the only flag is --redact). Refusing to print values." ;;
+  esac
+  # if/fi, not `&&`: a bare `[ ] && cmd` statement returns 1 on the false branch, which is a silent
+  # landmine for whoever adds `set -e` later.
+  if [ "$#" -gt 1 ]; then die "doctor: unexpected argument '$2' (usage: gsvtk doctor [--redact])"; fi
+  if [ "$redact" != 1 ]; then
+    printf 'doctor: UNREDACTED coordinates follow. To report state, use: gsvtk doctor --redact\n' >&2
+    ( cd "$ROOT" && ./kit/gsvtk-config doctor ); return $?
+  fi
+
+  # Redacted view: which files were consulted, what is missing, and for every key whether it is set
+  # and WHERE that value came from — but not the value itself. Source is the useful part ("is this my
+  # override or the shipped default?"), the coordinates are the part that does not belong in a
+  # transcript, so show -- and mask -- on source: env/profile/derived are yours, default is public.
+  ( cd "$ROOT" && ./kit/gsvtk-config doctor ) 2>&1 | sed -n '/^profiles read:/,/^$/p'
+  ( cd "$ROOT" && ./kit/gsvtk-config doctor ) 2>&1 | grep -E '^  MISS ' | sed 's/^  MISS /  MISSING /'
+  ( cd "$ROOT" && ./kit/gsvtk-config show ) 2>&1 | awk '
+    # Columns from gsvtk-config show:  <flag> <KEY> <value...> [<source>]
+    # The source is the interesting part of a redacted report ("mine, or the shipped default"), so
+    # split on the LAST bracket group -- values can contain brackets, the marker cannot.
+    {
+      line = $0
+      flag = substr(line, 1, 1)
+      rest = substr(line, 3)
+      key  = rest; sub(/[ \t].*/, "", key)
+      lb = 0; rb = 0
+      for (i = length(line); i > 1; i--) { c = substr(line, i, 1)
+        if (rb == 0 && c == "]") rb = i
+        if (rb > 0 && c == "[") { lb = i; break } }
+      if (lb == 0) { print; next }
+      src   = substr(line, lb + 1, rb - lb - 1)
+      value = substr(line, length(flag) + 1 + length(key) + 1, lb - (length(key) + length(flag) + 3))
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      mine = (src ~ /^(env|profile|derived)/)
+      printf "  %-4s %-22s %-34s [%s]\n", (flag == "!" ? "MISS" : ""), key,
+             (mine && value != "(unset)" ? "<set, redacted>" : value), src
+    }'
+  printf '\n(values hidden: keys whose value comes from your environment, your profile, or is\n derived from your project. Shipped defaults are shown as-is.)\n'
+}
+
+# Capability probe: which loops are actually usable on this machine right now. Deliberately the same
+# fields it always printed: a quickstart capture quotes this output, and `tools` is the one command
+# an agent is told to run first, so its shape is an interface.
+cmd_tools() {
+  printf 'checkout  %s\n' "$ROOT"
+  ck="$(cfg GATK_SV_CHECKOUT)"
+  if [ -n "$ck" ] && [ -d "$ck" ]; then
+    printf 'gatk-sv   %s @ %s\n' "$ck" "$(git -C "$ck" rev-parse --short HEAD 2>/dev/null)"
+  else printf 'gatk-sv   unset — set GSVTK_GATK_SV_CHECKOUT to run checks/ and fetch_wdl\n'; fi
+  if p="$(py_for terra)"; then printf 'terra     %s\n' "$p"
+  else printf 'terra     unavailable — no firecloud. cd %s && make setup, or export GSVTK_TERRA_PY=<python that has it>\n' "$ROOT"; fi
+  # Say WHERE it resolved from: "miniwdl present" is a claim about a venv your shell never
+  # activated, and the last person told this installed it a second time.
+  if wdlbin="$(miniwdl_bin)"; then printf 'wdl_gate  ok (%s)\n' "$wdlbin"
+  else printf 'wdl_gate  needs miniwdl — cd %s && make setup, or python -m pip install -r requirements-dev.txt (export MINIWDL=<path> to point at one elsewhere)\n' "$ROOT"; fi
+  command -v jq >/dev/null 2>&1 \
+    && printf 'jq scan   ok\n' || printf 'jq scan   needs jq\n'
+  # The two loops this used to report "ok" while still being unable to run: build needs gcloud, and
+  # `terra inputs` shells out to womtool under a JDK. A loop that cannot start is not "ok". The
+  # replay loop's own blockers (jar, JDK 17, disk) are `gsvtk replay preflight`'s, measured rather
+  # than asserted, and they are NOT folded in here: java -version on every `tools` call would make
+  # the cheapest probe the slowest one.
+  command -v gcloud >/dev/null 2>&1 \
+    && printf 'build     gcloud ok\n' || printf 'build     needs gcloud (no VM without it)\n'
+  if ! command -v java >/dev/null 2>&1; then printf 'inputs    needs a JDK (womtool is a jar)\n'
+  elif [ -z "${WOMTOOL_JAR:-}" ] || [ ! -f "${WOMTOOL_JAR:-}" ]; then
+    printf 'inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar\n'
+  else printf 'inputs    ok (%s)\n' "$WOMTOOL_JAR"; fi
+}
+
+# ------------------------------------------------------------------ check
+# The static checks, in cost order. Flags are DISPATCHED, not forwarded: --wf/--strict belong to
+# wdl_gate.sh, --repo to the python checkers, --compare-to to the jq plumbing scan, and handing one
+# tool another tool's flag is an argparse error that reads like a broken checker.
+#   check [<ref>] [--wf NAME ...] [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]
+cmd_check() {
+  stamp
+  if [ -z "${MINIWDL:-}" ] && wdlbin="$(miniwdl_bin)"; then MINIWDL="$wdlbin"; export MINIWDL; fi
+  ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wf)         wfargs+=(--wf "${2:?--wf needs a workflow name}"); shift 2;;
+      --strict)     wfargs+=(--strict); shift;;
+      --repo)       pyargs=(--repo "${2:?--repo needs a directory}"); shift 2;;
+      --compare-to) compare_to="${2:?--compare-to needs a ref}"; shift 2;;
+      --semantics)  want_sem=1; shift;;
+      --reach)      want_reach=1; shift;;
+      -*)           die "check: unknown flag $1 (usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach])";;
+      *)            ref="$1"; shift;;
+    esac
+  done
+  cd "$ROOT" || die "cd failed"
+  rc=0
+  if [ -n "$ref" ]; then
+    printf '\n=== wdl_gate.sh %s ===\n' "$ref"
+    bash checks/wdl_gate.sh ${wfargs[@]+"${wfargs[@]}"} "$ref" || rc=1
+  else
+    printf '\n(no ref given: skipping wdl_gate, whose whole output is a per-ref count)\n'
+  fi
+  printf '\n=== svshell_contract_check.py ===\n'
+  "$PY" checks/svshell_contract_check.py ${pyargs[@]+"${pyargs[@]}"} || {
+    printf '  (findings, not a verdict: diff this list against your base ref)\n'; rc=1; }
+  if command -v jq >/dev/null 2>&1; then
+    printf '\n=== svshell_jq_plumbing_scan.py ===\n'
+    if [ -n "$compare_to" ] || [ -n "$ref" ]; then
+      # --compare-to is the gate form: only nulls this ref introduced fail.
+      "$PY" checks/svshell_jq_plumbing_scan.py ${pyargs[@]+"${pyargs[@]}"} \
+        --compare-to "${compare_to:-$ref}" || rc=1
+    else
+      "$PY" checks/svshell_jq_plumbing_scan.py ${pyargs[@]+"${pyargs[@]}"} || {
+        printf '  (absolute scan: red on unmodified gatk-sv by design; pass a ref or --compare-to)\n'
+        rc=1; }
+    fi
+  else
+    printf '\njq absent: skipping the jq plumbing scan\n'
+  fi
+  # The two opt-in checkers: both parse the whole tree, so they are not in the default set. The
+  # default three answer "will it start" and "did I null an input" in seconds.
+  if [ "$want_sem" = 1 ]; then
+    printf '\n=== wdl_semantics.py ===\n'
+    "$PY" checks/wdl_semantics.py ${pyargs[@]+"${pyargs[@]}"} || rc=1
+  fi
+  if [ "$want_reach" = 1 ]; then
+    printf '\n=== wdl_reach.py ===\n'
+    "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} || rc=1
+  fi
+  return $rc
+}
+
+# checks/image-check/* boot a GCE VM in YOUR project to ask a PUBLISHED image a question, so they are
+# the mutating end of `check`. run_in_image.sh --dry-run is the exception: it assembles and validates
+# the startup script without touching gcloud, which is how its own guards are testable offline.
+cmd_check_image() {
+  stamp
+  tool="${1:-}"; shift || true
+  case "$tool" in
+    run_in_image|svshell_image_check|jar_flag_probe) script="checks/image-check/$tool.sh";;
+    '') die "check image: name one of run_in_image | svshell_image_check | jar_flag_probe";;
+    *)  die "check image: '$tool' is not an image check (run_in_image | svshell_image_check | jar_flag_probe; each boots a VM in your project — docs/static-checks.md)";;
+  esac
+  has_flag --confirm "$@" && CONFIRM=1
+  if is_plan_only "$@"; then
+    printf 'plan-only mode (--check/--dry-run): no VM will exist.\n'
+  else
+    if read_only_on; then
+      refuse_readonly "check image $tool" "bash $script $*" \
+        "It boots a GCE VM in your project: compute, not a check."
+    fi
+    need_confirm "check image $tool" "boots a GCE VM in your project"
+    announce_write "a temporary GCE VM that pulls the image and runs your probe in it" \
+      "project $(cfg PROJECT), zone $(cfg ZONE), machine $(cfg MACHINE_TYPE); the image tested is the ref you pass with --image" \
+      "one VM for the probe's runtime, capped by the script's own timeout ceiling; VM-minutes only — this repo quotes no prices, multiply by your own rate" \
+      "the script deletes the instance when it finishes; --keep leaves it up, and gcloud compute instances delete <name> --zone <zone> is the undo"
+  fi
+  # --confirm is consumed here, never forwarded: those parsers reject an unknown flag, and their own
+  # guard is that they only ever pull an image, never push one.
+  strip_confirm "$@"
+  cd "$ROOT" || die "cd failed"
+  exec bash "$script" ${STRIPPED[@]+"${STRIPPED[@]}"}
+}
+
+# ------------------------------------------------------------------ build
+# --check and --dry-run are free and are the DEFAULT: that is what `gsvtk build <branch>` runs. The
+# real build — boot a VM, build, push — needs --confirm, because gatk-sv-build.sh itself starts a VM
+# with no prompt of its own (docs/docker-builds.md).
+cmd_build() {
+  stamp
+  branch=""; fwd=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --confirm) CONFIRM=1; shift;;      # the only flag this subcommand owns
+      -*)       die "build: $1 is a docker/gatk-sv-build.sh flag, not a gsvtk one. This subcommand
+takes the branch, optional image targets, and --confirm -- nothing else, because the two free
+previews it would select (--check, --dry-run) are exactly what \`gsvtk build <branch>\` already
+runs. Anything past that belongs to the script:
+         cd $ROOT && docker/gatk-sv-build.sh $1 ${branch:-<branch>}";;
+      *)        fwd+=("$1"); shift;;
+    esac
+  done
+  # The first positional is the branch, the rest are image targets, forwarded verbatim: this
+  # subcommand drives exactly one tool, and the image list is part of its own command shape.
+  rest=(); i=0
+  for a in ${fwd[@]+"${fwd[@]}"}; do
+    if [ "$i" = 0 ] && [ -z "$branch" ]; then branch="$a"; else rest+=("$a"); fi
+    i=$((i + 1))
+  done
+  [ -n "$branch" ] || die "build: no branch named (usage: gsvtk build <branch> [image ...] [--confirm])"
+
+  cd "$ROOT" || die "cd failed"
+  if [ "$CONFIRM" != 1 ]; then
+    # The default IS the preview: --check then --dry-run, the cheap-first ordering the whole repo is
+    # built on. There is no `--check`/`--dry-run` flag here to type, because that would be a second
+    # name for the default, and the two names would drift from the script's own.
+    printf '=== --check (read-only preflight) ===\n'
+    bash docker/gatk-sv-build.sh --check "$branch" ${rest[@]+"${rest[@]}"} \
+      || die "preflight failed; fix that before anything else"
+    printf '\n=== --dry-run (prints the gcloud command, creates nothing) ===\n'
+    bash docker/gatk-sv-build.sh --dry-run "$branch" ${rest[@]+"${rest[@]}"}
+    printf '\nReal build (starts a VM now): gsvtk build %s --confirm\n' "$branch"
+    printf '  or in the checkout:          docker/gatk-sv-build.sh %s\n' "$branch"
+    return 0
+  fi
+
+  if read_only_on; then
+    refuse_readonly "build $branch" "docker/gatk-sv-build.sh $branch $(join ${rest[@]+"${rest[@]}"})" \
+      "It boots a VM, builds, and pushes images: compute plus a registry write."
+  fi
+  need_confirm "build $branch" "boots a VM, builds images and pushes them to your registry"
+  announce_write "one builder VM, a docker build, and a push of the images it built" \
+    "images land in $(cfg IMAGE_REPO) (key IMAGE_REPO; the guard-rail namespace is $(cfg IMAGE_NAMESPACE) — do not push where a production pipeline reads from); the VM runs in project $(cfg PROJECT), zone $(cfg ZONE)" \
+    "one $(cfg MACHINE_TYPE) VM with a $(cfg DISK_GB) GB disk for 1.5-3 h (timeout ceiling 8 h); gatk-sv images are linux/amd64, so they cannot be built on your laptop instead. VM-minutes only: this repo quotes no prices" \
+    "the VM is deleted on exit (--keep leaves it up, gcloud compute instances delete is the undo); the pushed images stay in the registry until you delete them, and nothing reads them unless a run names that tag"
+  exec bash docker/gatk-sv-build.sh "$branch" ${rest[@]+"${rest[@]}"}
+}
+
+# ------------------------------------------------------------------ terra
+# Read-only Terra modes dispatch freely; the ones that POST, start compute or bulk-download need
+# --confirm (and are refused outright under GSVTK_READ_ONLY=1). A mode name carries its tool when the
+# bare verb would be ambiguous: `create` belongs to both batch_configs.py and batch_rerun_step.py, so
+# say `configs-create` or `rerun-create` and this CLI refuses to guess which one POSTs.
+cmd_terra() {
+  what="${1:-}"; shift || true
+  # The whitelist is checked BEFORE the interpreter, so "refused" is never accidentally reported as
+  # "your environment is broken": a refusal must read the same on every machine, and scripts/
+  # check_skill.py checks this order textually because on a machine that HAS the venv no live run can
+  # tell the two messages apart.
+  case "$what" in
+    recon|show|check|plan|verify|status|cost|peek|inputs|save-metadata|rerun-show) ;;
+    *)  terra_mutating_or_refuse "$what" "$@" ;;
+  esac
+  p="$(py_for terra)" || die "no interpreter with firecloud: cd $ROOT && make setup, or export GSVTK_TERRA_PY=<python with firecloud>"
+  stamp
+  cd "$ROOT" || die "cd failed"
+  case "$what" in
+    recon)     exec "$p" terra/recon.py "$@";;
+    show)      exec "$p" terra/batch_configs.py show "$@";;
+    # Offline and needs no workspace: the binding keys vs the WDL at a ref. Deliberately in the
+    # read-only set, because it is the question you ask BEFORE you decide the target, and the one
+    # that used to be answerable only by `validate` (Terra-side, on a Dockstore-published ref).
+    check)     exec "$p" terra/batch_configs.py check "$@";;
+    plan)      exec "$p" terra/batch_freeze.py plan "$@";;
+    verify)    exec "$p" terra/batch_freeze.py verify "$@";;
+    status)    exec "$p" terra/batch_status.py "$@";;
+    cost)      exec "$p" terra/batch_cost.py "$@";;
+    inputs)    exec "$p" terra/batch_check_inputs.py "$@";;
+    peek)      exec "$p" terra/batch_peek.py "$@";;
+    save-metadata) exec "$p" terra/batch_save_metadata.py "$@";;
+    # Mode first, like every other fixed mode: batch_rerun_step.py reads argv[0] to decide whether an
+    # --image is required, so a trailing "show" only worked while no other arguments were present.
+    rerun-show) exec "$p" terra/batch_rerun_step.py show "$@";;
+  esac
+}
+
+# The mutating half, kept OUT of cmd_terra so the read-only whitelist above stays the one list that
+# scripts/check_skill.py parses, and the ordering claim stays checkable.
+terra_mutating_or_refuse() {
+  what="${1:-(empty)}"; shift || true
+  # --confirm belongs to THIS gate: it is read here, and re-added below only for a tool that
+  # documents the same flag itself.
+  has_flag --confirm "$@" && CONFIRM=1
+  tool=""; mode=""; own_confirm=0; py=1
+  case "$what" in
+    configs-create)     tool=terra/batch_configs.py;   mode=create;   own_confirm=1;;
+    configs-validate)   tool=terra/batch_configs.py;   mode=validate;;
+    freeze-copy|copy)   tool=terra/batch_freeze.py;    mode=copy;;
+    freeze-attrs|attrs) tool=terra/batch_freeze.py;    mode=attrs;;
+    rerun-create)       tool=terra/batch_rerun_step.py; mode=create;   own_confirm=1;;
+    rerun-validate)     tool=terra/batch_rerun_step.py; mode=validate;;
+    rerun-submit|submit) tool=terra/batch_rerun_step.py; mode=submit;  own_confirm=1;;
+    create|validate)
+      # Refused under read-only like any other POSTer, and refused as AMBIGUOUS even to a writer:
+      # a config POSTed by the other tool is read by the wrong submission.
+      if read_only_on; then
+        refuse_readonly "terra $what" "python terra/batch_configs.py $what --confirm" \
+          "It POSTs into Terra. The bare name is ambiguous besides: configs-$what is every shipped config, rerun-$what is one step's — name which tool POSTs."
+      fi
+      printf 'gsvtk: refusing "%s" — the name is ambiguous and this CLI will not pick which tool POSTs.\n' \
+        "$what" >&2
+      printf '       configs-%s   → terra/batch_configs.py      (every shipped method config)\n' "$what" >&2
+      printf '       rerun-%s     → terra/batch_rerun_step.py   (one step, images pinned in the body)\n' "$what" >&2
+      printf '       Name one, and add --confirm.\n' >&2
+      exit 2;;
+    fetch)          tool=terra/fetch_outputs.py;        mode="";;
+    fetch-compare)  tool=terra/batch_fetch_compare.sh;  mode=""; py=0;;
+    *)  terra_usage_refuse "$what" ;;
+  esac
+
+  # --dry-run / --check (and fetch --verify, which re-hashes what is already on disk) transfer
+  # nothing, so they stay dispatchable: rule 3 in the header. The list is the tools' own wording for
+  # "prints the plan", not a general permission for any flag that happens to be present.
+  plan_only=0
+  is_plan_only "$@" && plan_only=1
+  case "$what" in
+    fetch)          has_flag --verify "$@" && plan_only=1 ;;
+    fetch-compare)  [ "${1:-}" = "table" ] && plan_only=1 ;;   # local diff of already-fetched files
+  esac
+
+  shown="$tool${mode:+ $mode}"
+  if read_only_on && [ "$plan_only" != 1 ]; then
+    refuse_readonly "terra $what" "python $shown $*" "$(terra_detail "$what")"
+  fi
+  if [ "$plan_only" != 1 ]; then
+    need_confirm "terra $what" "$(terra_detail "$what")"
+    announce_write "$(terra_what "$what")" "$(terra_where "$what")" \
+      "$(terra_cost "$what")" "$(terra_undo "$what")"
+  fi
+
+  if [ "$py" = 1 ]; then
+    p="$(py_for terra)" || die "no interpreter with firecloud: cd $ROOT && make setup, or export GSVTK_TERRA_PY=<python with firecloud>"
+  fi
+  stamp
+  cd "$ROOT" || die "cd failed"
+  # --confirm stays in the forwarded list ONLY where the target tool documents that flag itself. A
+  # tool that gates on --write keeps needing --write from you: this gate is additive, never a
+  # substitute, so it cannot weaken anything by existing.
+  if [ "$own_confirm" != 1 ]; then strip_confirm "$@"; else STRIPPED=("$@"); fi
+  if [ "$py" = 1 ]; then
+    if [ -n "$mode" ]; then exec "$p" "$tool" "$mode" ${STRIPPED[@]+"${STRIPPED[@]}"}; fi
+    exec "$p" "$tool" ${STRIPPED[@]+"${STRIPPED[@]}"}
+  fi
+  if [ -n "$mode" ]; then exec bash "$tool" "$mode" ${STRIPPED[@]+"${STRIPPED[@]}"}; fi
+  exec bash "$tool" ${STRIPPED[@]+"${STRIPPED[@]}"}
+}
+
+# The catch-all, printing the two lists an agent reads before deciding to bypass anything.
+terra_usage_refuse() {
+  local what="$1"
+  [ "$what" = "(empty)" ] && \
+    printf 'gsvtk: refusing "(empty)" — no Terra mode was given.\n' >&2 || \
+    printf 'gsvtk: refusing "%s" — not a mode this CLI dispatches.\n' "$what" >&2
+  printf '  read-only modes (dispatch freely):
+    recon | show | check | plan | verify | status | cost | peek | inputs | save-metadata |
+    rerun-show
+  mutating modes (need --confirm; refused outright under GSVTK_READ_ONLY=1 / --read-only):
+    configs-create | configs-validate | freeze-copy | freeze-attrs | rerun-create |
+    rerun-validate | rerun-submit | fetch | fetch-compare
+  Bare create / validate are refused as AMBIGUOUS (they belong to two tools); bare copy, submit
+  and attrs are unambiguous aliases of freeze-copy, rerun-submit and freeze-attrs.
+
+  Each mode forwards its own flags verbatim: --against, --image KEY=REF, --write,
+  --allow-shared-target, --dry-run, ... Nothing here adds a flag to a tool or drops one.
+
+  `profile` and a bare `attrs` are refused as a CLASS even though the tool behind them can print
+  without writing: they are the publishing path, and an outer gate does not grade a publishing
+  tool by which flag it happened to be handed. Run them in the checkout if that is what you want:
+    cd %s && python terra/batch_freeze.py attrs        (no --write: prints only)\n' "$ROOT" >&2
+  exit 2
+}
+
+# One sentence per mode, so the refusal and the pre-flight say the same thing about the same mode.
+terra_detail() {
+  case "$1" in
+    configs-create)   printf 'POSTs method configs into your Terra workspace, overwriting the bodies a submission will read';;
+    configs-validate) printf 'asks Terra to resolve each config against its Dockstore WDL — a live Terra round trip, so the ref it grades is Terra'"'"'s, not your checkout'"'"'s';;
+    freeze-copy|copy) printf 'server-side copies tens of GiB of baseline inputs into your sandbox bucket';;
+    freeze-attrs|attrs) printf 'writes *<frozen suffix> entity attributes onto the batch sample_set in Terra';;
+    rerun-create)     printf 'POSTs a one-step rerun config into your Terra workspace';;
+    rerun-validate)   printf 'asks Terra to typecheck the rerun config — a live Terra round trip';;
+    rerun-submit|submit) printf 'starts a submission: a batch of VMs, real money';;
+    fetch)            printf 'bulk-downloads a run'"'"'s outputs into $GSVTK_WORK';;
+    fetch-compare)    printf 'bulk-downloads a run'"'"'s outputs, then runs the profile/table comparison locally';;
+    *)                printf 'writes or spends';;
+  esac
+}
+
+terra_what() {
+  case "$1" in
+    configs-create)   printf 'the shipped method configs, POSTed into Terra (overwrite, not append)';;
+    configs-validate) printf 'a Terra-side typecheck of each config against its published WDL';;
+    freeze-copy|copy) printf 'server-side GCS->GCS copies of every frozen baseline input';;
+    freeze-attrs|attrs) printf 'a new attribute column set on the batch sample_set row in Terra';;
+    rerun-create)     printf 'one rerun method config, with the image refs pinned into its body';;
+    rerun-validate)   printf 'a Terra-side typecheck of the rerun config';;
+    rerun-submit|submit) printf 'one Terra submission: a fleet of VMs for the step';;
+    fetch)            printf 'a local copy of the run'"'"'s declared outputs, plus a sha256 manifest';;
+    fetch-compare)    printf 'a local copy of the chain outputs, then gatk-sv-profile and compare/ locally';;
+  esac
+}
+
+terra_where() {
+  case "$1" in
+    configs-create|configs-validate|freeze-attrs|attrs|rerun-create|rerun-validate|rerun-submit|submit)
+      printf 'Terra %s — the tools refuse the SHARED baseline workspace unless --allow-shared-target' "$(ws_target)";;
+    freeze-copy|copy)
+      printf 'the sandbox bucket of %s (its bucketName); the manifest that records it goes under %s/manifests' "$(ws_target)" "$(cfg WORK)";;
+    fetch|fetch-compare)
+      printf '%s (GSVTK_WORK): outputs/, manifests/, and the compare tree' "$(cfg WORK)";;
+  esac
+}
+
+terra_cost() {
+  case "$1" in
+    configs-create|configs-validate|rerun-create|rerun-validate)
+      printf 'no VM cost; the cost is a config a later submission silently reads, and Terra keeps no history of the body it replaced';;
+    freeze-copy|copy)
+      printf 'billable GCS objects — tens of GiB — in your sandbox bucket; the copy is server-side (no egress), and nothing overwrites them';;
+    freeze-attrs|attrs)
+      printf 'no money; Terra MERGES entity attributes, so a published value is not reverted by writing again';;
+    rerun-submit|submit)
+      printf 'a batch of VMs, tens of minutes to a few hours: VM-minutes and job counts, never a price from here. gsvtk terra cost on a finished run prints its real minutes';;
+    fetch|fetch-compare)
+      printf 'no Terra cost; tens of GB onto your disk, plus local CPU for the profile run';;
+  esac
+}
+
+terra_undo() {
+  case "$1" in
+    configs-create|rerun-create)
+      printf 'there is no undo in Terra: print the current bodies FIRST (gsvtk terra show / gsvtk terra rerun-show) and re-POST those, or recreate from the branch you meant';;
+    configs-validate|rerun-validate)
+      printf 'nothing to undo — it is a read request; --confirm is because it leaves this machine and grades Terra'"'"'s ref, not yours';;
+    freeze-copy|copy)
+      printf 'gsutil -m rm -r the copied prefix (nothing here deletes); the manifest records what was copied';;
+    freeze-attrs|attrs)
+      printf 'delete or republish the attribute column in the workspace data table; a merged attribute cannot be rolled back';;
+    rerun-submit|submit)
+      printf 'stop the submission in the Terra UI (or watch it with batch_status.py --wait); objects it already wrote stay in the bucket';;
+    fetch|fetch-compare)
+      printf 'rm -rf the fetched tree under %s; --dry-run first prints the plan and touches nothing' "$(cfg WORK)";;
+  esac
+}
+
+# ------------------------------------------------------------------ compare
+# The comparators, dispatched by name, arguments forwarded verbatim. Names are the file stems, and
+# the hyphen spelling of an underscore stem is accepted because prose reads better with hyphens
+# (`gsvtk compare table-diff` -> compare/table_diff.py).
+cmd_compare() {
+  name="${1:-}"; shift || true
+  case "$name" in
+    -h|--help|help) print_compare_usage; exit 0;;
+    '') print_compare_usage >&2; exit 2;;
+    --list) list_comparators; exit 0;;
+  esac
+  case "$name" in
+    artifact) die "compare: artifact.py is the shared reader module, not a comparator — its CLI is artifact_tally.py";;
+    make_fixtures) die "compare: make_fixtures.py builds the gate's test fixtures; run it directly (it is not a comparator)";;
+  esac
+  target="$ROOT/compare/$name.py"
+  [ -f "$target" ] || target="$ROOT/compare/$(printf '%s' "$name" | tr '-' '_').py"
+  [ -f "$target" ] || die "compare: no comparator '$name'. Run: gsvtk compare --list"
+  stamp
+  cd "$ROOT" || die "cd failed"
+  exec "$PY" "$target" "$@"
+}
+
+list_comparators() {
+  printf '%s\n' 'compare/ CLIs, by the name `gsvtk compare` takes (each also has --help):'
+  for f in "$ROOT"/compare/*.py; do
+    n="$(basename "$f" .py)"
+    case "$n" in artifact|make_fixtures) continue;; esac
+    printf '  %-24s compare/%s.py\n' "$n" "$n"
+  done
+}
+
+print_compare_usage() {
+  cat <<'USAGE'
+gsvtk compare <name> [args...] — the comparators, arguments forwarded verbatim
+
+  batch-tables / compare_batch_tables   summary tables from two runs, column by column
+  table-diff                            any two tables that share a key column
+  matrix-diff                           site-by-sample matrices: which cells changed
+  vcf-paired-diff                       per-(site, sample) values across two VCFs
+  site-set-diff                         variants found in one run but not the other
+  lineset-diff                          two lists: what was added, what was removed
+  json-diff                             nested JSON, with paths you choose to ignore
+  tar-manifest                          two archives, by file list and checksum
+  profile-summarize                     one headline number from gatk-sv-profile's own output
+  pair-level-concordance                concordance between two call sets, independently
+  gq-scale-compare                      whether two quality columns use the same scale
+  gq-paired-compare                     on matched pairs: the same values, or a new scale
+  diff-rd-states                        where two runs disagree on copy number
+  artifact-tally                        what an output file actually contains, ignoring its
+                                        own summary
+
+`gsvtk compare --list` prints the name each one dispatches to. A comparator with nothing to compare
+exits nonzero and says so: it will not report agreement on nothing (docs/comparators.md).
+USAGE
+}
+
+# ------------------------------------------------------------------ replay
+# build_inputs plus the worked drivers from examples/, and a preflight that names the blocker (jar,
+# JDK 17, bcftools, disk) BEFORE the driver dies 40 minutes in on a `command not found`.
+cmd_replay() {
+  mode="${1:-}"; shift || true
+  case "$mode" in
+    -h|--help|help) print_replay_usage; exit 0;;
+    '') print_replay_usage >&2; exit 2;;
+    preflight) replay_preflight "${1:-train-chr20}"; exit 0;;
+    inputs)
+      stamp; cd "$ROOT" || die "cd failed"
+      exec "$PY" replay/build_inputs.py "$@";;
+    het-population)
+      stamp; cd "$ROOT" || die "cd failed"
+      exec "$PY" examples/recompute_het_population.py "$@";;
+    reference-run)
+      replay_preflight reference-run
+      stamp; cd "$ROOT" || die "cd failed"
+      exec bash examples/replay_reference_run.sh "$@";;
+    train-chr20|train-full|train-definitive|rd-population-probe)
+      replay_preflight "$mode"
+      stamp; cd "$ROOT" || die "cd failed"
+      case "$mode" in
+        train-chr20) exec bash examples/run_train_chr20.sh "$@";;
+        train-full) exec bash examples/run_train_full.sh "$@";;
+        train-definitive) exec bash examples/run_train_definitive.sh "$@";;
+        rd-population-probe) exec bash examples/run_rd_population_probe.sh "$@";;
+      esac;;
+    *) die "replay: no such mode '$mode'. Run: gsvtk replay --help";;
+  esac
+}
+
+print_replay_usage() {
+  cat <<'USAGE'
+gsvtk replay <mode> [args...] — run a real stage locally, on a captured run's exact inputs
+
+  preflight [mode]      what blocks the replay loop here (java, jar, bcftools, disk)
+  inputs                replay/build_inputs.py: rebuild a launchable inputs JSON from
+                        captured Cromwell metadata
+  train-chr20           examples/run_train_chr20.sh       (fast loop; RD numbers from a slice
+                        belong to no real cohort)
+  train-full            examples/run_train_full.sh        (the run whose RD cutoffs you quote)
+  train-definitive      examples/run_train_definitive.sh  (full intervals, RD heap sized)
+  rd-population-probe   examples/run_rd_population_probe.sh (cutoff behaviour, measured)
+  reference-run         examples/replay_reference_run.sh  (replay one captured task command;
+                        needs CAPTURED=<that task's Cromwell script> and IMAGES=<image map>)
+  het-population        examples/recompute_het_population.py (population stats, recomputed
+                        outside the pipeline)
+
+The drivers are recipes, not supported interfaces (examples/README.md): read one, copy it, change the
+step. Local replay costs time and disk, nothing else. It needs a JDK 17+ and a locally built GATK
+jar — `gsvtk replay preflight` says which one you are missing and how to build it.
+USAGE
+}
+
+# java_major — the major version of the `java` on PATH, or nothing when it cannot be read. The
+# trainers need 17+ (docs/local-replay.md); `java -version` answers on stderr and older builds use
+# the 1.x scheme, so both spellings are folded here rather than guessed at.
+java_major() {
+  local ver major
+  command -v java >/dev/null 2>&1 || return 1
+  # The version is the quoted token on the first stderr line. Cut it out with awk rather than a
+  # sed regex: the sed I reached for first used `\?`, which BSD sed (macOS) does not implement, so
+  # the parser returned "unreadable" on exactly the machines that ship it.
+  ver="$(java -version 2>&1 | head -1 | awk -F'"' 'NF>1 {print $2; exit}')"
+  [ -n "$ver" ] || return 1
+  major="${ver%%.*}"
+  case "$major" in ''|*[!0-9]*) return 1;; esac
+  if [ "$major" = 1 ]; then                       # the old scheme: 1.8.0_292 means 8
+    major="$(printf '%s' "$ver" | cut -d. -f2)"
+    case "$major" in ''|*[!0-9]*) return 1;; esac
+  fi
+  printf '%s' "$major"
+}
+
+# replay_preflight MODE — measure, then say. A blocker exits 3 (missing dependency) and names the
+# fix; disk is ADVISORY, because this repo has never measured what one driver needs, and a hard
+# floor invented here would be a claim rather than a measurement.
+replay_preflight() {
+  replay_preflight_report "$1" || exit 3
+}
+
+replay_preflight_report() {
+  local mode="$1" blockers="" jmajor="" jar="" ck free gb w base same
+  local want_java=0 want_bcftools=0
+  case "$mode" in
+    train-chr20|train-full|train-definitive|het-population) want_java=1; want_bcftools=1;;
+    rd-population-probe) want_java=1;;
+    reference-run) want_java=0;;
+    *) want_java=1; want_bcftools=1;;
+  esac
+  printf 'replay preflight (%s)\n' "$mode"
+  if [ "$want_java" = 1 ]; then
+    if ! command -v java >/dev/null 2>&1; then
+      printf '  java     MISSING — the trainers are Java; install a JDK 17+ (docs/local-replay.md)\n'
+      blockers="$blockers java"
+    else
+      jmajor="$(java_major)" || jmajor=""
+      if [ -z "$jmajor" ]; then
+        printf '  java     present (%s) — version unreadable, so this is NOT verified\n' \
+          "$(java -version 2>&1 | head -1)"
+      elif [ "$jmajor" -lt 17 ]; then
+        printf '  java     %s — TOO OLD: gatk needs JDK 17+ (a jar built under 8 fails later, not now)\n' \
+          "$jmajor"
+        blockers="$blockers java-under-17"
+      else
+        printf '  java     ok (major %s)\n' "$jmajor"
+      fi
+    fi
+    ck="${GSVTK_GATK_CHECKOUT:-}"
+    [ -n "$ck" ] || ck="$(cfg GATK_CHECKOUT)"
+    jar="${JAR:-}"
+    if [ -n "$jar" ] && [ ! -f "$jar" ]; then
+      printf '  jar      JAR=%s does not exist\n' "$jar"; blockers="$blockers jar-missing"
+    elif [ -n "$jar" ] && [ ! -s "$jar" ]; then
+      printf '  jar      JAR=%s is 0 bytes — an rc from nothing is not a result\n' "$jar"
+      blockers="$blockers jar-empty"
+    elif [ -n "$jar" ]; then
+      printf '  jar      ok (%s, named by JAR)\n' "$jar"
+    elif [ -z "$ck" ]; then
+      printf '  jar      NOT DISCOVERABLE — GSVTK_GATK_CHECKOUT is unset, so there is nowhere to look.\n'
+      printf '             build one:  cd <gatk checkout> && JAVA_HOME=<JDK 17> ./gradlew localJar\n'
+      printf '             then:       export GSVTK_GATK_CHECKOUT=<that checkout>\n'
+      printf '             (the -local.jar is the shaded one carrying the `sv` command group; the plain\n'
+      printf '             jar will not run the trainers — docs/local-replay.md)\n'
+      blockers="$blockers no-jar"
+    else
+      jar="$(ls -t "$ck"/build/libs/gatk-package-*-local.jar 2>/dev/null | head -1)"
+      if [ -z "$jar" ]; then
+        printf '  jar      NOT FOUND under %s/build/libs (pattern gatk-package-*-local.jar)\n' "$ck"
+        printf '             build it with JAVA_HOME=<JDK 17> ./gradlew localJar, or point JAR at it\n'
+        blockers="$blockers no-jar"
+      elif [ ! -s "$jar" ]; then
+        printf '  jar      %s is 0 bytes — an rc from nothing is not a result\n' "$jar"
+        blockers="$blockers jar-empty"
+      else
+        printf '  jar      ok (%s — check its build date is AFTER your change)\n' "$jar"
+      fi
+    fi
+  fi
+  if [ "$want_bcftools" = 1 ]; then
+    if command -v bcftools >/dev/null 2>&1; then printf '  bcftools ok\n'
+    else printf '  bcftools MISSING — the drivers slice VCFs with it (conda install -c bioconda bcftools)\n'
+      blockers="$blockers bcftools"; fi
+  fi
+  if [ "$mode" = "reference-run" ]; then
+    if [ -z "${CAPTURED:-}" ] || [ ! -f "${CAPTURED:-}" ]; then
+      printf '  CAPTURED unset or not a file — that driver replays a LOCAL copy of one task'"'"'s\n'
+      printf '             Cromwell `script` (the gsutil cp is in the script'"'"'s own header). There is\n'
+      printf '             no live-workspace mode, which is what keeps it offline.\n'
+      blockers="$blockers CAPTURED"
+    else printf '  captured ok (%s)\n' "$CAPTURED"; fi
+    if [ -z "${IMAGES:-}" ] || [ ! -f "${IMAGES:-}" ]; then
+      printf '  IMAGES     unset or not a file — the per-arm image map (replay/images.example.json)\n'
+      blockers="$blockers IMAGES"
+    else printf '  images     ok (%s)\n' "$IMAGES"; fi
+  fi
+  # Disk: measured, reported, never a hard gate. docs/local-replay.md budgets "tens of GB" for the
+  # staged matrices; a --region chr20 run needs far less, and nothing here has measured a per-driver
+  # figure, so the number is printed with its source instead of enforced behind an invented floor.
+  w="$(cfg WORK)"
+  if [ -n "$w" ]; then
+    # Measure the nearest EXISTING directory: GSVTK_WORK defaults to <repo>/work, which does not
+    # exist until something writes there, and `df` on a missing path answers nothing at all.
+    base="$w"
+    while [ ! -d "$base" ] && [ "$base" != "/" ]; do base="$(dirname "$base")"; done
+    same=1; [ "$base" = "$w" ] || same=0
+    free="$(df -k "$base" 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [ -n "$free" ]; then
+      gb=$((free / 1048576))
+      if [ "$same" = 1 ]; then printf '  disk     %s GB free at %s\n' "$gb" "$w"
+      else printf '  disk     %s GB free at %s (%s does not exist yet)\n' "$gb" "$base" "$w"; fi
+      if [ "$gb" -lt 40 ]; then
+        printf '           below the "tens of GB" budget docs/local-replay.md budgets: if staging stops\n'
+        printf '           short, this is why. Point GSVTK_WORK at a roomier disk, stage one region\n'
+        printf '           (--region chr20), or hardlink a panel you already hold (--link-dir).\n'
+      fi
+    else
+      printf '  disk     df reported nothing for %s\n' "$base"
+    fi
+  fi
+  if [ -n "$blockers" ]; then
+    printf 'preflight: BLOCKED by%s\n' "$blockers"
+    printf '           exit 3 = a missing dependency, named above. Nothing was run.\n'
+    return 1
+  fi
+  printf 'preflight: ok\n'
+  return 0
+}
+
+# ------------------------------------------------------------------ usage
+usage() {
+  cat <<'USAGE'
+gsvtk <command> — the gatk-sv-testkit command line
+
+  locate                    this checkout, its git state, which tools are present
+  doctor [--redact]         what is configured / missing (values hidden with --redact)
+  tools                     which of the four loops can run on this machine right now
+  check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]
+                            the static checks (WDL launchability, sv_shell JSON contract,
+                            jq plumbing; --semantics/--reach add the two tree-wide checkers)
+  check image <run_in_image|svshell_image_check|jar_flag_probe> ...
+                            ask a PUBLISHED image a question — boots a VM, so --dry-run is free
+                            and the real probe needs --confirm
+  build <branch> [image ...] [--confirm]
+                            no flags but --confirm: the default IS the free preview (--check then
+                            --dry-run); --confirm does the real build. Other gatk-sv-build.sh flags
+                            belong to the script, which names them in its own --help
+  terra <mode>              read-only: recon | show | check | plan | verify | status | cost |
+                            peek | inputs | save-metadata | rerun-show
+                            write or spend (need --confirm): configs-create | configs-validate |
+                            freeze-copy | freeze-attrs | rerun-create | rerun-validate |
+                            rerun-submit | fetch | fetch-compare
+  compare <name> [args...]  the comparators, dispatched by name, args verbatim (--list for names)
+  replay <mode> [args...]   inputs | train-chr20 | train-full | train-definitive |
+                            rd-population-probe | reference-run | het-population | preflight
+  repo                      print this checkout's path only
+  version                   which checkout this is (and which skill drove it, if one did)
+
+Global flag, before the command:
+  --read-only               same as GSVTK_READ_ONLY=1: refuse every mode that POSTs, boots compute
+                            or bulk-downloads, and do it BEFORE any dependency or config check
+  --confirm                 after the command: the outer gate for a mutating mode. A tool's own
+                            --confirm / --write / --allow-shared-target still has to be typed too
+
+Every tool is still a script you can run directly, and each tool's own --help stays the authority on
+its flags. docs/cli.md is the command-to-tool map and the read-only contract; README's tool reference
+lists the scripts. Exit codes: 0 clean, 1 findings or failure, 2 usage / refused, 3 missing
+dependency, 4 missing required config.
+USAGE
+}
+
+# ------------------------------------------------------------------ dispatch
+# Leading global flags only: a --confirm after the subcommand belongs to that subcommand's argument
+# rules, and is picked up by whichever gate needs it.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --read-only) READ_ONLY=1; shift;;
+    *) break;;
+  esac
+done
+
+# The interpreter every dispatched python tool runs under, resolved once.
+PY="$(py_for python)"
+
+cmd="${1:-}"
+case "$cmd" in
+  -h|--help|help)   usage; exit 0;;
+  version|-V|--version)
+    printf 'gsvtk     repo CLI @ %s%s\n' "$(git_sha)" "$(git_dirty)"
+    printf 'repo      %s\n' "$ROOT"
+    [ -n "${GSVTK_SKILL_VERSION:-}" ] && \
+      printf 'skill     %s (read-only wrapper)\n' "$GSVTK_SKILL_VERSION"
+    exit 0;;
+  repo)             printf '%s\n' "$ROOT"; exit 0;;
+  locate)   shift; cmd_locate "$@";;
+  doctor)   shift; cmd_doctor "$@";;
+  tools)    shift; cmd_tools "$@";;
+  check)    shift; if [ "${1:-}" = "image" ]; then shift; cmd_check_image "$@"; fi; cmd_check "$@";;
+  gate)     shift; cmd_check "$@";;        # the name the released skill (<=0.5.0) used; kept working
+  build)    shift; cmd_build "$@";;
+  terra)    shift; cmd_terra "$@";;
+  compare)  shift; cmd_compare "$@";;
+  replay)   shift; cmd_replay "$@";;
+  '')       usage >&2; exit 2;;
+  *)        printf 'gsvtk: unknown command "%s". Run: gsvtk --help\n' "$cmd" >&2; exit 2;;
+esac

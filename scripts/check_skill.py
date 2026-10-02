@@ -4,10 +4,20 @@
 Why this exists
 ---------------
 `.pi/skills/gatk-sv-testkit/` is executable documentation: it tells an agent which Terra modes
-POST, which dependency decides whether a loop runs, and which version of the wrapper it was written
+POST, which dependency decides whether a loop runs, and which version of the shim it was written
 against. Every one of those claims was true when the skill was written and none of them is checked
 by any other phase of `make test`, because nothing in the repo *reads* the skill. That is exactly
 the shape that has repeatedly produced docs confidently describing code that no longer exists here.
+
+Since the single-command-line change, `scripts/gsvtk` is a SHIM: it locates the checkout, runs the
+trust check, and execs the checkout's own `./gsvtk` with GSVTK_READ_ONLY=1. The read-only whitelist,
+the mode refusal and the per-tool flag dispatch live in the repo CLI now, so the whitelist and the
+ordering claim are graded against `./gsvtk` (the file that implements them) while the version pair and
+the read-only stamp are graded against the shim. Three claims belong to that split specifically, and
+none of them is visible from the happy path: the shim must still SET the flag (a contract that is
+never switched on is off), it must not have grown its own dispatcher back (two dispatchers is what the
+split removed, and the second is the copy nobody runs), and it must still be the thing that execs the
+entry point at all.
 
 Checks, all offline, no credentials, no network:
 
@@ -18,7 +28,7 @@ Checks, all offline, no credentials, no network:
   3. every `scripts/*` file with a shell shebang passes `bash -n`.
   4. no home-anchored absolute path anywhere in the skill: this is the publishable set, and that is
      what `make audit` exists to catch (it scans tracked files, so this catches it earlier).
-  5. the refusal contract, in two halves, because one live run cannot prove both:
+  5. the refusal contract, in three halves, because one live run cannot prove all of them:
      * each mode SKILL.md names (plus the set hardcoded in EXPECTED_REFUSED) is executed through
        `gsvtk terra <mode>` and must answer with a refusal, not with a dispatch and not with an
        environment error;
@@ -27,10 +37,17 @@ Checks, all offline, no credentials, no network:
        checkout's venv the environment probe succeeds whatever the order is, so no live run there
        can distinguish the two messages. Saying "tested by running it" would be a claim this file
        cannot make on the machine it ships to.
+     * the split itself: the shim must contain `GSVTK_READ_ONLY=1`, must NOT define `cmd_terra`, and
+       must exec `$REPO/gsvtk`. The CLI refuses on the flag alone, so a shim that stops setting it
+       silently un-gates the agent; a shim that grows a mode list back is a second dispatcher, and
+       the second one is the copy that goes stale quietly.
      A prose edit that drops a mode from the refused list is also a finding: the list is the safety
-     contract an agent reads before deciding to bypass the wrapper.
-  6. control: the same checks run against a copy with the version stamp perturbed MUST fail. Without
-     this, "0 problems" is also what a checker that compares nothing reports.
+     contract an agent reads before deciding to bypass the gate.
+  6. control: three single-edit copies -- version stamps pulled apart, the read-only flag deleted,
+     the dispatcher restored into the shim -- must EACH come back with ITS OWN finding. "The control
+     produced some problem" is also satisfied by an unrelated one, which is why each mutation is
+     graded by the needle it is supposed to produce. Without this, "0 problems" is also what a
+     checker that compares nothing reports.
 
 Exit 0 = coherent, 1 = findings.
 """
@@ -44,6 +61,9 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# The entry point the shim execs. The read-only whitelist and the refusal ordering are claims about
+# THIS file since the split; the shim keeps its own VERSION and its GSVTK_READ_ONLY=1 stamp.
+REPO_CLI = REPO / "gsvtk"
 
 # The modes the wrapper must refuse, restated here ON PURPOSE. Deriving them from the wrapper is
 # impossible (its `case` lists what is ALLOWED; "refused" is everything else, which is not a list)
@@ -146,7 +166,10 @@ def nested(fm: str, key: str) -> str:
 
 
 def whitelist(script: Path) -> set[str]:
-    """The read-only modes scripts/gsvtk will actually dispatch (`case "$what" in a|b|c)`)."""
+    """The read-only modes a dispatcher accepts (`case "$what" in a|b|c)` on one line).
+
+    Called with the REPO CLI, not the shim: the shim has no mode list any more, and if it grows one
+    back that is a finding of its own in check_tree()."""
     m = re.search(r'case "\$what" in\s*\n\s*([a-z|_-]+)\)', read(script), re.M)
     return set(m.group(1).split("|")) if m else set()
 
@@ -210,10 +233,16 @@ def audit_dir(skill_dir: Path) -> list[str]:
     return bad
 
 
-def check_tree(skill_dir: Path, label: str = "") -> list[str]:
-    """All claims, as a list of problems. Empty list == coherent."""
+def check_tree(skill_dir: Path, label: str = "", cli: Path = None) -> list[str]:
+    """All claims, as a list of problems. Empty list == coherent.
+
+    `cli` is the dispatcher the whitelist and the ordering claim are read out of. It defaults to the
+    repo entry point (the shim has no mode list any more), which is why the control can run this on a
+    copied skill tree and still grade the real CLI.
+    """
     pre = f"{label}: " if label else ""
     bad: list[str] = []
+    cli = cli or REPO_CLI
     skill_md = skill_dir / "SKILL.md"
     script = skill_dir / "scripts" / "gsvtk"
     if not skill_md.is_file():
@@ -236,15 +265,48 @@ def check_tree(skill_dir: Path, label: str = "") -> list[str]:
     mv = re.search(r'^VERSION="([^"]+)"', read(script), re.M) if script.is_file() else None
     if not sv or not mv:
         bad.append(f"{pre}version stamp missing on one side (SKILL.md metadata.version="
-                   f"{sv or '(none)'}, scripts/gsvtk VERSION={mv.group(1) if mv else '(none)'}")
+                   f"{sv or '(none)'}, scripts/gsvtk VERSION={mv.group(1) if mv else '(none)'})")
     elif sv != mv.group(1):
         bad.append(f"{pre}version drift: SKILL.md says {sv}, scripts/gsvtk says {mv.group(1)} "
                    f"-- an unstamped skill cannot be told apart from a stale one")
+
+    # The split, three ways. None of these shows up by running the happy path, so all three are
+    # textual -- and each has a mutation in control() that must come back reported.
     if script.is_file():
-        wl = whitelist(script)
+        shim = read(script)
+        if "GSVTK_READ_ONLY=1" not in shim:
+            bad.append(f"{pre}scripts/gsvtk no longer exports GSVTK_READ_ONLY=1 before exec-ing the "
+                       f"repo CLI. The CLI refuses the POSTing / booting / bulk-download modes on the "
+                       f"strength of that flag alone, so a shim that stops setting it hands the agent "
+                       f"the mutating modes -- with SKILL.md still promising it did not")
+        if re.search(r"^cmd_terra\(\)", shim, re.M):
+            bad.append(f"{pre}scripts/gsvtk defines cmd_terra() again, so there are two dispatchers. "
+                       f"One (the repo ./gsvtk) is the point of the split: a second mode list inside "
+                       f"the skill is a second place to forget a rule, and it is the copy that goes "
+                       f"stale quietly, because nobody runs it when they change the CLI")
+        if not re.search(r'exec +"?\$\{?REPO\}?/gsvtk', shim):
+            bad.append(f"{pre}scripts/gsvtk no longer execs $REPO/gsvtk, so it is not driving the repo "
+                       f"CLI -- and the trust gate it does keep is then all that stands between an "
+                       f"agent and a checkout nobody resolved")
+        # A shim that names a TOOL is a second dispatcher even without a cmd_terra() to find: the
+        # script it picks and the flags it adds are the whole contract, and the copy inside the skill
+        # is the one nobody runs when they change the CLI, so it goes stale quietly. Comment lines are
+        # excluded, because the shim's own header cites scripts/check_skill.py and a guard that fires
+        # on a citation is a guard that gets deleted rather than one that works.
+        code = "\n".join(ln for ln in shim.splitlines() if not ln.lstrip().startswith("#"))
+        routed = sorted(set(re.findall(
+            r"\b(?:terra|checks|docker|compare|replay|examples)/[\w.-]+\.(?:py|sh)\b", code)))
+        if routed:
+            bad.append(f"{pre}scripts/gsvtk dispatches to {', '.join(routed)} itself. Tool routing is "
+                       f"the repo ./gsvtk's job now; a target named in the skill is a second "
+                       f"dispatcher, which is what the split removed")
+
+    if cli.is_file():
+        wl = whitelist(cli)
         if not wl:
-            bad.append(f"{pre}could not parse the read-only whitelist out of scripts/gsvtk "
-                       f"(its shape changed; this check and the skill's prose need rereading)")
+            bad.append(f"{pre}could not parse the read-only whitelist out of ./gsvtk (the repo CLI "
+                       f"implements it, so its shape changed and this check plus the skill's prose "
+                       f"need rereading)")
         claimed = prose_refused(skill_md)
         if not claimed:
             bad.append(f"{pre}could not parse the refused-mode list out of SKILL.md's "
@@ -252,22 +314,22 @@ def check_tree(skill_dir: Path, label: str = "") -> list[str]:
         else:
             both = sorted(claimed & wl)
             if both:
-                bad.append(f"{pre}SKILL.md says these POST/spend and are refused, but the wrapper "
+                bad.append(f"{pre}SKILL.md says these POST/spend and are refused, but the repo CLI "
                            f"dispatches them: {', '.join(both)}")
             missing = sorted(EXPECTED_REFUSED - claimed)
             if missing:
                 bad.append(f"{pre}SKILL.md no longer names {', '.join(missing)} among the refused "
-                           f"modes. The wrapper still refuses them; the prose is what an agent reads "
-                           f"before deciding to bypass the wrapper, so shrink it deliberately (add "
-                           f"the mode to EXPECTED_REFUSED in scripts/check_skill.py when you do)")
-        # "The whitelist is checked BEFORE the interpreter, so a refusal is not an environment "
-        # error" is a claim about line order, and on a machine that HAS the venv the environment
-        # probe succeeds no matter what -- so no live run can distinguish the two messages here.
-        # Checked textually, and SCOPED TO THE FUNCTION: `cmd_tools` also calls `py_for terra` and
-        # sits earlier in the file, which is what a whole-file find() keeps tripping over.
-        m2 = re.search(r"^cmd_terra\(\)\s*\{.*?^\}", read(script), re.S | re.M)
+                           f"modes. The CLI still refuses them; the prose is what an agent reads "
+                           f"before deciding to bypass the gate, so shrink it deliberately (add the "
+                           f"mode to EXPECTED_REFUSED in scripts/check_skill.py when you do)")
+        # "The whitelist is checked BEFORE the interpreter, so a refusal is not an environment error"
+        # is a claim about line order, and on a machine that HAS the venv the environment probe
+        # succeeds no matter what -- so no live run can distinguish the two messages here. Checked
+        # textually, and SCOPED TO THE FUNCTION: `cmd_tools` also calls `py_for terra` and sits
+        # earlier in the file, which is what a whole-file find() keeps tripping over.
+        m2 = re.search(r"^cmd_terra\(\)\s*\{.*?^\}", read(cli), re.S | re.M)
         if not m2:
-            bad.append(f"{pre}could not find cmd_terra()'s body to check the refusal order "
+            bad.append(f"{pre}could not find cmd_terra()'s body in ./gsvtk to check the refusal order "
                        f"(renamed? this check and the claim it guards both need rereading)")
         else:
             body = m2.group(0)
@@ -277,10 +339,13 @@ def check_tree(skill_dir: Path, label: str = "") -> list[str]:
                 bad.append(f"{pre}cmd_terra no longer contains both the whitelist case and the "
                            f"interpreter probe ({w=}, {e=}) -- the order check cannot run")
             elif e < w:
-                bad.append(f"{pre}scripts/gsvtk probes for a firecloud-capable interpreter BEFORE "
-                           f"the whitelist: a refusal would then read as 'your environment is "
-                           f"broken' on machines missing the venv, which is the exact failure the "
-                           f"order exists to prevent")
+                bad.append(f"{pre}./gsvtk probes for a firecloud-capable interpreter BEFORE the "
+                           f"whitelist: a refusal would then read as 'your environment is broken' "
+                           f"on machines missing the venv, which is the exact failure the order exists "
+                           f"to prevent")
+    else:
+        bad.append(f"{pre}{cli} is missing: the shim execs it, and the whitelist / ordering claims "
+                   f"above have nothing to grade")
     bad += audit_dir(skill_dir)
     for s in sorted((skill_dir / "scripts").glob("*")) if (skill_dir / "scripts").is_dir() else []:
         head = read(s).split("\n", 1)[0]
@@ -289,7 +354,6 @@ def check_tree(skill_dir: Path, label: str = "") -> list[str]:
             if r.returncode != 0:
                 bad.append(f"{pre}{s.name}: bash -n says {r.stderr.strip().splitlines()[:1]}")
     return bad
-
 
 def live_refusals(skill_dir: Path) -> list[str]:
     """Actually run the wrapper and require it to refuse the modes the prose names."""
@@ -316,20 +380,44 @@ def live_refusals(skill_dir: Path) -> list[str]:
 
 
 def control(skill_dir: Path) -> list[str]:
-    """A copy with the version stamps disagreeing MUST be reported. Proof the checks compare."""
-    tmp = Path(tempfile.mkdtemp(prefix="skillctl-"))
-    try:
-        copy = tmp / skill_dir.name
-        shutil.copytree(skill_dir, copy)
-        sk = copy / "SKILL.md"
-        sk.write_text(read(sk).replace("version:", "version: 9.9.9  #", 1), encoding="utf-8")
-        if check_tree(copy, "control"):
-            return []
-        return ["control: a copy whose version stamps disagree was reported as COHERENT, so the "
-                "version/name/refusal comparisons above are vacuous"]
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    """Four mutations that MUST each be reported. Proof the comparisons above are not vacuous.
 
+    One copy, four single-edit variants: the version pair pulled apart, the read-only stamp deleted,
+    the dispatcher restored into the shim as a function, and the dispatcher restored as a bare exec of
+    a tool script. Each is checked for ITS OWN finding, because "the control produced at least one
+    problem" is also satisfied by an unrelated finding -- and then a guard that never fires still
+    passes, which is the failure this function exists to close.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="skillctl-"))
+    bad: list[str] = []
+
+    def run_mutation(name: str, edit, needle: str) -> None:
+        """Copy the skill, apply one textual edit, and require the finding that edit should cause."""
+        copy = tmp / ("v-" + name)
+        shutil.copytree(skill_dir, copy)
+        target = copy / "SKILL.md" if edit[0] == "SKILL.md" else copy / "scripts" / "gsvtk"
+        target.write_text(edit[1](read(target)), encoding="utf-8")
+        problems = check_tree(copy, "control")
+        if not any(needle in p for p in problems):
+            bad.append(f"control/{name}: nothing reported matching {needle!r} "
+                       f"(got {len(problems)} finding(s)), so the check that should have caught it "
+                       f"is vacuous")
+
+    run_mutation("version", ("SKILL.md", lambda t: t.replace("version:", "version: 9.9.9  #", 1)),
+                 "version drift")
+    run_mutation("readonly-flag", ("scripts/gsvtk",
+                                   lambda t: t.replace("GSVTK_READ_ONLY=1", "GSVTK_SOMETHING_ELSE=1")),
+                 "GSVTK_READ_ONLY=1")
+    run_mutation("two-dispatchers",
+                 ("scripts/gsvtk", lambda t: t + "\ncmd_terra() { :; }\n"),
+                 "two dispatchers")
+    run_mutation("shim-routes-a-tool",
+                 ("scripts/gsvtk",
+                  lambda t: t.replace('exec "$REPO/gsvtk" "$@"',
+                                      'exec "$REPO/python3" "$REPO/terra/recon.py" "$@"', 1)),
+                 "second dispatcher")
+    shutil.rmtree(tmp, ignore_errors=True)
+    return bad
 
 USAGE = "usage: check_skill.py [SKILL_DIR]   (default .pi/skills/gatk-sv-testkit)\n" \
         "Checks the shipped skill's claims against the wrapper it documents. Exit 0 = coherent.\n"
@@ -357,11 +445,12 @@ def main(argv: list[str]) -> int:
     if problems:
         print(f"check_skill: {len(problems)} problem(s) in {here}")
         return 1
-    # "5 claim groups" is not a boast about coverage, it is the count the assertions above actually
-    # run; if a group ever parses to nothing it reports a problem instead of vanishing.
-    print(f"check_skill: 6 claim groups verified in {here} "
-          f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, override flags still "
-          f"implemented, no home paths, bash -n) + the vacuity control")
+    # The claim-group count is not a boast about coverage, it is the count the assertions above
+    # actually run; if a group ever parses to nothing it reports a problem instead of vanishing.
+    print(f"check_skill: 7 claim groups verified in {here} "
+          f"(frontmatter, version stamp, prose-vs-whitelist refusals executed, the shim/exec/"
+          f"read-only-flag split, override flags still implemented, no home paths, bash -n) + the "
+          f"four-mutation control, each graded by its own finding")
     return 0
 
 

@@ -5,22 +5,26 @@ description: >-
   building a branch's docker images on a throwaway GCE VM with no local Docker, running a Terra
   head-to-head against a frozen baseline run, replaying the Java SV trainers locally on a real
   run's exact inputs, and the static checks (WDL launchability, sv_shell JSON contract, jq null
-  plumbing; shipped-image byte identity is a separate checks/image-check that gate does not run).
+  plumbing; shipped-image byte identity is a separate checks/image-check that `check` does not
+  run).
   Use when someone asks to build a gatk-sv branch's image, "did my
   change alter the pipeline output", compare a branch against the v1.1.1 baseline, run a trainer
   locally, check whether a WDL is launchable, or find the SVShell null from a renamed JSON key.
   Prefers read-only modes; never starts compute or POSTs on its own.
 compatibility: >-
-  bash 3.2+ and python3 for the wrapper. Needs a gatk-sv-testkit checkout (GSVTK_HOME or a clone)
-  plus, per loop: GCS/Terra credentials (ADC) for Terra modes, a local gatk-sv clone + miniwdl +
+  bash 3.2+ for scripts/gsvtk, which is a thin shim over the checkout's own ./gsvtk entry point (it
+  needs a checkout carrying that file: `git pull` if yours has no ./gsvtk). Needs a gatk-sv-testkit
+  checkout (GSVTK_HOME or a clone) plus, per loop: GCS/Terra credentials (ADC) for Terra modes, a local gatk-sv clone + miniwdl +
   jq for the static checks, gcloud in a project for image builds, a JDK 17 GATK jar for local
   replay. All heavy reference docs live in the checkout's docs/, not here.
 metadata:
   author: talkowski-lab     # the org that owns the repo this skill drives; the skill now lives
                             # in that repo (.pi/skills/), so a personal handle would be published
   repo: https://github.com/talkowski-lab/gatk-sv-testkit
-  version: 0.5.0            # must equal VERSION in scripts/gsvtk; an unstamped skill cannot be
-                            # told apart from a stale one -- scripts/selftest.sh checks it
+  version: 0.6.0            # must equal VERSION in scripts/gsvtk (the shim); an unstamped skill
+                            # cannot be told apart from a stale one -- scripts/check_skill.py checks
+                            # the pair. The repo CLI it execs has no number: it prints the checkout's
+                            # own `path @ sha`, which is the ref every verdict is measured against.
 ---
 
 # gatk-sv-testkit
@@ -44,6 +48,11 @@ scripts/gsvtk tools         # which of the four loops can actually run on this m
 Never assume a path, a venv, or that a loop is available. `locate` fails with the exact
 `git clone` + `make setup` to run if there is no checkout. `GSVTK_HOME` overrides discovery.
 
+`scripts/gsvtk` is a **shim**: it finds and trusts the checkout, prints its own version, and execs the
+checkout's `./gsvtk` with `GSVTK_READ_ONLY=1`. Every subcommand, flag and exit code below is the repo
+CLI's, documented there in `docs/cli.md` -- run `scripts/gsvtk --help` to read them from the version
+you actually have, rather than from this file.
+
 **The only legal working directory for repo-side commands is the one `repo` prints.** A directory
 full of testkit-shaped files (`recon.py`, `compare_batch_tables.py`, a `CHECKPOINT.md` left by
 some earlier session) that is not that path is a scratch copy: stale code, no profile, no sha,
@@ -52,7 +61,7 @@ not treat its notes as the plan.
 
 A checkout counts as one only if it is a git clone of a remote you listed (`GSVTK_TRUSTED_REPOS`,
 default `github.com/talkowski-lab/gatk-sv-testkit`); a vendored copy or unlisted fork is refused,
-naming the origin it found. `gate`/`build`/`terra` print the resolved `path @ sha` on stderr — if
+naming the origin it found. Every repo-running subcommand (`check`/`build`/`terra`/`compare`/`replay`) prints the resolved `path @ sha` on stderr — if
 that line is absent from your transcript, you did not run them.
 
 ## Then pick the loop
@@ -60,32 +69,40 @@ that line is absent from your transcript, you did not run them.
 | The question | Run | Cost |
 |---|---|---|
 | "Build my branch's sv-pipeline image" | `scripts/gsvtk build <branch>` → shows `--check` then `--dry-run` | free; the real build is 1-3 h of `e2-standard-8` |
-| "Is my WDL actually launchable?" | `scripts/gsvtk gate <ref> --wf SVShell` | seconds |
-| "Did that rename break SVShell?" | `scripts/gsvtk gate <base-ref>` | seconds |
+| "Is my WDL actually launchable?" | `scripts/gsvtk check <ref> --wf SVShell` | seconds |
+| "Did that rename break SVShell?" | `scripts/gsvtk check <base-ref>` | seconds |
 | "What would my configs bind?" | `scripts/gsvtk terra show` | free, offline |
 | "Do those keys even exist in the WDL I am pointing at?" | `scripts/gsvtk terra check --against <ref>` | free, offline, needs a gatk-sv clone |
 | "Are the baseline inputs still the bytes I compared?" | `scripts/gsvtk terra verify` | free, re-crc32cs |
-| "Did my change alter the output?" | [references/workflows.md](references/workflows.md) §3 — **no `gsvtk compare` exists**: the differ is repo-side (`compare/`, `terra/batch_fetch_compare.sh table`). Leave one variable: same WDL ref, same inputs, one image differing | one step's VMs |
-| "Run this trainer on the real inputs, locally" | `examples/run_train_chr20.sh` in the checkout | free, needs a JDK 17 jar |
+| "Did my change alter the output?" | [references/workflows.md](references/workflows.md) §3, then `scripts/gsvtk compare <name>` for the differ (`compare --list` for the names; `terra fetch-compare table` runs the shipped batch-table diff over fetched outputs). Leave one variable: same WDL ref, same inputs, one image differing | one step's VMs |
+| "Run this trainer on the real inputs, locally" | `scripts/gsvtk replay train-chr20` (it preflights the jar/JDK/disk first and says what is missing) | free, needs a JDK 17 jar |
 | "Is my submission done / what did it cost?" | the `terra-monitor` skill; then `scripts/gsvtk terra status --costs` | free |
 
 ## Read-only by construction — and why that matters here
 
-`scripts/gsvtk` dispatches only modes that cannot POST, cannot start compute, cannot bulk-download.
-`create`, `submit`, `copy`, `attrs --write`, `fetch`, `profile` — plus `validate`, which reads
-like a check but asks Terra to resolve a config — are refused **before** any environment check, so
-a refusal never looks like a broken setup. `--allow-shared-target` is the guard on the four
-`--confirm`/`--write` tools that stops a write landing in the shared baseline workspace; the repo
-side needs it named, not guessed. It covers `rerun create` as well as `rerun submit` — a config
-POSTed into the shared workspace is what the next submission reads.
+`scripts/gsvtk` is a shim that execs the checkout's `./gsvtk` with `GSVTK_READ_ONLY=1`, and under that
+flag the repo CLI dispatches only modes that cannot POST, cannot start compute, cannot bulk-download:
+`create`, `submit`, `copy`, `attrs --write`, `fetch`, `profile` — plus `validate`, which reads like a
+check but asks Terra to resolve a config — are refused **before** any environment check, so a refusal
+never looks like a broken setup. Exit 2, the mode named, and the exact command printed for a human to
+run in the checkout. `--allow-shared-target` is the guard on the four `--confirm`/`--write` tools that
+stops a write landing in the shared baseline workspace; the repo side needs it named, not guessed. It
+covers `rerun-create` as well as `rerun-submit` — a config POSTed into the shared workspace is what the
+next submission reads.
 
-When the user actually wants one of those, do not work around the wrapper silently. Run it in the
-checkout, `show` before `submit --confirm`, and say out loud where the write goes, what it costs,
+That flag is the whole difference between this skill and a person at a terminal: a human who runs
+`./gsvtk` in the checkout can add `--confirm`, and the CLI then prints what gets created, into which
+resolved workspace or registry path, what it costs and how to undo it, before it acts. Through this
+shim they cannot, because the shim sets the flag after locating the checkout and before exec-ing.
+
+When the user actually wants one of those, do not work around the shim silently. Run it in the
+checkout, `show` before `rerun-submit --confirm`, and say out loud where the write goes, what it costs,
 and how to undo it — the exact commands and the pre-flight wording are in
 [references/workflows.md](references/workflows.md) §3 and §"If you must run a mutating mode".
 
-The tools have their own gates (`--confirm`, `confirm=True`, `--write`); this is the outer one.
-Terra has no per-workspace budget cap, and a whole-chain rerun is a fleet of VMs — prefer one step.
+The tools have their own gates (`--confirm`, `confirm=True`, `--write`); this is the outer one, and it
+is additive: `--confirm` never stands in for a `--write` a tool asks for. Terra has no per-workspace
+budget cap, and a whole-chain rerun is a fleet of VMs — prefer one step.
 
 ## Ask the config, never read it
 
@@ -112,7 +129,7 @@ cd "$(scripts/gsvtk repo)" && ./kit/gsvtk-config show      # values — real coo
 3. **One wait call, not a poll loop.** `batch_status.py --wait 08` blocks; better, hand off to the
    `terra-monitor` skill, which polls inside one script call. Agent-turn polling pays for the whole
    context every 20 seconds.
-4. Static checks before submission: `gate` costs seconds; discovering the same bug on step 08 costs
+4. Static checks before submission: `check` costs seconds; discovering the same bug on step 08 costs
    an hour of VMs plus the debugging.
 5. On any error, **grep the checkout's `docs/troubleshooting.md` for the verbatim string** — it is
    keyed on exact error text, which is what you will have. Do not open it cold.

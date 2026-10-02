@@ -3,6 +3,13 @@
 Run from anywhere; `scripts/gsvtk repo` gives the checkout path. Substitute `<...>` values from
 `scripts/gsvtk doctor --redact` — never invent a project, workspace or registry path.
 
+`scripts/gsvtk` is a shim over the checkout's own `./gsvtk`, run with `GSVTK_READ_ONLY=1`, so every
+mode name below is a repo-CLI mode name: `gsvtk terra show`, `gsvtk compare <name>`, `gsvtk replay
+train-chr20`. The command-to-tool map and the read-only contract are the checkout's `docs/cli.md`;
+`--help` on either entry point prints them from the version you have. Where a step below says to `cd`
+into the checkout and run a script, that is the **mutating** path — the shim cannot reach it, which is
+the point.
+
 ## 1. Build a branch's image (no local Docker)
 
 ```bash
@@ -20,6 +27,8 @@ Then, only when they confirm the spend:
 
 ```bash
 cd "$($S repo)" && docker/gatk-sv-build.sh <branch>            # ~1-3 h, streams the build log
+#  (or `gsvtk build <branch> --confirm` in the checkout: it prints project, zone, machine, disk, the
+#   resolved push target, and the undo, before it boots anything. The shim refuses that mode.)
 ```
 
 While it runs: the driver polls the serial console, so keep the one call waiting rather than
@@ -34,11 +43,16 @@ Gotchas: a denied push is the **VM's** service account lacking the registry buck
 (`--impersonate-service-account` cannot help); the gatk jar is copied into the `sv-base` layer to
 avoid a ~12-minute `docker cp` per task, which is why an undersized disk fails late.
 
-## 2. Static gate (seconds — do this before anything expensive)
+## 2. Static checks (seconds — do this before anything expensive)
 
 ```bash
-$S gate <base-ref> --wf SVShell            # wdl_gate + contract check + jq plumbing vs <base-ref>
+$S check <base-ref> --wf SVShell           # wdl_gate + contract check + jq plumbing vs <base-ref>
+$S check <base-ref> --semantics            # add the tree-wide WDL semantics checker
 ```
+
+`--wf`/`--strict` belong to `wdl_gate.sh`, `--repo` to the python checkers, `--compare-to` to the jq
+plumbing scan: `check` dispatches each flag to the tool that implements it and refuses an unknown one
+rather than forwarding it to something that would misread it.
 
 Reading the three outputs:
 
@@ -63,7 +77,10 @@ $S terra plan             # what freezing the baseline would copy               
 $S terra verify           # are the frozen bytes still the bytes I compared     (free)
 ```
 
-Then the mutating half — **show the user `show`/`plan` output and get confirmation first**:
+Then the mutating half — **show the user `show`/`plan` output and get confirmation first**. Through
+the shim these are refused by name (`configs-create`, `freeze-copy`, `freeze-attrs`, `rerun-submit`,
+`fetch`), so run them in the checkout, where `./gsvtk <mode> --confirm` also prints where the write
+lands and what it costs:
 
 ```bash
 cd "$($S repo)"
@@ -125,22 +142,27 @@ by the next person's submission, so "only a config, no compute" is not a safe wr
 mode also resolves namespace + workspace **before** its first request and exits 4 naming the profile
 key if a piece is missing -- an unset target is never a request with a hole in its URL.
 
-Wait with one call (`terra/batch_status.py --wait 10`) or hand off to the **terra-monitor** skill.
+Wait with one call (`$S terra status --wait 10`) or hand off to the **terra-monitor** skill.
 
-Collect and compare:
+Collect and compare (all read-only, so all reachable through the shim):
 
 ```bash
 $S terra status --costs
 $S terra cost
-cd "$($S repo)" && python terra/batch_save_metadata.py --outdir "$(./kit/gsvtk-config work metadata)"
+$S terra save-metadata --outdir "$(./kit/gsvtk-config work metadata)"
+$S terra peek --metadata <dump> --task <Call>                    # one task's rc / stderr tail
 ```
 
 **Do not `read` those metadata files.** Ask the tool for the summary, or `jq` the specific field.
 
-Then fetch and diff (bulk download — tens of GB, user's call):
+Then fetch and diff. `fetch` is a bulk download of tens of GB — the user's call, and refused under
+read-only; `table` alone only reads what is already on disk:
 
 ```bash
-cd "$($S repo)" && terra/batch_fetch_compare.sh fetch && terra/batch_fetch_compare.sh table
+cd "$($S repo)" && ./gsvtk terra fetch-compare fetch --confirm && ./gsvtk terra fetch-compare table
+#  or the same two modes directly: terra/batch_fetch_compare.sh fetch | table
+# then any differ in compare/ by name:
+$S compare batch-tables --baseline-dir <old/> --new-dir <new/>     # `compare --list` for the names
 ```
 
 ### Before quoting any number, classify every differing column
@@ -162,9 +184,15 @@ The long form -- what local replay cannot prove, and the subsampling trap in it 
 cd <gatk checkout> && JAVA_HOME=<jdk17> ./gradlew localJar
 cd "$($S repo)"
 export GSVTK_GATK_CHECKOUT=<gatk checkout>       # the jar is discovered from here
+$S replay preflight                              # java / jar / bcftools / disk, measured, exit 3
+$S replay train-chr20                            # the same driver, after that preflight
 examples/run_train_chr20.sh --help               # every example honours --help and prints its own notes
-examples/run_train_chr20.sh
 ```
+
+`replay preflight` exists because the failure used to be a bare `command not found` forty minutes into
+a run, or a `no jars found` line after a staging tree had already been built. It exits 3 and names the
+fix. It never refuses on disk space: this repo has not measured what one driver needs, so the free
+figure is printed with the budget `docs/local-replay.md` states, not enforced behind an invented floor.
 
 Check the log's first lines for **which jar** it used — a stale jar reproduces the old answer with
 total confidence and no error. `run_train_chr20.sh` is the fast loop; `run_train_definitive.sh` is
@@ -238,6 +266,7 @@ In the checkout, not in this skill:
 | the head-to-head in depth | `docs/terra-head-to-head.md` |
 | reading comparator output | `docs/comparators.md` |
 | what the checks really mean | `docs/static-checks.md` |
+| which command runs which tool, and what is refused | `docs/cli.md` |
 | replaying a real stage with no cloud account | `docs/local-replay.md` |
 | why the archive keeps its mistakes | `docs/methodology.md` |
 

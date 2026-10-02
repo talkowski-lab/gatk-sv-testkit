@@ -14,8 +14,10 @@ PYTHON ?= python3
 GSVTK  := ./kit/gsvtk-config
 
 # ----------------------------------------------------------------- file sets
-SH_FILES := $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
-                   examples/*.sh kit/*.sh scripts/*.sh)
+# `gsvtk` (no extension) is the entry point and matches no wildcard, so it is named explicitly:
+# everything that dispatches to the other tools has to parse before the other tools do.
+SH_FILES := gsvtk $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
+                   examples/*.sh kit/*.sh scripts/*.sh scripts/selftest.d/*.sh)
 PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py \
                    scripts/*.py examples/*.py docs/archive/as-run/*.py)
 
@@ -37,7 +39,10 @@ HELP_PYSAM   := compare/pair_level_concordance.py
 # which is honest -- a --help it cannot reach is not a --help it ran.
 HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py
 HELP_TERRA   := $(wildcard terra/*.py)
-HELP_SH      := checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_compare.sh \
+# ./gsvtk is here because it is the one command a newcomer types, and the sweep runs it with
+# GSVTK_CONFIG pointing at an EMPTY file and no credentials: an entry point whose --help needs a
+# profile is an entry point that fails the first thing a user does with it.
+HELP_SH      := gsvtk checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_compare.sh \
                 examples/replay_reference_run.sh
 # NOT in any sweep, on purpose (they are still syntax-checked):
 #   docker/remote-build.sh      runs ON THE BUILDER VM; invoking it starts a real build
@@ -52,9 +57,10 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 85 selftests; needs no config file, no credentials, no"
-	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
-	@echo "              untracked file passes this gate and fails it one commit later. A missing"
+	@echo "              + publish audit + 85 selftests + the ./gsvtk CLI suite; needs no config"
+	@echo "              file, no credentials, no network. The audit scans the GIT-TRACKED set, so"
+	@echo "              stage first: an untracked leak passes this gate and fails it one commit later."
+	@echo "              A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
 	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
@@ -67,6 +73,7 @@ help:
 	@echo "              reported, DANGLING is advisory. PUBLISH=1 fails on HISTORY: run it before push"
 	@echo "  clean-work  show what the work directory holds and what WOULD be deleted"
 	@echo
+	@echo "  Entry point: ./gsvtk --help  (the whole kit by subcommand; the map is docs/cli.md)"
 	@echo "  Interpreter: PYTHON=/path/to/python make test   (default: python3, then ./.venv)"
 	@echo "  Run docs first: docs/config.md, docs/setup.md, then './kit/gsvtk-config doctor'."
 
@@ -121,6 +128,12 @@ syntax:
 # --help on every tool, with an empty profile and a throwaway work directory, so a tool
 # that only works when configured is a BUG this catches (that was a real regression: a
 # --help path that called require() and died). Missing optional dependencies SKIP.
+#
+# run() dispatches by extension: an extension-less file matches no wildcard and would fall to the
+# Python arm, so `gsvtk` is named. That is not pedantry — the fall-through asked python to compile
+# bash and the sweep reported `FAIL gsvtk ... SyntaxError: closing parenthesis ')' does not match
+# opening parenthesis '{' on line 72`, a bug report about the interpreter, not about the CLI.
+# Naming it also execs it the way a user does (shebang + exec bit), which `bash x.sh` never proves.
 helpsweep:
 	@tmp="$$(mktemp -d)"; : > "$$tmp/empty.env"; \
 	py="$(PYTHON)"; \
@@ -135,8 +148,9 @@ helpsweep:
 	    skip=$$((skip+1)); return 0; \
 	  fi; \
 	  case "$$t" in \
-	    *.sh) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
-	    *)    out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
+	    gsvtk) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" "./$$t" --help 2>&1)"; rc=$$? ;; \
+	    *.sh)  out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
+	    *)     out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
 	  esac; \
 	  if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %-42s\n' "$$t"; \
 	  else fail=$$((fail+1)); printf '  FAIL  %-42s exit %s\n' "$$t" "$$rc"; \
@@ -225,6 +239,7 @@ smoke:
 # harness ever goes vacuous again; keep new assertions there for that reason.
 selftest:
 	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
+	@$(SHELL) scripts/selftest.d/cli.sh "$(PYTHON)"   # the ./gsvtk entry point, own tally
 
 lint: syntax
 
