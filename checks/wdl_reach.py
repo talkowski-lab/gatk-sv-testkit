@@ -607,6 +607,16 @@ def selftest() -> int:
         """
         return len(re.findall(r'(?m)^' + re.escape(prefix), text))
 
+    def in_order(text, *markers):
+        """Every marker printed, each BEFORE the next: the printed order is the order asked.
+
+        `find` and not `index`, so a missing block reads as a failed assertion rather than a
+        ValueError traceback — an assertion that crashes instead of naming the marker that went absent
+        cannot tell the next person which answer is missing, which is the thing under test.
+        """
+        at = [text.find(m) for m in markers]
+        return all(i >= 0 for i in at) and at == sorted(at) and len(set(at)) == len(at)
+
     rc, out = run('--target', 'a.wdl', '--target', 'c.wdl', '--reverse')
     want(rc == 0, 'two names that both resolve exit 0: an orphan plus a reach table is not an error',
          f'rc={rc}')
@@ -618,9 +628,12 @@ def selftest() -> int:
          'the first name prints its orphan answer, naming the files scanned, as before')
     want('reach:' in out and 'b.wdl' in out and 'imports b.wdl at a.wdl:3' in out,
          'the second name is answered too: its own reach table, naming the hop that carried a.wdl')
-    want(0 < out.index('target: a.wdl') < out.index('NOT REACHED')
-         < out.index('target: c.wdl') < out.index('reach:'),
+    want(in_order(out, 'target: a.wdl', 'NOT REACHED', 'target: c.wdl', 'reach:'),
          'the blocks come in the ORDER ASKED (a.wdl first), not sorted and not first-only')
+    rc, out = run('--target', 'c.wdl', '--target', 'c.wdl', '--reverse')
+    want(rc == 0 and n_lines(out, 'target: ') == 2,
+         'the same name twice gets two blocks: a caller\'s list is neither deduped nor sorted',
+         f'rc={rc}, {n_lines(out, "target: ")} block(s)')
 
     # an unknown name among several: answer what resolves, report each unknown as itself, exit 2
     rc, out = run('--target', 'c.wl', '--target', 'c.wdl', '--target', 'd.wl', '--reverse')
@@ -634,30 +647,35 @@ def selftest() -> int:
          'and each list is that name\'s neighbours (c.wl -> c.wdl, d.wl -> d.wdl), not one shared list')
     want('target: c.wdl [file]' in out and 'b.wdl' in out,
          'the name that does resolve is still answered, in the middle of the failures')
-    want(out.index("unknown target 'c.wl'") < out.index('target: c.wdl')
-         < out.index("unknown target 'd.wl'"),
+    want(in_order(out, "unknown target 'c.wl'", 'target: c.wdl', "unknown target 'd.wl'"),
          'unknown names are reported IN PLACE, so the printed order is still the order asked')
 
-    # one artifact for the whole run. The first name is deliberately the one nothing reaches, so an
+    def artifact_at(path):
+        """The artifact a run wrote, or {} when it wrote none: a missing artifact is a FAILed
+        assertion below, not a FileNotFoundError traceback that hides the other assertions."""
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    # One artifact for the whole run. The first name is deliberately the one nothing reaches, so an
     # implementation that reported the UNION or the LAST answer at top level could not pass.
     jp = root / 'multi.json'
     rc, out = run('--target', 'a.wdl', '--target', 'c.wdl', '--reverse', '--json', str(jp))
-    art = json.loads(jp.read_text())
-    want(rc == 0 and [b['name'] for b in art['targets']] == ['a.wdl', 'c.wdl'],
+    art = artifact_at(jp)
+    blocks = art.get('targets', [])
+    want(rc == 0 and [b['name'] for b in blocks] == ['a.wdl', 'c.wdl'],
          '--json writes ONE artifact covering every target, in the order given', f'rc={rc}')
-    want(art['unknown_targets'] == [] and art['target_count'] == 2,
+    want(art.get('unknown_targets') == [] and art.get('target_count') == 2,
          'the run-level keys count the names asked, not the nodes matched',
-         str(art['unknown_targets']))
-    want(art['reached'] is False and art['targets'][0]['reached'] is False
-         and art['targets'][1]['reached'] is True and art['counts']['hits'] == 0
-         and len(art['targets'][1]['hits']) > 0,
+         str(art.get('unknown_targets')))
+    want(len(blocks) == 2 and blocks[0]['reached'] is False and blocks[1]['reached'] is True
+         and art.get('counts', {}).get('hits') == 0 and len(blocks[1]['hits']) > 0,
          'the old top-level keys describe the FIRST target (not a union), so a single-target reader '
          'sees what it saw before')
     jp2 = root / 'unknown.json'
     rc, out = run('--target', 'c.wdl', '--target', 'zz_nope_zz', '--reverse', '--json', str(jp2))
-    art2 = json.loads(jp2.read_text())
-    want(rc == 2 and art2['unknown_targets'] == ['zz_nope_zz']
-         and art2['targets'][0]['unknown'] is False and art2['targets'][1]['unknown'] is True,
+    art2 = artifact_at(jp2)
+    blocks2 = art2.get('targets', [])
+    want(rc == 2 and art2.get('unknown_targets') == ['zz_nope_zz']
+         and len(blocks2) == 2 and blocks2[0]['unknown'] is False and blocks2[1]['unknown'] is True,
          'an unanswered block is marked unknown=true, so it can never be read as NOT REACHED',
          f'rc={rc}')
 
