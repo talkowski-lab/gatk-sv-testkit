@@ -47,16 +47,35 @@ agent skill.
 
 ## Usage
 
-There's no single command-line program. Each tool is a script you run from the repo root, and they're
-grouped into directories by task. Every script accepts `--help`, and the [Quickstart](docs/quickstart.md)
-walks through each task with real output.
+`./gsvtk` is the one command-line program for the kit:
+
+```bash
+./gsvtk --help                  # every subcommand, and the exit codes
+./gsvtk tools                   # which loops can run on this machine, and where each dependency was found
+./gsvtk check origin/main       # the static checks, in cost order
+./gsvtk build my-branch         # the free preview: --check then --dry-run
+./gsvtk terra show              # what the method configs would bind (read-only, offline)
+./gsvtk compare table-diff ...  # the comparators, dispatched by name
+./gsvtk replay preflight        # what blocks a local replay, measured not assumed
+```
+
+Nothing else changes: every tool is still a script you can run from the repo root, each keeps its own
+`--help`, its own flags and its own gates, and the [tool
+reference](#tool-reference) below is still the list of scripts. The CLI routes to them and adds one
+outer gate: modes that POST, boot compute or bulk-download are refused under `GSVTK_READ_ONLY=1`
+(or `--read-only`), and they need `--confirm` even when you are not read-only. The command-to-tool map
+and that contract are in [docs/cli.md](docs/cli.md); the [Quickstart](docs/quickstart.md) walks through
+each task with real output.
 
 ### Check a change before you run it
 
 ```bash
-checks/wdl_gate.sh origin/main                               # will the pipeline start, or only look valid?
-python checks/svshell_jq_plumbing_scan.py --compare-to main  # did my change add empty sv_shell inputs?
+./gsvtk check origin/main                                    # all three checks, in cost order
+python checks/svshell_jq_plumbing_scan.py --compare-to main  # just one, with its own flags
 ```
+
+The CLI dispatches each flag to the tool that implements it (`--wf`/`--strict` to the WDL gate,
+`--compare-to` to the plumbing scan) rather than handing every tool the whole command line.
 
 These run in seconds on a laptop, with no data and no cloud access. They catch problems `miniwdl check`
 misses. Compare against `main` so you only see what your change added, not problems already upstream.
@@ -64,15 +83,17 @@ misses. Compare against `main` so you only see what your change added, not probl
 ### Build images for your branch
 
 ```bash
-docker/gatk-sv-build.sh --check my-branch     # free: does the branch exist?
-docker/gatk-sv-build.sh --dry-run my-branch   # free: print the plan
-docker/gatk-sv-build.sh my-branch             # billed: build on a temporary cloud VM, push, delete it
+./gsvtk build my-branch                  # free: --check, then --dry-run, then how to do it for real
+./gsvtk build my-branch --confirm        # billed: build on a temporary cloud VM, push, delete it
+docker/gatk-sv-build.sh --check my-branch     # or drive the script directly, with its own flags
 ```
 
 GATK-SV images target x86-64 Linux, so you can't practically build them on an Apple Silicon Mac. This
 script builds them in your cloud project instead. The real build starts a VM right away, with no
-confirmation prompt, so run `--dry-run` first. Push to a path no production pipeline reads from, or a
-real run could pick up your test build.
+confirmation prompt, so `./gsvtk build <branch>` runs `--check` and `--dry-run` and stops there; `--confirm` is the only
+flag the CLI accepts here, and it prints project, zone, machine type, the resolved push target and the
+undo before it boots anything. Push to a path no production pipeline reads from, or a real run could
+pick up your test build.
 
 ### Rerun one stage on Terra and compare
 
@@ -101,7 +122,8 @@ disk. See [local replay](docs/local-replay.md).
 ### Compare outputs
 
 ```bash
-python compare/compare_batch_tables.py --baseline-dir old/ --new-dir new/
+./gsvtk compare batch-tables --baseline-dir old/ --new-dir new/
+python compare/table_diff.py a.tsv b.tsv --key sample_id    # or any comparator directly
 ```
 
 The `compare/` tools diff tables, VCFs, matrices, JSON, and archives. Each can write a `--json` report
@@ -110,15 +132,19 @@ error. It won't report a match. See [comparators](docs/comparators.md).
 
 ### Use it from an AI agent
 
-The repo ships an agent skill in `.pi/skills/gatk-sv-testkit/`. It works through a read-only wrapper,
-`.pi/skills/gatk-sv-testkit/scripts/gsvtk`, which can run the checks, preview builds, and inspect Terra,
-but can't submit jobs or spend money.
+The repo ships an agent skill in `.pi/skills/gatk-sv-testkit/`. Its `scripts/gsvtk` is a thin shim: it
+finds the checkout, requires that the checkout is a clone of a remote you trust, then runs this same
+`./gsvtk` with `GSVTK_READ_ONLY=1`. So an agent can run the checks, preview builds and inspect Terra,
+but can't submit jobs, boot a VM or bulk-download — and the rules it is held to are the ones above, not
+a second copy.
 
 ## Tool reference
 
-All the scripts, one line each.
+All the scripts, one line each. `./gsvtk <command>` reaches most of them by subcommand
+([docs/cli.md](docs/cli.md) is the map); the rest run directly, as written here.
 
 ```text
+gsvtk                          the command-line entry point: check | build | terra | compare | replay
 checks/
   wdl_gate.sh                  will the pipeline actually start, or does it only look valid
   wdl_semantics.py             bugs that only show up while a stage is running
@@ -179,6 +205,7 @@ kit/
   of it costs anything.
 - [Setup](docs/setup.md): dependencies, cloud login, and the agent skill.
 - [Configuration](docs/config.md): every setting, including the two without defaults.
+- [The `gsvtk` command line](docs/cli.md): the command-to-tool map and the read-only contract.
 - Guides: [static checks](docs/static-checks.md), [Docker builds](docs/docker-builds.md),
   [Terra head-to-head](docs/terra-head-to-head.md), [local replay](docs/local-replay.md), and
   [comparators](docs/comparators.md).
