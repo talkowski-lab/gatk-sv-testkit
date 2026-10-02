@@ -225,6 +225,7 @@ smoke:
 # harness ever goes vacuous again; keep new assertions there for that reason.
 selftest:
 	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
+	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)"
 
 lint: syntax
 
