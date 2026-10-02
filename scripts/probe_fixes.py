@@ -1148,6 +1148,186 @@ def probe_drop_flag_guard() -> str:
             f"GSVTK_BRANCH form posted the pruned body")
 
 
+def _profile_variant(dirname: str, mutate=None) -> Path:
+    """A copy of the tracked profile in a temp MODULE_DIR, optionally mutated.
+
+    The tracked file is never edited: a probe that has to break the thing it is testing has to break a
+    copy, or the rest of the suite reads the damage.
+    """
+    d = tmpdir(dirname)
+    doc = json.loads((ROOT / "profiles" / "genotyping.json").read_text())
+    if mutate:
+        mutate(doc)
+    (d / "genotyping.json").write_text(json.dumps(doc, indent=2))
+    return d
+
+
+def _require_refuses(r, want: list) -> str:
+    """`require()` must exit 4 and print every word that names the defect -- or the probe fails."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            r.require("probe")
+    except SystemExit as e:
+        txt = buf.getvalue() or str(e)
+        if e.code != 4:
+            raise AssertionError(f"refused with exit {e.code}, want 4 (the config layer's number): "
+                                 f"{txt[:120]}")
+        for frag in want:
+            if frag not in txt:
+                raise AssertionError(f"the refusal never says {frag!r}: {txt[:200]}")
+        return txt
+    raise AssertionError("an unusable profile was accepted: require() returned instead of refusing")
+
+
+def probe_profile_loader_refusals() -> str:
+    """Every way a profile can be valid JSON and still wrong must REFUSE, and by name.
+
+    Four classes, all of them the "valid JSON and still wrong" family docs/module-profiles.md §10 puts
+    at the top of the list, and none of them detectable by a loader that parses and moves on:
+
+      * `schema_version` this build does not implement -- the whole reason the field is mandatory is
+        that without it a stale READER and a stale FILE look identical.
+      * an orphan `_why_` -- the pairing rule is what stops a rationale rotting into a sentence about a
+        key nobody binds, and a rule no checker enforces is a comment.
+      * a suffix token on a literal -- `100{frz}` is a type error, not a string: a literal has no
+        attribute to append `_frz` to (§3 rule 3, and the reason "a value is a path iff it starts
+        `this.`/`workspace.`" is a constraint rather than a convention).
+      * a rationale key INSIDE a binding map, which would otherwise be POSTed as a binding.
+
+    THE CONTROL is the tracked `profiles/genotyping.json` itself: it loads with zero findings. Without
+    that, a loader that refuses everything -- or nothing -- passes this probe equally well.
+    """
+    import module_profile                                  # noqa: F401  (imported by fresh() below)
+    cases = []
+
+    def bump_schema(doc):
+        doc["schema_version"] = 99
+
+    def orphan_why(doc):
+        step = doc["steps"][4]
+        step["_why_GenotypeBatch.a_key_nobody_binds"] = step.pop("_why_GenotypeBatch.training_vcf")
+
+    def literal_token(doc):
+        doc["steps"][0]["inputs"]["GenerateBatchMetrics.chr_x"] = "100{frz}"
+
+    def why_inside_map(doc):
+        doc["steps"][4]["inputs"]["_why_GenotypeBatch.batch"] = "a rationale where a binding belongs"
+
+    for label, mutate, want in [
+        ("schema_version", bump_schema, ["schema_version 99 is not a version this build reads"]),
+        ("orphan _why_", orphan_why, ["orphan rationale", "_why_GenotypeBatch.a_key_nobody_binds"]),
+        ("token on a literal", literal_token, ["carries a suffix token but is not a path",
+                                               "this./workspace."]),
+        ("_why_ inside inputs", why_inside_map, ["rationale key INSIDE a binding map"]),
+    ]:
+        d = _profile_variant("profile-" + label.replace(" ", "-").replace("_", "-"), mutate)
+        (mp,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_MODULE_DIR": str(d)}, "module_profile")
+        r = mp.load()
+        if r.configs:
+            raise AssertionError(f"{label}: the tables came back populated despite the defect")
+        txt = _require_refuses(r, want)
+        cases.append(label)
+        say(txt.splitlines()[1] if len(txt.splitlines()) > 1 else "")
+
+    # THE CONTROL, and it is the tracked file rather than a fixture: the same loader, the same rules, a
+    # document that is meant to pass.
+    (mp,) = fresh({"GSVTK_PROJECT": "p"}, "module_profile")
+    good = mp.load()
+    if good.problems or len(good.configs) != 5:
+        raise AssertionError(f"the CONTROL profile does not load clean, so every refusal above is "
+                             f"meaningless: {good.problems} / {len(good.configs)} steps")
+    if good.branch_only_inputs != {"10-GenotypeBatch": {"GenotypeBatch.training_vcf"}}:
+        raise AssertionError(f"the paired `_why_*` did not survive the load: {good.branch_only_inputs}")
+    return (f"{len(cases)} unusable-profile classes each refuse with the defect named "
+            f"({', '.join(cases)}); the tracked profile is the control and loads clean")
+
+
+def probe_module_changes_output() -> str:
+    """Changing MODULE has to change what the tool prints -- the §7 behavioural gate, as a probe.
+
+    Rev 1's gate was "no module-named identifier in terra/ checks/ compare/ replay/", which greps
+    literals: `chain = json.load(open("profiles/genotyping.json"))["chain"]` passes it while staying
+    hard-wired at runtime, and it would fail 117 sites that are the *why* comments CONTRIBUTING mandates.
+    The behaviour question is the one that matters: if pointing `MODULE` at different data does not change
+    the output, the data is decoration.
+
+    Three arms, so the probe cannot pass on a loader that always refuses or always ignores:
+      1. the default module prints the five shipped steps (and their Dockstore basename);
+      2. a different profile prints a DIFFERENT chain and loses the old one -- including the caller
+         expansion, which is the one thing the profile carries that the old code carried in a dict
+         comprehension;
+      3. a module with no profile refuses at exit 4 and names EVERY field a working profile carries (the
+         first error text here named a subset, and following it produced a profile that could not drive a
+         chain).
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+
+    def shown(dir_=None, module="") -> str:
+        d = dict(GSVTK_PROJECT="p", GSVTK_TERRA_NAMESPACE="probe-ns",
+                 GSVTK_TERRA_WORKSPACE="probe-ws", GSVTK_BRANCH="probe-branch")
+        if dir_:
+            d["GSVTK_MODULE_DIR"] = str(dir_)
+        if module:
+            d["GSVTK_MODULE"] = module
+        bc = fresh(d, "module_profile", "batch_configs")[-1]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bc.show()
+        return buf.getvalue()
+
+    a = shown()
+    if "10-GenotypeBatch" not in a or a.count("===== ") != 5:
+        raise AssertionError(f"the default module does not print the five shipped steps:\n{a[:300]}")
+    if a.count("in  GenotypeBatch.") < 17:
+        raise AssertionError(f"the `@`-over-callers expansion lost a binding:\n{a[:300]}")
+
+    def other_module(doc):
+        step = doc["steps"][0]
+        doc["steps"] = [step]                     # a one-step chain is still a chain
+        step["step"] = "01-ClusterDepth"
+        step["wdl"], step["workflow"] = "DepthClustering", "ClusterDepth"
+        step["inputs"] = {"ClusterDepth.batch": "this.sample_set_id",
+                          "ClusterDepth.@_vcf": "this.clustered_@_vcf{frz}"}
+        step["outputs"] = {"ClusterDepth.clustered_depth_vcf": "this.clustered_depth_vcf{new}"}
+        for k in [k for k in step if k.startswith("_why_")]:
+            del step[k]
+        doc["callers"] = ["manta"]
+    b = shown(_profile_variant("module-other", other_module))
+    if "01-ClusterDepth" not in b or "10-GenotypeBatch" in b:
+        raise AssertionError(f"MODULE changed and the output did not:\n{b[:400]}")
+    # `dockstore()` gets the FILE basename while the bindings carry the DECLARED name, so both strings
+    # must appear here and neither may do the other's job.
+    if "gatk-sv%2FDepthClustering" not in b or "ClusterDepth.batch" not in b:
+        raise AssertionError(f"the wdl/workflow split collapsed into one name:\n{b[:400]}")
+    if "in  DepthClustering." in b:
+        raise AssertionError(f"bindings are being keyed by the file basename:\n{b[:400]}")
+    if b.count("this.clustered_manta_vcf_frz") != 1 or "wham" in b or "scramble" in b:
+        raise AssertionError(f"the caller list is not driving the expansion:\n{b[:400]}")
+
+    # Arm 3: the refusal, with the complete field list -- a subset is the defect §6 calls out.
+    bc = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch",
+                "GSVTK_MODULE": "copynumber"}, "module_profile", "batch_configs")[-1]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            bc.show()
+        raise AssertionError("a module with no profile printed something anyway")
+    except SystemExit as e:
+        txt = buf.getvalue()
+        if e.code != 4:
+            raise AssertionError(f"a missing module exited {e.code}, want 4")
+        for frag in ("copynumber.json", "schema_version", "callers", "steps", "wdl", "workflow",
+                     "rootEntityType", "inputs", "outputs", "branch_only_inputs", "_why_"):
+            if frag not in txt:
+                raise AssertionError(f"the refusal omits {frag!r} from the field list -- that is how a "
+                                     f"following author writes an incomplete profile")
+    return ("default module prints all 5 steps; a different MODULE prints a different chain (wdl/workflow "
+            "split kept, caller list drives the expansion); an absent module exits 4 naming all fields")
+
+
 def probe_nested_bindings() -> str:
     """`check_maps` raised AttributeError on a 3-segment (call-site) binding instead of reporting it.
 
@@ -1607,6 +1787,8 @@ PROBES = [
     ("step_lookup_names_itself", probe_step_lookup_names_itself),
     ("call_cache", probe_call_cache),
     ("task_artifact_tail", probe_task_artifact_tail),
+    ("profile_loader_refusals", probe_profile_loader_refusals),
+    ("module_changes_output", probe_module_changes_output),
     # Last: this probe injects a key into batch_configs.CONFIGS. Every other probe re-imports the module
     # through fresh() so it could not read that, but a probe that mutates shared module state has no
     # business running before the ones that do not.

@@ -719,7 +719,7 @@ echo "selftest: probes for the defects a review confirmed (offline, no network, 
 # (call_cache); and the peek that printed a task's stderr PATH instead of reading it (A5's clause),
 # where the control is the same fixture with one artifact deleted and the exit code going non-zero
 # (task_artifact_tail).
-probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 18 \
+probecount "scripts/probe_fixes.py pins every confirmed defect with a control" 20 \
     "$PY" scripts/probe_fixes.py
 printf '        (each probe also asserts a POSITIVE CONTROL, so a guard that cannot fire is a\n'
 printf '        FAIL rather than a pass -- see the module docstring for what each one pins)\n'
