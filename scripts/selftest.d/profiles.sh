@@ -523,9 +523,22 @@ def run(steps_wanted, names):
 order = fb.pick_config({"10-GenotypeBatch": {}, "10-GenotypeBatch_Ab12Cd": {},
                         "09-MergeBatchSites": {}}, "10")
 check(order == ["10-GenotypeBatch", "10-GenotypeBatch_Ab12Cd"],
-      "pick_config prefers the LIVE config over the per-submission snapshot that shares its number "
-      "prefix (`sorted(matches)[0]` handed back whichever sorted first, which is what froze the wrong "
-      "config in the runs this repo measured)", ", ".join(order))
+      "the LIVE config is listed before the per-submission snapshot that carries its number "
+      "(docs/terra-head-to-head.md §8: a finished submission keeps `<name>_<random>` like "
+      "`single-sample-trio-a0e10b99_B0EJFlC5SLk`, so the live name is a prefix of its own copy) -- "
+      "MEASURED, AND ON ITS OWN THIS CHECK CANNOT FAIL: a prefix always sorts first, so "
+      "`sorted(cand)` returns the same answer here. The next line is the one with teeth",
+      ", ".join(order))
+# The discriminating case, and the reason it is here: two configs can carry the same step number
+# without either name being a prefix of the other (a hand-named variant, a copy pulled in from another
+# branch). That is where `pick_config`'s length-first rule and a plain `sorted(cand)` disagree, so if
+# someone collapses the rule, this is the assertion that moves.
+disc = fb.pick_config({"10-GenotypeBatch": {}, "10-BatchCopy_from_another_branch": {}}, "10")
+check(disc == ["10-GenotypeBatch", "10-BatchCopy_from_another_branch"],
+      "the ordering rule really is `shortest name first`, not `alphabetical`: two same-numbered "
+      "configs, neither a prefix of the other, and alphabetical puts the long-named copy first -- which "
+      "is the `sorted(matches)[0]` class of bug this function exists to avoid",
+      ", ".join(disc))
 
 bare = ["GenotypeBatch"]
 check(fb.pick_config({n: {} for n in bare}, "10") == []
@@ -567,7 +580,7 @@ print("fetch_baseline counted-gap guard: %d ok, %d failed"
 sys.exit(1 if bad else 0)
 PY
 want "fetch_baseline records a counted, named, PARTIAL hole for every step a workspace lacks, and exits 1" 0 \
-    "fetch_baseline counted-gap guard: 8 ok, 0 failed" -- \
+    "fetch_baseline counted-gap guard: 9 ok, 0 failed" -- \
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/baseline-work" \
     GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/" \
     "$PY" "$TMP/fetch-baseline-guard.py" "$ROOT" "$TMP/baseline-work"
