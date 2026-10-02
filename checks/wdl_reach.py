@@ -104,8 +104,10 @@ import argparse
 import collections
 import difflib
 import json
+import os
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -143,6 +145,10 @@ class Graph:
         self.nodes = {}                            # node tuple -> record
         self.fwd = collections.defaultdict(list)   # node -> [edge out]
         self.rev = collections.defaultdict(list)   # node -> [edge in]
+        # abspath -> the miniwdl document, kept because `--images` reads input declarations off the
+        # AST. The node records carry a rendered `owner` sentence for the table, which is not
+        # something to re-derive a workflow's inputs from.
+        self.docs = {}
 
     def add_node(self, node, kind, file, display, owner, names):
         if node not in self.nodes:
@@ -228,6 +234,7 @@ def build_graph(files: list) -> tuple:
         wflow = doc.workflow.name if doc.workflow else None
         owner = (f'workflow {wflow}' if wflow else
                  (f'{len(doc.tasks)} task(s)' if doc.tasks else 'no workflow'))
+        g.docs[abspath] = doc
         fnode = ('file', abspath)
         g.add_node(fnode, 'file', path.name, path.name, owner, {path.name, abspath})
 
@@ -445,6 +452,597 @@ def artifact(argv, root, files, answers, g, secs, failures, unresolved, outside)
             'reached': first['reached'],
             'files_scanned': len(files), 'scanned_something': len(files) > 0,
             'load_seconds': round(secs, 2)}
+
+
+# --- images: the containers the reached set binds, and whether the commit under review built them ----
+# A11. `--target` answers which workflows a change reaches. The next question in the same review is
+# which dockers have to be rebuilt — and the dangerous half of it: a reaching workflow bound to an
+# image your commit did NOT build runs the pre-change code and prints nothing suspicious. Nothing new
+# has to be invented to answer it, because every input is already data. This section reads the four
+# places that hold it, and says which one answered:
+#
+#   the WDL                     a workflow's own `*_docker` input declaration, with its default
+#                               expression as written, off `doc.workflow.inputs`
+#   a rendered input JSON       `inputs/build/**/<Wf>.*json` — gatk-sv's own renderer's output, the
+#                               file CI validates (from --inputs-root, or from a render this run asks
+#                               `checks/wdl_inputs_check.py --render-only` for)
+#   a module profile            `profiles/<module>.json` — what a Terra chain binds, which is
+#                               `workspace.<key>`, a value the tree cannot see
+#   inputs/values/dockers.json  gatk-sv's pinboard: the exact image:tag each input is expected to
+#                               hold. Equality with it says "this value is committed into the tree",
+#                               which is context for the verdict rather than the verdict itself
+#
+# The verdict itself comes from gatk-sv's own two tag conventions, read off the files that mint them:
+# `docker/gatk-sv-build.sh` mints `${BRANCH_TAG}-${SHA:0:6}` and comments it "Branch-scoped TEST tags
+# only", and `docs/docker-builds.md` reserves "release-style tags (v1.1, v1.1.1, date-prefixed upstream
+# tags …)" for "production pushes". So a date- or `v`-prefixed tag is a production/CI push and cannot
+# contain an edit that exists only on your branch, while a `<branch>-<sha>` tag names the commit that
+# produced it — which is then compared against the commit under review. A value matching neither shape
+# is printed as CANNOT-SAY rather than assumed into either bucket.
+DOCKER_INPUT = re.compile(r'(?:^|_)docker$')      # every container input gatk-sv spells <name>_docker
+JSON_KEY = re.compile(r'^(?P<wf>[A-Za-z0-9_]+)\.(?P<key>[A-Za-z0-9_.]+)$')
+# `${workspace.sv_pipeline_docker}`: Rawls substitutes it at submission time, so no file in the tree
+# holds the image a run actually gets.
+PLACEHOLDER = re.compile(r'^\$\{[^}]*\}$')
+RELEASE_TAG = re.compile(r'^(?:\d{4}-\d{2}-\d{2}|v\d)')
+BRANCH_MINTED_TAG = re.compile(r'^(?P<body>[A-Za-z0-9][\w.-]*)-(?P<sha>[0-9a-f]{6,40})$')
+QUOTED = re.compile(r'^"(.*)"$')
+# The four verdict buckets, printed in this order, mutually exclusive, and 3 is as loud as 0.
+BUCKETS = ('NOT A BUILD OF THE COMMIT UNDER REVIEW', 'BUILT FROM A DIFFERENT COMMIT',
+           'BUILT FROM THE COMMIT UNDER REVIEW', 'CANNOT SAY')
+
+
+def kit_path() -> None:
+    """Put `kit/` on sys.path once, so `config` and `module_profile` are importable from `checks/`."""
+    k = str(_HERE.parent / 'kit')
+    if k not in sys.path:
+        sys.path.insert(0, k)
+
+
+def cfg_get(key: str) -> str:
+    """One config key through the resolver, or '' when the config layer is unavailable."""
+    try:
+        kit_path()
+        import config
+    except ImportError:
+        return ''
+    return config.get(key, '')
+
+
+def cfg_work(sub: str) -> str:
+    """The scratch dir the config layer owns, created only because something is about to be written."""
+    try:
+        kit_path()
+        import config
+        return str(config.work_dir(sub))
+    except Exception:                        # noqa: BLE001 — no config layer is a skip, not a crash
+        d = pathlib.Path(tempfile.gettempdir()) / 'gsvtk-reach-images'
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+
+def image_tag(value: str) -> str:
+    """The tag of an image:tag, or '' when the value is untagged (the registry's current entry)."""
+    last = value.rsplit('/', 1)[-1]
+    return last.rsplit(':', 1)[1] if ':' in last else ''
+
+
+def wrap(text: str, indent: str, width: int = 104) -> list:
+    """`text` as indented lines. A reason that wraps to nothing is the reason nobody reads."""
+    lines, cur = [], indent
+    for word in text.split():
+        if len(cur) + len(word) + 1 > width and cur.strip() != '':
+            lines.append(cur.rstrip())
+            cur = indent
+        cur += (' ' if cur.strip() else '') + word
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines
+
+
+def classify_image(value: str, pinboard: dict, head_sha: str) -> tuple:
+    """(bucket, label, reason) for one literal image value. Never a silent "looks fine".
+
+    Bucket 0 is the answer A11 exists for: a run binding this value tests an image that cannot contain
+    the change under review. Bucket 3 (CANNOT SAY) is deliberately not folded into 2 — an unverified
+    branch tag is the same failure class as a gate that certified nothing — so it gets its own counted
+    line and its own reason, naming what would settle it.
+    """
+    tag = image_tag(value)
+    keys = pinboard.get(value, [])
+    pinned = ('dockers.json pins this value as ' + ', '.join(keys)) if keys \
+        else 'no dockers.json key holds this value'
+    if not tag:
+        return 3, 'CANNOT-SAY', ('untagged: the registry serves whatever is current, so nothing in '
+                                 'the tree says which build a run gets; ' + pinned)
+    if RELEASE_TAG.match(tag):
+        return 0, 'PRE-CHANGE', ('release-shaped tag ' + repr(tag) + ': docs/docker-builds.md '
+                                 'reserves date-prefixed and vN tags for production pushes, so this '
+                                 'image cannot hold an edit that exists only on your branch; ' + pinned)
+    m = BRANCH_MINTED_TAG.match(tag)
+    if not m:
+        return 3, 'CANNOT-SAY', ('tag ' + repr(tag) + ' matches neither shape this repo can read '
+                                 '(production release-style, or <branch>-<sha> from '
+                                 'docker/gatk-sv-build.sh); ' + pinned)
+    sha = m.group('sha')
+    if not head_sha:
+        return 3, 'BRANCH-UNVERIFIED', ('branch-minted tag ' + repr(tag) + ' carries commit ' + sha[:7]
+                                        + ', but the commit under review is unknown here (name the '
+                                        'checkout, or pass --head-sha), so its freshness is not '
+                                        'checkable; ' + pinned)
+    if head_sha.startswith(sha):
+        return 2, 'BRANCH-BUILT', ('branch-minted tag ' + repr(tag) + ' carries commit ' + sha[:7]
+                                   + ', which is the commit under review; ' + pinned)
+    return 1, 'STALE-BRANCH-BUILD', ('branch-minted tag ' + repr(tag) + ' carries commit ' + sha[:7]
+                                     + ', which is not the commit under review (' + head_sha[:7]
+                                     + '): a run binding it tests that older build; ' + pinned)
+
+
+def default_as_written(doc, decl) -> str:
+    """A declaration's default expression exactly as the source spells it, or '' when it has none.
+
+    Sliced out of the file's own lines rather than rendered off the AST: miniwdl's expression node has
+    no stable source-text attribute across versions, and a default like
+    `if (!defined(manta_vcfs_input) && use_manta) then manta_docker else NONE_STRING_` is worth
+    quoting to a human rather than reconstructing from nodes.
+    """
+    expr = getattr(decl, 'expr', None)
+    pos = getattr(expr, 'pos', None)
+    if expr is None or pos is None:
+        return ''
+    try:
+        line = doc.source_lines[pos.line - 1]
+    except IndexError:
+        return ''
+    return line[pos.column - 1:].strip()
+
+
+def docker_input_decls(doc) -> list:
+    """(name, type_text, default_as_written, line) for the container inputs a workflow DECLARES.
+
+    Off the AST's input section, not off a name grep: gatk-sv's top-level workflows carry derived body
+    declarations such as `String? manta_docker_ = if (!defined(manta_vcfs_input) …)`
+    (GATKSVPipelineBatch.wdl:158-161) that a caller cannot bind, and reporting them as inputs would
+    invent a binding surface the workflow does not have.
+    """
+    wf = getattr(doc, 'workflow', None)
+    out = []
+    for name, decl in sorted((getattr(wf, 'inputs', None) or {}).items()):
+        if not DOCKER_INPUT.search(name):
+            continue
+        out.append((name, str(decl.type), default_as_written(doc, decl), decl.pos.line))
+    return out
+
+
+def read_input_jsons(build_root: str) -> tuple:
+    """(index, files_read, unreadable, call_level_keys) over every rendered JSON under build_root.
+
+    The index is keyed by whatever precedes the first dot, which is the workflow an input JSON names
+    its keys after. A key with a dot inside the input part (`Wf.call.sv_pipeline_docker`) binds a CALL
+    rather than a workflow input, so it is counted and not folded in silently: it answers a different
+    question, and the count is what tells a reader the scan saw it.
+    """
+    index, n, bad, call_level = {}, 0, [], 0
+    root = pathlib.Path(build_root)
+    for p in sorted(root.rglob('*.json')):
+        try:
+            doc = json.loads(p.read_text())
+        except (ValueError, OSError) as exc:
+            bad.append((p.name, str(exc)[:80]))
+            continue
+        if not isinstance(doc, dict):
+            bad.append((p.name, 'not a JSON object'))
+            continue
+        n += 1
+        for key, value in doc.items():
+            m = JSON_KEY.match(str(key))
+            if not m or not DOCKER_INPUT.search(m.group('key')):
+                continue
+            if '.' in m.group('key'):
+                call_level += 1
+                continue
+            index.setdefault(m.group('wf'), {}).setdefault(m.group('key'), []).append(
+                (value, str(p.relative_to(root))))
+    return index, n, bad, call_level
+
+
+def read_pinboard(tree: str) -> tuple:
+    """inputs/values/dockers.json as value -> [keys], plus (status, reason). Context, not a verdict."""
+    p = pathlib.Path(tree) / 'inputs' / 'values' / 'dockers.json' if tree else None
+    if p is None or not p.is_file():
+        return {}, 'skipped', 'no inputs/values/dockers.json under ' + str(tree or '(no tree read)')
+    try:
+        doc = json.loads(p.read_text())
+    except (ValueError, OSError) as exc:
+        return {}, 'skipped', str(p) + ' could not be read (' + str(exc)[:80] + ')'
+    pin = {}
+    for key, value in doc.items():
+        if isinstance(value, str):
+            pin.setdefault(value, []).append(str(key))
+    for keys in pin.values():
+        keys.sort()
+    return pin, 'read', str(p)
+
+
+def read_profile_bindings() -> tuple:
+    """profiles/<module>.json as workflow -> input -> (value, step), through the ONE profile reader.
+
+    `kit/module_profile` is the only loader allowed to interpret a profile (one reader, one expander),
+    so its refusals arrive here as findings and are printed as a named skip rather than reading as
+    "the profile binds nothing" — which is the difference between a source that was absent and one
+    that was present and refused.
+    """
+    try:
+        kit_path()
+        import module_profile
+    except ImportError as exc:
+        return {}, 'skipped', 'kit/module_profile.py could not be imported (' + str(exc) + ')'
+    loaded = module_profile.load()
+    if not loaded.found or loaded.problems:
+        why = loaded.problem.replace('\n', ' ') or 'the profile bound no steps'
+        return {}, 'skipped', str(loaded.path) + ': ' + why
+    out = {}
+    for step, spec in loaded.configs.items():
+        wf = str(spec.get('workflow') or '')
+        for key, value in (spec.get('inputs') or {}).items():
+            head, _, member = str(key).partition('.')
+            if member and DOCKER_INPUT.search(member):
+                out.setdefault(head or wf, {}).setdefault(member, (value, step))
+    return out, 'read', str(loaded.path)
+
+
+def render_inputs(checkout: str, ref: str, dest: str) -> dict:
+    """Ask `checks/wdl_inputs_check.py --render-only` for gatk-sv's own rendered input JSONs.
+
+    THE COUPLING, stated where a reviewer can see it: that file belongs to another lane, and this
+    function depends on its `--repo/--ref/--dest/--render-only` flags, on the machine line
+    `GSVTK-RENDER status=… jsons=… dest=…` it prints, and on the layout it leaves behind
+    (`<dest>/inputs/build/**.json`, plus `<dest>/inputs/values/dockers.json`, which travels because
+    the git archive takes the whole `inputs/` subtree). It is invoked, never edited, and it renders
+    from `git archive` into a temp tree, so the checkout stays read-only. If any of that changes, the
+    answer here degrades to a named skip with UNRESOLVED values — never to a fabricated image.
+    """
+    script = _HERE / 'wdl_inputs_check.py'
+    if not script.is_file():
+        return {'status': 'skipped', 'reason': str(script) + ' is not here'}
+    cmd = [sys.executable, str(script), '--render-only', '--repo', checkout, '--ref', ref,
+           '--dest', dest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {'status': 'skipped', 'reason': 'could not run ' + ' '.join(cmd) + ' (' + str(exc) + ')'}
+    out = proc.stdout + proc.stderr
+    line = next((ln for ln in out.splitlines() if ln.startswith('GSVTK-RENDER')), '')
+    if not line:
+        tail = out.strip().splitlines()[-1:]
+        return {'status': 'skipped',
+                'reason': 'no GSVTK-RENDER line from ' + script.name + ' (rc=' + str(proc.returncode)
+                          + (', ' + tail[0][:120] if tail else '') + '); the coupling to it is broken '
+                          + 'and no input JSON was read'}
+    fields = dict(t.split('=', 1) for t in line.split() if '=' in t)
+    if fields.get('status') != 'OK':
+        return {'status': 'skipped', 'reason': line[len('GSVTK-RENDER'):].strip(),
+                'jsons': int(fields.get('jsons') or 0)}
+    return {'status': 'read', 'reason': line, 'jsons': int(fields.get('jsons') or 0),
+            'dest': fields.get('dest', dest)}
+
+
+def git_head(what: str, ref: str) -> tuple:
+    """(sha, whence) for REF in a checkout, read-only. '' plus a reason when there is no commit."""
+    if not what or not os.path.isdir(os.path.join(what, '.git')):
+        return '', 'no git checkout in play'
+    try:
+        proc = subprocess.run(['git', '-C', what, 'rev-parse', ref], capture_output=True,
+                              text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return '', 'git rev-parse failed (' + str(exc) + ')'
+    if proc.returncode != 0:
+        return '', 'git rev-parse ' + ref + ' failed: ' + (proc.stderr or '').strip()[:80]
+    return (proc.stdout or '').strip(), 'git rev-parse ' + ref + ' in ' + what
+
+
+def gather_image_sources(a, root) -> dict:
+    """Everything the image answer reads — with a reason attached to each part, including the misses."""
+    src = {'asked': True, 'json_root': '', 'json_status': 'skipped', 'json_reason': '',
+           'json_files': 0, 'json_bad': [], 'call_level': 0, 'index': {},
+           'pinboard': {}, 'pinboard_status': 'skipped', 'pinboard_reason': '',
+           'profile': {}, 'profile_status': 'skipped', 'profile_reason': '', 'profile_path': '',
+           'head_sha': '', 'head_whence': '', 'render': None}
+    tree = ''
+    if a.inputs_root:
+        tree = a.inputs_root
+        candidate = os.path.join(a.inputs_root, 'inputs', 'build')
+        if os.path.isdir(candidate):
+            src['json_root'] = candidate
+            src['json_reason'] = 'given by --inputs-root '
+        else:
+            src['json_reason'] = ('no inputs/build under --inputs-root ' + a.inputs_root
+                                  + ' (render one with checks/wdl_inputs_check.py --render-only)')
+    else:
+        checkout = (a.checkout or (str(root) if os.path.isdir(os.path.join(str(root), 'inputs'))
+                                   else '') or cfg_get('GATK_SV_CHECKOUT'))
+        if not checkout:
+            src['json_reason'] = ('nothing to render from: GSVTK_GATK_SV_CHECKOUT is unset and neither '
+                                  '--inputs-root nor --checkout was given')
+        else:
+            dest = os.path.join(cfg_work('reach-images'),
+                                'render-' + re.sub(r'[^\w.-]', '-', a.inputs_ref))
+            src['render'] = render_inputs(checkout, a.inputs_ref, dest)
+            if src['render']['status'] == 'read':
+                tree = src['render'].get('dest') or dest
+                src['json_root'] = os.path.join(tree, 'inputs', 'build')
+                src['json_reason'] = ('rendered by checks/wdl_inputs_check.py --render-only from '
+                                      + checkout + '@' + a.inputs_ref + ', '
+                                      + str(src['render']['jsons']) + ' JSON(s)')
+            else:
+                src['json_reason'] = 'the renderer said: ' + src['render']['reason']
+    if src['json_root']:
+        src['index'], src['json_files'], src['json_bad'], src['call_level'] = \
+            read_input_jsons(src['json_root'])
+        src['json_status'] = 'read'
+    src['pinboard'], src['pinboard_status'], src['pinboard_reason'] = read_pinboard(tree)
+    src['profile'], src['profile_status'], src['profile_reason'] = read_profile_bindings()
+    if src['profile_status'] == 'read':
+        src['profile_path'] = src['profile_reason']
+    if a.head_sha:
+        src['head_sha'], src['head_whence'] = a.head_sha, '--head-sha'
+    else:
+        src['head_sha'], src['head_whence'] = git_head(tree or a.checkout or cfg_get('GATK_SV_CHECKOUT'),
+                                                       a.inputs_ref)
+    return src
+
+
+def answer_workflows(g: Graph, targets: list, hits: dict) -> tuple:
+    """Every workflow in ONE answer, with the role that put it there. Nothing drops for graph reasons.
+
+    A reverse answer from a task in a library file reaches FILES, not workflow nodes: the callers are
+    reached file -> file -> contains -> task, so the workflow has to come out of the file (gatk-sv
+    carries one workflow per file, and the reach table's OWNER column already names it). Both spellings
+    are read here, and the tallies come back so the printed arithmetic is checkable: answer nodes by
+    kind, how many workflows that is, how many deduped, and which reached files hold no workflow at all.
+    """
+    entries, plain, other = [], [], 0
+    seen, deduped = {}, 0
+    by_kind = collections.Counter()
+
+    def add(abspath, depth, role):
+        nonlocal deduped
+        doc = g.docs.get(abspath)
+        wf = getattr(doc, 'workflow', None) if doc is not None else None
+        display = pathlib.Path(abspath).name
+        if wf is None:
+            if doc is not None and display not in plain:
+                plain.append(display)
+            return
+        key = (abspath, str(wf.name))
+        if key in seen:
+            seen[key]['roles'] += ' + ' + role
+            seen[key]['depth'] = min(seen[key]['depth'], depth)
+            deduped += 1
+            return
+        seen[key] = {'file': display, 'workflow': str(wf.name), 'abspath': abspath, 'doc': doc,
+                     'depth': depth, 'roles': role}
+        entries.append(seen[key])
+
+    for node in targets:
+        kind = g.nodes.get(node, {}).get('kind', 'unresolved')
+        by_kind[kind] += 1
+        if kind == 'file' or kind == 'workflow':
+            add(node[1], 0, 'target')
+        else:
+            other += 1
+    for node, hit in sorted(hits.items(), key=lambda kv: (kv[1]['depth'], g.display(kv[0]))):
+        kind = g.nodes[node]['kind']
+        by_kind[kind] += 1
+        if kind == 'file':
+            add(node[1], hit['depth'], 'depth ' + str(hit['depth']) + ' file')
+        elif kind == 'workflow':
+            add(node[1], hit['depth'], 'depth ' + str(hit['depth']) + ' workflow')
+        else:
+            other += 1
+    entries.sort(key=lambda e: (e['depth'], e['file']))
+    tally = {'answer_nodes': len(targets) + len(hits),
+             'by_kind': {k: by_kind[k] for k in KINDS if by_kind[k]},
+             'workflows': len(entries), 'deduped': deduped, 'no_workflow_files': sorted(plain),
+             'non_workflow_nodes': other}
+    return entries, tally
+
+
+def bindings_of(entry: dict, key: str, default_text: str, default_line: int, src: dict) -> list:
+    """[(source_label, value, where)] binding ONE docker input, from every place that binds it.
+
+    The workflow name and the file basename are both tried against the rendered JSONs and the label
+    says which spelling hit: a profile keys by `workflow` while a template keys by whatever the file
+    is called, and 12 of the 109 workflow-bearing WDLs at main have those two names differ. A binding
+    missed because of a spelling is the silent omission this block exists to refuse.
+    """
+    out = []
+    if default_text:
+        out.append(('WDL default', default_text, entry['file'] + ':' + str(default_line)))
+    index = src['index']
+    got, label = index.get(entry['workflow'], {}).get(key), 'rendered input JSON'
+    if not got:
+        got = index.get(pathlib.Path(entry['abspath']).stem, {}).get(key)
+        label = 'rendered input JSON (matched by file stem, not by workflow name)'
+    for value, where in (got or []):
+        out.append((label, value, where))
+    prof = src['profile'].get(entry['workflow'], {}).get(key) \
+        or src['profile'].get(pathlib.Path(entry['abspath']).stem, {}).get(key)
+    if prof:
+        out.append(('module profile ' + os.path.basename(src['profile_path']), prof[0],
+                    'step ' + prof[1]))
+    return out
+
+
+def literal_of(source_label: str, value) -> tuple:
+    """(literal_image, why_not) for one binding: '' plus a reason when it is not a literal image.
+
+    A WDL default that is an expression, a `${workspace.x}` placeholder and a `workspace.x` profile
+    binding are all real bindings and none of them is an image, so each gets its own reason instead of
+    being dropped or quoted back as if it were a value a runner could pull.
+    """
+    text = str(value).strip()
+    if source_label == 'WDL default':
+        q = QUOTED.match(text)
+        if q:
+            return q.group(1), ''
+        return '', ('the WDL default is the expression ' + repr(text)
+                    + ', which is computed at run time, not a literal image')
+    if PLACEHOLDER.match(text):
+        return '', (repr(text) + ' is a Rawls placeholder substituted at submission time, so no file '
+                    'in the tree says which image a run gets')
+    if text.startswith(('workspace.', 'this.')):
+        return '', (repr(text) + ' names an entity attribute rather than an image; its value lives in '
+                    'the workspace, not in this tree')
+    return text, ''
+
+
+def image_answer(entries: list, src: dict) -> tuple:
+    """(rows, bindings, unresolved) for ONE answer: what each reaching workflow binds, and from where.
+
+    Every workflow in `entries` gets a row even when it binds nothing, because a per-workflow list
+    that quietly leaves one out is the exact lie this feature was added to prevent.
+    """
+    rows, bindings, unresolved = [], [], []
+    for entry in entries:
+        inputs = []
+        for name, type_text, default_text, line in docker_input_decls(entry['doc']):
+            values, holes = [], []
+            for label, value, where in bindings_of(entry, name, default_text, line, src):
+                literal, why = literal_of(label, value)
+                if literal:
+                    bucket, verdict, reason = classify_image(literal, src['pinboard'], src['head_sha'])
+                    values.append({'source': label, 'where': where, 'image': literal,
+                                   'bucket': bucket, 'verdict': verdict, 'reason': reason})
+                else:
+                    holes.append({'source': label, 'value': str(value), 'where': where, 'reason': why})
+            if not values and not holes:
+                holes.append({'source': 'nothing binds it', 'value': None, 'where': '',
+                              'reason': 'the WDL declares ' + type_text + ' ' + name + ' at '
+                                        + entry['file'] + ':' + str(line) + ' with no default, and no '
+                                        'rendered input JSON and no module profile binds '
+                                        + entry['workflow'] + '.' + name})
+            inputs.append({'input': name, 'type': type_text, 'wdl_line': line,
+                           'values': values, 'holes': holes})
+        rows.append({'workflow': entry['workflow'], 'file': entry['file'], 'depth': entry['depth'],
+                     'roles': entry['roles'], 'inputs': inputs})
+        for inp in inputs:
+            for v in inp['values']:
+                bindings.append(dict(v, wf=entry['workflow'] + '.' + inp['input']))
+            for h in inp['holes']:
+                unresolved.append({'wf': entry['workflow'] + '.' + inp['input'],
+                                   'reason': h['reason']})
+    return rows, bindings, unresolved
+
+
+def print_image_answer(rows: list, tally: dict, top: int, verbose: bool) -> None:
+    """The per-answer image block: every workflow in the answer, including the ones binding none."""
+    kinds = ' '.join(k + '=' + str(v) for k, v in sorted(tally['by_kind'].items()))
+    n_none = sum(1 for r in rows if not r['inputs'])
+    print('images: ' + str(tally['workflows']) + ' workflow(s) in this answer, ' + str(len(rows))
+          + ' listed (' + str(n_none) + ' of them bind no docker input)')
+    print('  from ' + str(tally['answer_nodes']) + ' answer node(s) ' + kinds
+          + ('; ' + str(tally['deduped']) + ' dedup(s)' if tally['deduped'] else ''))
+    if tally['no_workflow_files']:
+        listed = ', '.join(tally['no_workflow_files'][:6])
+        if len(tally['no_workflow_files']) > 6:
+            listed += ' (+' + str(len(tally['no_workflow_files']) - 6) + ' more)'
+        print('  ' + str(len(tally['no_workflow_files'])) + ' reached file(s) hold no workflow, so they '
+              'bind no docker input of their own: ' + listed)
+    if tally['non_workflow_nodes']:
+        print('  ' + str(tally['non_workflow_nodes']) + ' answer node(s) are tasks, scripts or '
+              'unresolved calls: they run inside someone else\'s image, named by their caller above')
+    shown = rows if verbose else rows[:top]
+    for row in shown:
+        print('  ' + row['file'] + '::' + row['workflow'] + '  [' + row['roles'] + ']' +
+              ('   binds NO docker input' if not row['inputs'] else
+               '   ' + str(len(row['inputs'])) + ' docker input(s)'))
+        for inp in row['inputs']:
+            for v in inp['values']:
+                print('      ' + inp['input'].ljust(24) + v['verdict'].ljust(20) + v['image'])
+                for ln in wrap('<- ' + v['source'] + ': ' + v['where'] + '   |   ' + v['reason'],
+                               ' ' * 26):
+                    print(ln)
+            for h in inp['holes']:
+                print('      ' + inp['input'].ljust(24) + 'UNRESOLVED')
+                for ln in wrap('<- ' + h['reason'], ' ' * 26):
+                    print(ln)
+    if len(rows) > len(shown):
+        print('  … detail for ' + str(len(rows) - len(shown)) + ' more workflow(s) withheld (-v); '
+              'their bindings are still counted in the verdict block')
+
+
+def image_verdict(bindings: list, unresolved: list) -> dict:
+    """The distinction, not the list: which of these images cannot be a build of what is under review.
+
+    Exit codes stay reach's business: an UNRESOLVED binding is an answer about the data (CI renders no
+    JSON for some workflows at all, and a Terra config binds a workspace attribute by design), so it is
+    counted and named rather than failed. A layer that could not run at all is a different thing and is
+    refused in main().
+    """
+    by_value = {}
+    for b in bindings:
+        rec = by_value.setdefault(b['image'], {'bucket': b['bucket'], 'verdict': b['verdict'],
+                                               'reason': b['reason'], 'wfs': []})
+        rec['wfs'].append(b['wf'])
+    counts = collections.Counter(b['bucket'] for b in bindings)
+    for value, rec in by_value.items():
+        rec['wfs'] = sorted(set(rec['wfs']))
+    lines = ['images: ' + str(len(by_value)) + ' distinct image value(s) in ' + str(len(bindings))
+             + ' binding(s)']
+    for bucket, name in enumerate(BUCKETS):
+        values = sorted((v, r) for v, r in by_value.items() if r['bucket'] == bucket)
+        if not values:
+            continue
+        lines.append('  [' + str(bucket) + '] ' + name + ' (' + str(len(values)) + ')')
+        for value, rec in values:
+            wfs = rec['wfs']
+            listed = ', '.join(wfs[:4]) + (' (+' + str(len(wfs) - 4) + ' more)' if len(wfs) > 4 else '')
+            lines += wrap(value + '   [' + rec['verdict'] + ']   bound by: ' + listed, '    ')
+            lines += wrap(rec['reason'], '        ')
+    if not bindings:
+        lines.append('  no docker-shaped image is bound by anything in this answer: every reaching '
+                     'workflow binds none, which is an answer rather than a gap')
+    if unresolved:
+        lines.append('  binding(s) whose value is not a literal image (' + str(len(unresolved)) + '):')
+        for u in unresolved:
+            lines += wrap(u['wf'] + ': ' + u['reason'], '    ')
+    return {'lines': lines, 'values': by_value,
+            'buckets': {str(b): counts[b] for b in range(len(BUCKETS))},
+            'unresolved': unresolved, 'bindings': len(bindings)}
+
+
+def image_provenance(src: dict) -> list:
+    """Where each value came from — including the source that could not be read, and why."""
+    if src['json_status'] == 'read':
+        json_line = ('read ' + str(src['json_files']) + ' JSON(s) from ' + src['json_root']
+                     + ' (' + src['json_reason'] + ')')
+    else:
+        json_line = 'SKIPPED — ' + src['json_reason'] + ': every value below is a WDL default or '
+        json_line += 'UNRESOLVED'
+    if src['pinboard_status'] == 'read':
+        pin_line = (str(len(src['pinboard'])) + ' value(s) from ' + src['pinboard_reason'])
+    else:
+        pin_line = ('SKIPPED — ' + src['pinboard_reason'] + ': the "is this value committed into the '
+                    'tree" context is absent from every verdict below')
+    if src['profile_status'] == 'read':
+        prof_line = (str(sum(len(v) for v in src['profile'].values())) + ' docker binding(s) from '
+                     + src['profile_path'])
+    else:
+        prof_line = 'SKIPPED — ' + src['profile_reason'] + ': no module-profile binding was consulted'
+    head_line = (src['head_sha'] + ' (' + src['head_whence'] + ')') if src['head_sha'] else \
+        'UNKNOWN — ' + src['head_whence'] + ', so a <branch>-<sha> tag cannot be checked against it'
+    lines = ['image sources:', '  rendered input JSON: ' + json_line,
+             '  dockers.json pinboard: ' + pin_line, '  module profile: ' + prof_line,
+             '  commit under review: ' + head_line]
+    if src['call_level']:
+        lines.append('  ' + str(src['call_level']) + ' docker key(s) in those JSON(s) bind a CALL '
+                     '(dotted key), not a workflow input: counted, not folded into the answer')
+    for path, why in src['json_bad']:
+        lines.append('  JSON unreadable: ' + path + ' (' + why + ')')
+    return lines
+
+
 
 
 # --- selftest ----------------------------------------------------------------------------------------
@@ -708,6 +1306,31 @@ def main(argv: list) -> int:
                          'unknown name is not')
     ap.add_argument('--reverse', action='store_true',
                     help='what reaches the target, instead of what the target reaches')
+    ap.add_argument('--images', action='store_true',
+                    help='also print the container images the reached set binds: per reaching '
+                         'workflow the *_docker inputs it binds, the value, and WHERE that value '
+                         'comes from (a WDL default, a rendered input JSON, a module profile). Then '
+                         'the distinction that matters, not the list: which of those images cannot be '
+                         'a build of the commit under review, so a run binding one tests a pre-change '
+                         'image. A workflow that binds no docker input is printed as binding none; a '
+                         'value that cannot be resolved prints as UNRESOLVED with its reason. Costs '
+                         'a tree load plus ~2 s of input rendering; adds no lines unless you ask.')
+    ap.add_argument('--inputs-root', metavar='DIR',
+                    help='with --images: a tree holding inputs/build/**.json (a rendered gatk-sv '
+                         'root, or a --render-only destination) to read image values and '
+                         'inputs/values/dockers.json from, instead of rendering one')
+    ap.add_argument('--checkout', metavar='DIR',
+                    help='with --images: the gatk-sv clone to render the input JSONs from '
+                         '(default: --dir when it holds inputs/, else GSVTK_GATK_SV_CHECKOUT)')
+    ap.add_argument('--inputs-ref', default='HEAD', metavar='REF',
+                    help='with --images: the ref to render the input JSONs from and to take the '
+                         'commit-under-review from (default HEAD, because the question is about '
+                         'YOUR branch; wdl_inputs_check.py alone defaults to origin/main)')
+    ap.add_argument('--head-sha', metavar='SHA',
+                    help='with --images: the commit a run with these bindings would be testing '
+                         '(default: the checkout answers it via git rev-parse --inputs-ref). It is '
+                         'what a <branch>-<sha> image tag is compared against, and naming it is how '
+                         'you ask the question about a commit the checkout is not sitting on')
     ap.add_argument('--json', metavar='PATH',
                     help='write ONE machine-readable artifact here, covering every --target given')
     ap.add_argument('--top', type=int, default=25, help='hits shown before truncating (default 25)')
@@ -741,9 +1364,18 @@ def main(argv: list) -> int:
     print('  kinds ' + ' '.join(f'{k}={kc[k]}' for k in KINDS if kc[k])
           + f'   imports-outside={len(outside)} unresolved-calls={len(unresolved)}')
 
+    # --images reads a second set of files (input JSONs, dockers.json, a profile) that the graph does
+    # not need, so it is gathered once here and printed per answer below. Nothing is printed at all on
+    # a run that did not ask for it.
+    img_src = gather_image_sources(a, root) if a.images else None
+    if img_src is not None:
+        for line in image_provenance(img_src):
+            print(line)
+
     # One load above, then one answer block per name below, in the order the caller listed them. The
     # tree is never re-parsed per name: the ~35 s is the load, and N processes would pay it N times.
     answers, unknown = [], []
+    image_bindings, run_verdict = [], None
     for i, name in enumerate(a.target):
         if i:
             print()                       # separates this answer block from the previous one
@@ -759,15 +1391,64 @@ def main(argv: list) -> int:
                   + ', '.join(f'{g.display(n)} [{g.nodes[n]["kind"]}]' for n in nodes))
         hits = traverse(g, nodes, a.reverse)
         report(g, root, files, nodes, hits, a.reverse, a.top, a.verbose)
-        answers.append(target_answer(g, name, nodes, hits, a.reverse))
+        ans = target_answer(g, name, nodes, hits, a.reverse)
+        if img_src is not None:
+            entries, tally = answer_workflows(g, nodes, hits)
+            rows, bindings, unres = image_answer(entries, img_src)
+            print_image_answer(rows, tally, a.top, a.verbose)
+            verdict = image_verdict(bindings, unres)
+            for line in verdict['lines']:
+                print(line)
+            image_bindings += bindings
+            ans['images'] = {'workflows': tally, 'rows': rows, 'buckets': verdict['buckets'],
+                             'values': verdict['values'], 'unresolvable': unres}
+        answers.append(ans)
+
+    if img_src is not None and sum(1 for ans in answers if not ans['unknown']) > 1:
+        # More than one name answered: the union is the list of dockers to rebuild, and it is not the
+        # same list as any single answer's. Printed once, over the answered names only — an unknown
+        # name contributed nothing to it, which the UNKNOWN TARGETS report below already says.
+        union_unres = [u for ans in answers for u in (ans.get('images') or {}).get('unresolvable', [])]
+        run_verdict = image_verdict(image_bindings, union_unres)
+        print('\nimages: the whole run (' + str(sum(1 for ans in answers if not ans['unknown']))
+              + ' answered target(s), the union, not one answer\'s list)')
+        for line in run_verdict['lines']:
+            print(line)
 
     if a.json:
+        art = artifact(argv, root, files, answers, g, secs, failures, unresolved, outside)
+        if img_src is not None:
+            art['images'] = {
+                'sources': {k: img_src[k] for k in ('json_root', 'json_status', 'json_reason',
+                                                    'json_files', 'call_level', 'pinboard_status',
+                                                    'pinboard_reason', 'profile_status',
+                                                    'profile_reason', 'profile_path', 'head_sha',
+                                                    'head_whence')},
+                'json_unreadable': img_src['json_bad'],
+                'rule': 'bucket 0 = the tag is release-shaped (date-prefixed or vN), which '
+                        'docs/docker-builds.md reserves for production pushes, so it cannot contain '
+                        'an edit that exists only on the commit under review; bucket 1/2 = a '
+                        '<branch>-<sha> tag as docker/gatk-sv-build.sh mints it, compared against '
+                        'the commit under review; bucket 3 = the tree cannot tell',
+                'run': run_verdict['buckets'] if run_verdict else None,
+                'run_values': run_verdict['values'] if run_verdict else None}
         with open(a.json, 'w') as fh:
-            json.dump(artifact(argv, root, files, answers, g, secs, failures, unresolved, outside),
-                      fh, indent=1, sort_keys=True)
+            json.dump(art, fh, indent=1, sort_keys=True)
         print(f'artifact: {a.json}')
 
     rc = 0
+    if img_src is not None and img_src['json_status'] != 'read' and \
+            any(r['inputs'] for ans in answers for r in (ans.get('images') or {}).get('rows', [])) \
+            and not image_bindings:
+        # Workflows that DO bind docker inputs, an image set that came back empty, and no values file
+        # to read: the mode could not run. Named and counted, because a check that could not run is
+        # not a check that passed, and exit 0 here would read as "no images involved".
+        print('\nIMAGE ANSWER INCOMPLETE — ' + str(sum(1 for ans in answers
+              for r in (ans.get('images') or {}).get('rows', []) if r['inputs']))
+              + ' docker input(s) are bound by the reached workflows and NONE could be resolved: '
+              + img_src['json_reason'] + '. The image set this change forces is not known to this '
+              'run, which is why it does not exit 0.', file=sys.stderr)
+        rc = 2
     if unknown:
         print(f'\nUNKNOWN TARGETS — {len(unknown)} of the {len(a.target)} name(s) given are not in '
               f'{root}: ' + ', '.join(repr(u) for u in unknown) + '. The block(s) above are real '
