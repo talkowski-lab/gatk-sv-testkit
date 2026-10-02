@@ -62,7 +62,7 @@ scripts that echo the resolved command line.
 | You type | It runs | Free? |
 |---|---|---|
 | `gsvtk locate` / `tools` / `doctor [--redact]` / `repo` / `version` | the config layer and `command -v`, nothing else | free |
-| `gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]` | `checks/wdl_gate.sh`, `checks/svshell_contract_check.py`, `checks/svshell_jq_plumbing_scan.py`, and with the two opt-in flags `checks/wdl_semantics.py` and `checks/wdl_reach.py` | free, offline |
+| `gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]` | `checks/wdl_gate.sh`, `checks/svshell_contract_check.py`, `checks/svshell_jq_plumbing_scan.py`, and with the two opt-in flags `checks/wdl_semantics.py` and `checks/wdl_reach.py` | free, offline. `--reach` needs at least one `--wf NAME`, which IS the target: `wdl_reach` answers one named file/workflow/task/script at a time and has no default target, so `--reach` alone is refused as a usage error before any checker runs. With no `--repo`, the tree both opt-in checkers scan is `GSVTK_GATK_SV_CHECKOUT` from the resolver -- the same source `svshell_contract_check.py` already used |
 | `gsvtk check image <run_in_image\|svshell_image_check\|jar_flag_probe> ...` | `checks/image-check/*.sh` | **boots a GCE VM**: `--dry-run` is free, the probe needs `--confirm` |
 | `gsvtk build <branch> [image ...]` | `docker/gatk-sv-build.sh --check` then `--dry-run` | free — this default *is* the preview |
 | `gsvtk build <branch> [image ...] --confirm` | `docker/gatk-sv-build.sh <branch> [image ...]` | **VM + registry push** |

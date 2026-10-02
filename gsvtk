@@ -306,24 +306,47 @@ cmd_tools() {
 # wdl_gate.sh, --repo to the python checkers, --compare-to to the jq plumbing scan, and handing one
 # tool another tool's flag is an argparse error that reads like a broken checker.
 #   check [<ref>] [--wf NAME ...] [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]
+#   (--reach also needs at least one --wf NAME: it is the target, see below.)
 cmd_check() {
   stamp
   if [ -z "${MINIWDL:-}" ] && wdlbin="$(miniwdl_bin)"; then MINIWDL="$wdlbin"; export MINIWDL; fi
-  ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0
+  ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0; reach_targets=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --wf)         wfargs+=(--wf "${2:?--wf needs a workflow name}"); shift 2;;
+      --wf)         wfargs+=(--wf "${2:?--wf needs a workflow name}")
+                    reach_targets+=("${2:?--wf needs a workflow name}"); shift 2;;
       --strict)     wfargs+=(--strict); shift;;
       --repo)       pyargs=(--repo "${2:?--repo needs a directory}"); shift 2;;
       --compare-to) compare_to="${2:?--compare-to needs a ref}"; shift 2;;
       --semantics)  want_sem=1; shift;;
       --reach)      want_reach=1; shift;;
-      -*)           die "check: unknown flag $1 (usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach])";;
+      -*)           die "check: unknown flag $1 (usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]; --reach needs at least one --wf NAME)";;
       *)            ref="$1"; shift;;
     esac
   done
   cd "$ROOT" || die "cd failed"
   rc=0
+  # The tree the two opt-in checkers read has ONE source: the resolver. `svshell_contract_check.py`
+  # resolves GATK_SV_CHECKOUT itself, but `wdl_semantics.py` and `wdl_reach.py` refuse without a tree --
+  # so `gsvtk check --semantics` used to ask for a scan and get `name a tree: --dir DIR` back, because
+  # pyargs was empty unless the caller happened to type --repo. Ask the resolver (CONTRIBUTING: one
+  # resolver, one precedence chain) instead of teaching this file a second one; if it answers empty,
+  # pass nothing and let the tool's own sentence be the answer.
+  if [ ${#pyargs[@]} -eq 0 ]; then
+    ck="$(cfg GATK_SV_CHECKOUT)"
+    [ -n "$ck" ] && pyargs=(--repo "$ck")
+  fi
+  # A reach answer is about a NAMED file/workflow/task/script, and `wdl_reach.py` has no default target
+  # by design -- so `--reach` with no `--wf` could only ever print that tool's "name both a tree and a
+  # target" usage and exit, which is what made the flag look broken. Refuse it here, as a usage error,
+  # BEFORE any checker runs: inventing a target would answer a question nobody asked, and answering it
+  # about the wrong file is worse than not answering.
+  if [ "$want_reach" = 1 ] && [ ${#reach_targets[@]} -eq 0 ]; then
+    die "check --reach needs a target: pass --wf NAME (repeatable), e.g.
+  ./gsvtk check --reach --wf GenotypeBatch
+  wdl_reach answers one named file, workflow, task or script at a time; there is no default
+  target, because a reach answer about the wrong file is worse than no answer."
+  fi
   if [ -n "$ref" ]; then
     printf '\n=== wdl_gate.sh %s ===\n' "$ref"
     bash checks/wdl_gate.sh ${wfargs[@]+"${wfargs[@]}"} "$ref" || rc=1
@@ -354,8 +377,14 @@ cmd_check() {
     "$PY" checks/wdl_semantics.py ${pyargs[@]+"${pyargs[@]}"} || rc=1
   fi
   if [ "$want_reach" = 1 ]; then
-    printf '\n=== wdl_reach.py ===\n'
-    "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} || rc=1
+    # One invocation per target: `--target` is a single name (a union of same-named nodes, but one
+    # name), and the tool reloads the tree per run -- ~35 s on a whole gatk-sv tree, which is exactly
+    # why the names come from the caller and are never guessed here. Each answer states the tree it
+    # scanned (`tree: DIR files=N ...`), so the provenance travels with the answer.
+    for t in "${reach_targets[@]}"; do
+      printf '\n=== wdl_reach.py %s ===\n' "$t"
+      "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} --target "$t" || rc=1
+    done
   fi
   return $rc
 }
@@ -909,6 +938,8 @@ gsvtk <command> — the gatk-sv-testkit command line
   doctor [--redact]         what is configured / missing (values hidden with --redact)
   tools                     which of the four loops can run on this machine right now
   check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]
+            (--reach answers a reach question about a NAMED workflow, so it needs --wf NAME; the tree
+             it scans defaults to GSVTK_GATK_SV_CHECKOUT, and so does --semantics)
                             the static checks (WDL launchability, sv_shell JSON contract,
                             jq plumbing; --semantics/--reach add the two tree-wide checkers)
   check image <run_in_image|svshell_image_check|jar_flag_probe> ...

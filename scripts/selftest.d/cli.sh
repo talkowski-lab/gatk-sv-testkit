@@ -408,8 +408,10 @@ else
         -- run check base-ref --wf SVShell --strict --repo /tmp
     absent 'the two tree-wide checkers are opt-in, not in the default set' \
         0 'STUB checks/wdl_semantics.py' -- run check base-ref
-    expect 'they run when asked for' 0 'STUB checks/wdl_semantics.py --repo /tmp' \
-        'STUB checks/wdl_reach.py --repo /tmp' -- run check base-ref --semantics --reach --repo /tmp
+    expect 'they run when asked for, and reach gets the --target its own usage demands' 0 \
+        'STUB checks/wdl_semantics.py --repo /tmp' \
+        'STUB checks/wdl_reach.py --repo /tmp --target SVShell' \
+        -- run check base-ref --semantics --reach --wf SVShell --repo /tmp
     expect 'an unknown check flag is refused, not forwarded to someone who would misread it' 2 \
         'check: unknown flag --wfdf' -- run check base-ref --wfdf
     expect "a checker's findings come back as exit 1, not 0 (findings are not a verdict)" 1 \
@@ -418,6 +420,66 @@ else
     expect 'no ref given: wdl_gate is skipped and the CLI SAYS so (never a silent pass)' 0 \
         'no ref given: skipping wdl_gate' -- run check
 fi
+
+# ------------------------------------------------------------------ check --reach / --semantics
+# This section exists because of a real bug: `check --reach` could never answer. wdl_reach.py requires
+# a target (`--target`, one name) and the CLI forwarded only the tree, so the flag printed that tool's
+# `name both a tree and a target` usage and exited 2, every time, on every machine. `--semantics` had
+# the sibling defect: it refuses without a tree, and pyargs was empty unless the caller happened to
+# type --repo.
+#
+# The assertion that used to cover this read `STUB checks/wdl_reach.py --repo /tmp` and PASSED -- it
+# pinned the broken argument list, because an echo-based dispatch test proves which file ran and
+# nothing about whether that file could act on the flags it was handed. So the first assertion below
+# runs the REAL parser on a real two-file tree with NO stub in the path.
+if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
+    mkdir -p "$TMP/reach-tree"
+    printf 'version 1.0\nworkflow Foo {\n  call Bar\n}\ntask Bar {\n  command <<< echo hi >>>\n}\n' \
+        > "$TMP/reach-tree/Foo.wdl"
+    real_reach() {
+        local out rc
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+                 bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo 2>&1)"; rc=$?
+        # 0 or 1: on a two-node tree svshell_contract_check has nothing to compare, and the CLI reports
+        # that as findings-not-a-verdict. What may NOT happen is the reach tool answering with its own
+        # usage line -- that is the defect, and rc would have been 1 either way.
+        if [ "$rc" -gt 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
+        if ! printf '%s\n' "$out" | grep -qF 'target: Foo.wdl::Foo [workflow]'; then
+            printf 'no reach answer in:\n%s\n' "$out"; return 1
+        fi
+        if ! printf '%s\n' "$out" | grep -qF 'calls task Bar at Foo.wdl:3'; then
+            printf 'answer carries no edge provenance:\n%s\n' "$out"; return 1
+        fi
+        if printf '%s\n' "$out" | grep -qF 'name both a tree and a target'; then
+            printf 'the tool refused instead of answering:\n%s\n' "$out"; return 1
+        fi
+        return 0
+    }
+    check 'REAL composition, no stub anywhere: check --reach answers the question it advertises' \
+        real_reach
+else
+    skipped "reach-real" "miniwdl absent: the reach answer needs the WDL module, so the composition proof cannot run (a SKIP here is not a pass in CI)"
+fi
+
+expect 'a target is FORWARDED: --wf NAME becomes wdl_reach --target NAME' 0 \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch' \
+    -- run check --reach --repo /tmp --wf GenotypeBatch
+expect 'two names are two answers, not one name silently dropped' 0 \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch' \
+    'STUB checks/wdl_reach.py --repo /tmp --target MakeCohortVcf' \
+    -- run check --reach --repo /tmp --wf GenotypeBatch --wf MakeCohortVcf
+expect 'and --reach with no target is a usage error, stated as one' 2 \
+    'check --reach needs a target: pass --wf NAME' -- run check --reach
+absent 'refused BEFORE any checker ran (a usage error must not spend a scan)' 2 \
+    'STUB checks/svshell_contract_check.py' -- run check --reach
+# The tree the opt-in checkers read comes from the resolver, not from the caller remembering --repo.
+expect 'with no --repo, the tree is what the resolver says, so --semantics can answer' 0 \
+    'STUB checks/wdl_semantics.py --repo /tmp/resolved-checkout' \
+    -- env GSVTK_GATK_SV_CHECKOUT=/tmp/resolved-checkout GSVTK_CONFIG="$TMP/empty.env" \
+        GSVTK_WORK="$TMP/work" GSVTK_TERRA_PY="$PYABS" bash "$CLI" check --semantics
+absent 'and an UNRESOLVED checkout does not become a silent scan of the cwd' 0 \
+    'STUB checks/wdl_semantics.py --repo' -- env GSVTK_GATK_SV_CHECKOUT= GSVTK_CONFIG="$TMP/empty.env" \
+        GSVTK_WORK="$TMP/work" GSVTK_TERRA_PY="$PYABS" bash "$CLI" check --semantics
 
 echo
 echo "selftest: cli: the replay preflight measures java, the jar and the disk"
