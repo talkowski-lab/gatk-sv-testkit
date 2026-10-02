@@ -318,13 +318,15 @@ cmd_check() {
                    printf '%s\n' ''
                    printf '%s\n' '  <ref>            run wdl_gate.sh against that ref (its per-ref count is the output)'
                    printf '%s\n' '  --wf NAME        workflow(s) to gate; repeatable. With --reach, NAME is also the'
-                   printf '%s\n' '                   reach target -- one answer per name, so --reach needs at least one'
+                   printf '%s\n' '                   reach target -- every name is answered, by ONE wdl_reach run'
+                   printf '%s\n' '                   (one tree load), so --reach needs at least one'
                    printf '%s\n' '  --strict         gate: treat warnings as findings'
                    printf '%s\n' '  --repo DIR       tree the python checkers read (default: GSVTK_GATK_SV_CHECKOUT)'
                    printf '%s\n' '  --compare-to REF jq plumbing scan: fail only on nulls this ref introduced'
                    printf '%s\n' '  --semantics      wdl_semantics.py (tree-wide, opt-in: it is slow, not free)'
-                   printf '%s\n' '  --reach          wdl_reach.py per --wf NAME: what that name reaches (--reverse is'
-                   printf '%s\n' '                   not exposed here; run the tool directly for that)'
+                   printf '%s\n' '  --reach          wdl_reach.py over the tree, once, answering every --wf NAME:'
+                   printf '%s\n' '                   what that name reaches (--reverse is not exposed here; run the'
+                   printf '%s\n' '                   tool directly for that)'
                    printf '%s\n' ''
                    printf '%s\n' 'Exit codes: 0 clean, 1 a checker reported findings (findings are not a verdict),'
                    printf '%s\n' '          2 usage error (nothing ran), 3 a prerequisite is missing.'
@@ -360,8 +362,9 @@ cmd_check() {
   if [ "$want_reach" = 1 ] && [ ${#reach_targets[@]} -eq 0 ]; then
     die "check --reach needs a target: pass --wf NAME (repeatable), e.g.
   ./gsvtk check --reach --wf GenotypeBatch
-  wdl_reach answers one named file, workflow, task or script at a time; there is no default
-  target, because a reach answer about the wrong file is worse than no answer."
+  wdl_reach has no default target: it answers NAMED files, workflows, tasks and scripts, one
+  answer per --wf NAME from a single tree load. There is no default target, because a reach
+  answer about the wrong file is worse than no answer."
   fi
   if [ -n "$ref" ]; then
     printf '\n=== wdl_gate.sh %s ===\n' "$ref"
@@ -393,14 +396,20 @@ cmd_check() {
     "$PY" checks/wdl_semantics.py ${pyargs[@]+"${pyargs[@]}"} || rc=1
   fi
   if [ "$want_reach" = 1 ]; then
-    # One invocation per target: `--target` is a single name (a union of same-named nodes, but one
-    # name), and the tool reloads the tree per run -- ~35 s on a whole gatk-sv tree, which is exactly
-    # why the names come from the caller and are never guessed here. Each answer states the tree it
-    # scanned (`tree: DIR files=N ...`), so the provenance travels with the answer.
-    for t in "${reach_targets[@]}"; do
-      printf '\n=== wdl_reach.py %s ===\n' "$t"
-      "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} --target "$t" || rc=1
+    # ONE invocation for every name. `wdl_reach.py` takes `--target` repeatedly and answers each name
+    # from a single tree load, and the load is the whole cost (~35 s on a gatk-sv tree, per name when
+    # each name got its own process). The tool prints its own `tree:` provenance line once and then one
+    # answer block per target in the order asked, so provenance still travels with the answers, and an
+    # unknown name is reported by name (exit 2) without swallowing the others. The banner lists every
+    # target rather than naming one and implying the rest were not asked.
+    reach_names=""; reach_flags=()
+    for t in ${reach_targets[@]+"${reach_targets[@]}"}; do
+      reach_names="${reach_names:+$reach_names, }$t"
+      reach_flags+=(--target "$t")
     done
+    printf '\n=== wdl_reach.py %s ===\n' "$reach_names"
+    "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} \
+      ${reach_flags[@]+"${reach_flags[@]}"} || rc=1
   fi
   return $rc
 }
