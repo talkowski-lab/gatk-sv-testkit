@@ -240,6 +240,7 @@ smoke:
 selftest:
 	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
 	@$(SHELL) scripts/selftest.d/cli.sh "$(PYTHON)"   # the ./gsvtk entry point, own tally
+	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)" # rerun any step of the batch chain, own tally
 
 lint: syntax
 
