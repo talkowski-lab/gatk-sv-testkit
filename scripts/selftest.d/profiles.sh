@@ -120,6 +120,15 @@ for e in sys.argv[3:]:
         for k in list(outs):
             if k.endswith("." + old):
                 outs[k[:-len(old)] + new] = outs.pop(k).replace("this." + old, "this." + new)
+    elif field == "export":                               # a JSON value for the LAST step's `export`
+        doc["steps"][-1]["export"] = json.loads(value)
+    elif field == "export_strip":                          # no `export` anywhere in the profile
+        step = doc["steps"][-1]
+        step.pop("export", None)
+        # `_why_export` goes with it. Rule 6's pairing is enforced, so a stripped `export` and a kept
+        # rationale refuse for the ORPHAN reason -- a different claim, and the one that would make the
+        # no-export refusal below assert the wrong sentence.
+        step.pop("_why_export", None)
 json.dump(doc, open(dst, "w"), indent=2)
 PY
 }
@@ -139,7 +148,7 @@ want "an unknown schema_version refuses rather than parsing anyway" 4 \
 want "a missing module exits 4, names the file, and lists every field in full" 4 \
     "is missing" "profiles/copynumber.json" "schema_version" "callers" "steps" \
     "step " "wdl " "workflow" "rootEntityType" "inputs" "outputs" "branch_only_inputs" \
-    "_why_" -- \
+    "bare new-side attribute names" "_why_" -- \
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/work" GSVTK_MODULE=copynumber \
     "$PY" terra/batch_configs.py show
 
@@ -247,37 +256,48 @@ else
     ok=$((ok + 1)); printf '  ok    and the scratch directory it could have created is still absent\n'
 fi
 
-# 11. The fetch loop's export list, and the one attribute the profile says the chain also writes.
+# 11. The export list: the data relationship, and whether the shell obeys the data.
 #
-# `terra/batch_fetch_compare.sh` still carries its fetched-attribute list as literals (the last item of
-# docs/module-profiles.md §9 step 4 that this lane could not collapse: `export` is not a profile field --
-# §3 rule 5 -- so `kit/module_profile.py` refuses it as `unknown field 'export'`, and the data for it is
-# not in profiles/genotyping.json either). What ships here is the GUARD, so that the literal can be
-# replaced by data in one safe move later: it compares the names the script plans to fetch, read off its
-# own `fetch --dry-run` output, with the attributes the module profile says the chain writes.
+# Two assertions in one numbered block, because they answer two different questions and the second one is
+# what makes the first worth reading:
 #
-# `fetch --dry-run` touches no Terra and no bucket: it prints the plan and returns (the entity read is
-# behind `if [ "$DRY_RUN" -eq 1 ]`), which is what makes this assertion machine-independent. It needs no
-# dependency either -- no firecloud, no miniwdl, no checkout -- so unlike most of `make selftest` it has
-# no SKIP branch at all: it either runs or the phase fails.
+#   THE GUARD (`export-guard.py`) pins the DATA: the 7 attributes `fetch` demands against the attributes
+#   the profile says the chain writes, delta stated as a fact rather than smoothed over.
+#   THE PROBE (`export-data.py`) pins the WIRING: `fetch` asks `kit/module_profile.py` for `steps[].export`
+#   and plans what it is told, so a second module needs a profile rather than a shell edit
+#   (docs/gap-ledger.md A21, docs/module-profiles.md §9 step 4).
 #
-# The delta is stated, not smoothed over. Measured here, at this commit:
-#   * derived from the profile -- terminal step's `this.*` outputs, `_index` siblings excluded because §3
-#     rule 4 makes index closure a code rule -- 8 names;
-#   * fetched as REQUIRED by the script: 7 names;
-#   * the one difference: `regeno_coverage_medians`, which the script lists as OPTIONAL.
-# That difference is the finding. "Required" is the script's exit code (`fetch incomplete: N required
-# *<new> attribute(s) not set yet` and `return 1`), so deriving the list from the terminal step's outputs
-# would make every baseline whose chain never wrote `regeno_coverage_medians` fail a fetch that succeeds
-# today. That question needs a real run in hand, not a refactor whose promise was "collapse, don't
-# duplicate", so the literal stays and §9 step 4 names the schema field that would let it go.
+# Reverting `terra/batch_fetch_compare.sh` to the version that owned the list literally leaves THE GUARD
+# GREEN -- its 7 literals still agree with the profile's 8 non-index outputs, which is the whole story it
+# ever told -- and fails THE PROBE on four of its five checks. That asymmetry is why the probe exists: a
+# guard that cannot notice a shell ignoring its data is a check on the data only, and the change made here
+# is a change to the shell. Falsified that way before it was trusted; see the probe's docstring.
+#
+# `fetch --dry-run` touches no Terra, no bucket and no dependency (the entity read sits behind
+# `if [ "$DRY_RUN" -eq 1 ]`), so neither of these has a SKIP branch: no firecloud, no miniwdl, no
+# checkout, no network. It either runs or the phase fails.
+#
+# The delta the guard states, measured at this commit:
+#   * what the terminal step's `this.*` outputs give -- `_index` siblings excluded, because §3 rule 4 makes
+#     index closure a code rule -- 8 names;
+#   * what `export` holds and the script demands: 7 names;
+#   * the one difference: `regeno_coverage_medians`, written by the step and listed OPTIONAL by the script.
+# Promoting it was asked and REJECTED: "required" is the script's exit code (`fetch incomplete: N required
+# *<new> attribute(s) not set yet` → `return 1`), so a required attribute that some chain never wrote
+# turns every such baseline into a fetch that exits 1 where it passes today. That is a product decision
+# with a money-path consequence, to be taken with a real run in hand -- and §9 step 4 and the profile's
+# `_why_export` both carry the number so nobody re-derives it.
 cat > "$TMP/export-guard.py" <<'PY'
-"""The fetch loop's export list vs the attributes the module profile says the chain writes.
+"""The export list the fetch plans vs the attributes the module profile says the chain writes.
 
 Both sides are read, never typed: the script's list comes from its own dry-run plan, the chain's from
 `kit/module_profile.load()` (so `GSVTK_MODULE_DIR` moves the derived side, which is how the control below
 breaks it). The suffix that turns an attribute into a workspace attribute name comes from the one
 resolver both languages use, `module_profile.suffixes()`.
+
+What this does NOT check is on purpose: it never asks whether the shell read `export`. That is
+`export-data.py`'s job, and merging them would hide the case that matters -- a shell that still plans a
+list it typed itself would satisfy every assertion here.
 """
 import os
 import subprocess
@@ -381,14 +401,184 @@ want "the fetch loop's 7 required attributes agree with what the module profile 
     "export-list guard: 6 ok, 0 failed" "regeno_coverage_medians is derived-and-optional" -- \
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/guardwork" \
     "$PY" "$TMP/export-guard.py" "$ROOT" "$TMP/guardwork"
-# CONTROL, and the reason the agreement above is a claim about the data rather than a paraphrase of the
-# script: rename one terminal-step output IN THE PROFILE and the derived side moves while the script's
-# literals cannot. On hand-typed-equality code nothing would change; here the guard fails by name.
+# CONTROL, and the reason the agreement above is a claim about the DATA rather than a tautology: rename
+# one terminal-step output IN THE PROFILE and the `outputs` side moves, while the `export` list -- separate
+# data, which the loader deliberately does NOT recompute from `outputs` -- cannot follow. The guard fails by
+# name, on both sides of the delta. If the loader did derive `export` from `outputs`, this control could
+# not fail; that is a large part of why the loader does not.
 broken rename_output rename_output=genotyping_pe_table:genotyping_pe_table_v2
 want "CONTROL: renaming a terminal-step output in the profile breaks the export-list guard, by name" 1 \
     "FAIL" "genotyping_pe_table_v2" "export-list guard: " -- \
     env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/guardwork2" GSVTK_MODULE_DIR="$TMP/mod-rename_output" \
     "$PY" "$TMP/export-guard.py" "$ROOT" "$TMP/guardwork2"
+
+# 11b. The same list, the other question: does the shell OBEY the field?
+#
+# This probe is the positive control for the change that made `export` a field. It edits a TEMPORARY copy
+# of the profile -- the tracked file is never opened for writing -- and requires the plan to move.
+cat > "$TMP/export-data.py" <<'PY'
+"""Does `fetch` plan what `export` says? The positive control for the list-as-data change.
+
+Five checks, all about the WIRING rather than the data, because the guard above cannot see any of them:
+
+  1. `fetch --dry-run`'s required plan IS the profile's `export` list -- same names, same order -- so the
+     script holds no copy of the list it fetches.
+  2. `fetch --dry-run` PRINTS what it derived and names the field it came from, because a plan you cannot
+     read is a plan you cannot check.
+  3. Rename one name in `export` in a temp profile and the plan names the new attribute and stops naming
+     the old one. This is what makes check 1 a claim about behaviour rather than a paraphrase.
+  4. Strip `export` from every step and `fetch` REFUSES nonzero and prints no required download line at
+     all. An empty plan that exits 0 is this repo's named failure class.
+  5. ... and the refusal says WHERE it looked: the field, and every step it was looked for on.
+
+FALSIFIED against the consumer, not the data. With `terra/batch_fetch_compare.sh` restored to the version
+that typed the seven names, the guard above still prints "export-list guard: 6 ok, 0 failed" -- those seven
+literals agree with the profile's eight non-index outputs, and that is all it ever looked at -- while FOUR
+of the five checks here FAIL: 2 (no provenance line), 3 (the plan does not move when the field moves), 4 (a
+profile with no `export` still plans seven downloads and exits 0) and 5 (no refusal text exists). Check 1
+PASSES there, and that is the finding worth keeping: seven hand-typed names in the right order agree with
+seven names in a field, so agreement ALONE certifies nothing -- 3, 4 and 5 are the checks that say whether
+the shell is asking. The measurement is in the message of the commit that added this probe.
+"""
+import json
+import os
+import subprocess
+import sys
+
+ROOT, WORK = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(ROOT, "kit"))
+import module_profile                                          # noqa: E402  (kit/ is a sys.path entry)
+
+SFX = module_profile.suffixes()["new"]
+OPTIONAL_PLAN = "fetched only if the config exports it"
+FROM, TO = "genotyping_pe_table", "genotyping_pe_table_v2"
+bad, good = [], []
+
+
+def check(cond, desc, detail=""):
+    (good if cond else bad).append(desc)
+    print(("  ok    " if cond else "  FAIL  ") + desc + (("  <%s>" % detail) if detail else ""))
+
+
+def plan(module_dir="", work=WORK):
+    """(rc, required names in plan order, combined output) from `fetch --dry-run`.
+
+    The required lines are read structurally -- a `[plan] <attr><suffix>:` line that is not an optional
+    one -- rather than by matching the `gsutil` string, so the check does not quietly depend on what the
+    operator's $GSUTIL happens to be. Dry-run never executes a download either way.
+    """
+    env = dict(os.environ)
+    env.update({"GSVTK_WORK": work, "GSVTK_PYTHON": sys.executable, "TERRA_PY": sys.executable,
+                # the offline belt this phase's sibling rerun.sh uses: an escaped request is a refused
+                # connection here, never a call to Terra
+                "GSVTK_TERRA_API_ROOT": "http://127.0.0.1:9/api/"})
+    if module_dir:
+        env["GSVTK_MODULE_DIR"] = module_dir
+    r = subprocess.run(["bash", "terra/batch_fetch_compare.sh", "fetch", "--dry-run"], cwd=ROOT,
+                       env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       universal_newlines=True)
+    req = []
+    for line in r.stdout.splitlines():
+        body = line.strip()
+        if not body.startswith("[plan] "):
+            continue
+        name = body[len("[plan] "):].split(":", 1)[0].strip()
+        if not name.endswith(SFX) or OPTIONAL_PLAN in body:
+            continue
+        req.append(name[:-len(SFX)])
+    return r.returncode, req, r.stdout
+
+
+def variant(tag, mutate):
+    """A copy of the tracked profile in a temp MODULE_DIR, with `export` edited. Never the tracked file."""
+    d = os.path.join(WORK, "mod-" + tag)
+    os.makedirs(d, exist_ok=True)
+    doc = json.load(open(os.path.join(ROOT, "profiles", "genotyping.json")))
+    mutate(doc["steps"][-1], doc)
+    json.dump(doc, open(os.path.join(d, "genotyping.json"), "w"), indent=2)
+    return d
+
+
+os.chdir(ROOT)
+reader = module_profile.load()
+reader.require("export-data probe")
+exported = reader.require_exports("export-data probe")
+
+rc, req, out = plan()
+check(rc == 0 and req == exported,
+      "the required plan IS the profile's `export` list, same names in the same order "
+      "(the script holds no copy of it: order is fetch order, so order is asserted too)",
+      "exit %s, planned %s, export %s" % (rc, req, exported))
+check("[export]" in out and "steps[].export" in out and ("%d required attribute(s)" % len(exported)) in out,
+      "and fetch prints the list it derived, how many it derived, and which field it came from",
+      "no [export] provenance line" if "[export]" not in out else "")
+
+
+def rename(step, _doc):
+    step["export"] = [TO if a == FROM else a for a in step["export"]]
+
+
+rc2, req2, _o2 = plan(variant("rename", rename))
+check(rc2 == 0 and TO in req2 and FROM not in req2 and len(req2) == len(exported),
+      "CONTROL: renaming one name in `export` in a TEMP profile renames what the shell plans -- the old "
+      "name is gone from the plan, not merely joined by a new one",
+      "exit %s, planned %s" % (rc2, req2))
+
+
+def strip(step, _doc):
+    step.pop("export", None)
+    # `_why_export` goes with it: rule 6's pairing is enforced, so a kept rationale would refuse for the
+    # ORPHAN reason, which is a different (already-pinned) claim and would let this check pass on the
+    # wrong sentence.
+    step.pop("_why_export", None)
+
+
+rc3, req3, out3 = plan(variant("strip", strip))
+check(rc3 != 0 and not req3,
+      "CONTROL: a profile with no `export` makes fetch exit nonzero and plan NOT ONE download "
+      "(an empty plan that exits 0 would write an empty MANIFEST and call the run clean)",
+      "exit %s, %d required line(s)" % (rc3, len(req3)))
+check("exports nothing" in out3 and "was looked for on" in out3
+      and "06-GenerateBatchMetrics" in out3 and "10-GenotypeBatch" in out3,
+      "and the refusal names the profile, the field, and EVERY step it looked for `export` on",
+      "refusal text missing steps or field")
+
+print("export-data control: %d ok, %d failed  (the data guard cannot see one of these)"
+      % (len(good), len(bad)))
+sys.exit(1 if bad else 0)
+PY
+want "fetch plans exactly the profile's export list, and a temp profile's export list moves the plan" 0 \
+    "export-data control: 5 ok, 0 failed" 'CONTROL: renaming one name in `export`' -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/datawork" \
+    "$PY" "$TMP/export-data.py" "$ROOT" "$TMP/datawork"
+# The same refusal at the shell's own door, needles and exit code asserted rather than inferred from the
+# probe: exit 4 is the config layer's "a value you need is not there", kept distinct from the generic 1.
+broken export_strip export_strip=x
+want "a profile with no export field: fetch refuses with 4, names every step it looked on, plans nothing" 4 \
+    "exports nothing" 'steps `export` was looked for on' "06-GenerateBatchMetrics" "10-GenotypeBatch" \
+    "Refusing" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/stripwork" GSVTK_MODULE_DIR="$TMP/mod-export_strip" \
+    bash terra/batch_fetch_compare.sh fetch --dry-run
+
+# 11c. `export`'s shape, refused by name like every other field in this schema. The three that a real
+# author reaches for: pasting a `this.x{new}` value out of `outputs` (that is a PATH, §3 rule 3, and it
+# would ask the entity for an attribute no workspace holds), an empty list (a step nobody fetches from
+# leaves the field out -- an empty list is the named failure class), and a duplicate (fetches twice).
+broken export_path export='["this.genotyped_pesr_vcf{new}"]'
+want "an export entry copied out of the outputs map refuses: it is a path, not an attribute name" 4 \
+    "export[0]" "a path, not an attribute name" "this.genotyped_pesr_vcf{new}" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/work" GSVTK_MODULE_DIR="$TMP/mod-export_path" \
+    "$PY" kit/module_profile.py --print-exports
+broken export_empty export='[]'
+want "an empty export list refuses rather than reporting a step that fetches nothing" 4 \
+    '`export` is an empty list' "refuses out loud" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/work" GSVTK_MODULE_DIR="$TMP/mod-export_empty" \
+    "$PY" kit/module_profile.py --print-exports
+broken export_dup export='["genotyped_pesr_vcf", "genotyped_pesr_vcf"]'
+want "a name listed twice in export refuses, naming the index and the name" 4 \
+    "export[1]" "genotyped_pesr_vcf" "already listed" -- \
+    env GSVTK_CONFIG="$FIXTURE" GSVTK_WORK="$TMP/work" GSVTK_MODULE_DIR="$TMP/mod-export_dup" \
+    "$PY" kit/module_profile.py --print-exports
 
 # 12. `fetch_baseline.py`: a baseline that skipped a step must not read like a baseline that had none.
 #
