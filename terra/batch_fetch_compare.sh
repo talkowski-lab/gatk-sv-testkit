@@ -33,11 +33,16 @@
 # that module requires confirm=True, which is never passed here.
 #
 # Attributes fetched (each suffixed with $NW at read time):
-#   genotyped_pesr_vcf, genotyped_depth_vcf,
-#   genotyping_rd_depth_table, genotyping_rd_pesr_table, genotyping_pe_table,
-#   genotyping_sr_table, genotyping_sr_cutoff_diagnostics
-#   (+ optional genotyped_{pesr,depth}_vcf_index siblings when exported; otherwise the
-#    profile stage indexes locally with `bcftools index -t`)
+#   The REQUIRED list is profile data, not literals in this file: `steps[].export` in
+#   profiles/<MODULE>.json, asked of `kit/module_profile.py --print-exports` at the top of `fetch`
+#   (load_required_attrs). That is the whole point -- a second module needs a profile, not a shell edit
+#   (docs/gap-ledger.md A21) -- and bash never opens profiles/*.json for the same reason it does not
+#   resolve its own suffixes here: docs/module-profiles.md §10's two-expander rule. A profile with no
+#   `export` REFUSES the fetch (exit 4, naming every step the field was looked for on) rather than
+#   planning zero downloads and exiting 0.
+#   The OPTIONAL list stays in this file: see OPTIONAL_ATTRS for why those 10 names are a different
+#   question from `export`. Optional index siblings, when exported, are used; otherwise the profile
+#   stage indexes locally with `bcftools index -t`.
 #
 # -----------------------------------------------------------------------------
 # WHY THE BASELINE SIDE IS READ FROM work/staging/ (not from Terra)
@@ -135,17 +140,24 @@ LABEL_B=${LABEL_B:-$(gsvtk_default BRANCH new)}
 COMPARE_TABLES=${COMPARE_TABLES:-$ROOT/compare/compare_batch_tables.py}
 TABLE_PY=${TABLE_PY:-${GSVTK_PYTHON:-python3}}
 
-# chain outputs to fetch; the $NW suffix is appended at read time.
-# L1/L2 (the genotyping layer) are REQUIRED; the L3 filter/metrics surface and the QC
-# side-files are OPTIONAL so a partial chain still yields what exists.
-REQUIRED_ATTRS=(genotyped_pesr_vcf genotyped_depth_vcf \
-                genotyping_rd_depth_table genotyping_rd_pesr_table \
-                genotyping_pe_table genotyping_sr_table \
-                genotyping_sr_cutoff_diagnostics)
+# The REQUIRED fetch list is DATA, held by the module profile as `steps[].export`, and read from there
+# by load_required_attrs() -- this file holds no copy of those names. The $NW suffix is appended at read
+# time, and L1/L2 (the genotyping layer) are the names that must exist for a comparison to mean anything.
+#
+# OPTIONAL_ATTRS stays here, deliberately. These are the L3 filter/metrics surface, the QC side-files
+# and the two `_index` siblings: fetched when the workspace has them, never demanded, and §3 rule 4 makes
+# index closure a code rule so an index is never itself a required fetch. `export` carries the names whose
+# ABSENCE is an error -- putting one of these in it would change this script's exit code for every
+# baseline whose chain never wrote that attribute, which is a product decision with a money-path
+# consequence. It was asked and rejected; docs/module-profiles.md §9 step 4 keeps the measurement (the
+# terminal step writes 10 attributes, 8 non-index, 7 are demanded, the delta is regeno_coverage_medians)
+# so nobody re-litigates it from scratch. Data-ising this list needs a second, tolerant field -- not
+# `export`.
 OPTIONAL_ATTRS=(genotyped_pesr_vcf_index genotyped_depth_vcf_index \
                 cutoffs scores metrics metrics_file_batchmetrics \
                 ploidy_table filtered_batch_samples_file outlier_samples_excluded_file \
                 regeno_coverage_medians)
+REQUIRED_ATTRS=()          # filled from the profile by load_required_attrs, never by a literal here
 
 DRY_RUN=0
 FORCE=0
@@ -247,6 +259,35 @@ EOF
 }
 
 # ================================ fetch =====================================
+# The required attribute list comes from the module profile, through the one Python reader (see the
+# header note: bash does not read profiles/*.json, any more than it expands {frz}/{new} itself).
+#
+# The refusal is the reason this is a function and not one line. If `steps[].export` were missing and the
+# list came back empty, the loop below would run zero times, MANIFEST.json would be written empty, and
+# `fetch` would exit 0 -- an empty that reads like nothing was wrong, which is this repo's named failure
+# class. So the reader's refusal passes through as exit 4 (its own number: "a value you need is not
+# there", the same 4 `kit/gsvtk-config require` prints, not the generic 1), and the empty-but-exited-0
+# case is refused again here so the property holds even if a future reader gets quieter.
+load_required_attrs() {
+    local names line
+    if ! names=$("$GSVTK_PYTHON" "$ROOT/kit/module_profile.py" --print-exports); then
+        echo "batch_fetch_compare.sh fetch: no attribute list, so nothing would be fetched and the" >&2
+        echo "  command would still report a clean plan. Refusing. The refusal above names the profile," >&2
+        echo "  the module, and every step the export field was looked for on." >&2
+        exit 4
+    fi
+    REQUIRED_ATTRS=()
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        REQUIRED_ATTRS[${#REQUIRED_ATTRS[@]}]="$line"
+    done <<<"$names"
+    if [ ${#REQUIRED_ATTRS[@]} -eq 0 ]; then
+        echo "batch_fetch_compare.sh fetch: the profile reader exited 0 and named no attribute, which" >&2
+        echo "  is the same empty answer refused above. Refusing." >&2
+        exit 4
+    fi
+}
+
 fetch_attrs_tsv() {
   # Read-only entity read through terra/terra.py (entity_sample -> Rawls
   # get_entities_query). No mutating call anywhere; confirm=True is never passed.
@@ -294,6 +335,10 @@ PY
 
 do_fetch() {
   echo "== fetch: $NS/$WS  $ETYPE:$ENTITY  (*${NW} attributes only)"
+  load_required_attrs
+  # What was derived, from where, in the order it will be fetched in. A plan nobody can read is a plan
+  # nobody can check, and the export-list guard in scripts/selftest.d/profiles.sh reads exactly this.
+  echo "  [export] ${#REQUIRED_ATTRS[@]} required attribute(s), from steps[].export in the module profile: ${REQUIRED_ATTRS[*]}"
   run mkdir -p "$OUTPUTS"
   fetch_attrs_tsv
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -304,7 +349,7 @@ do_fetch() {
   fi
 
   local attr name url dest rsize lsize sha size missing=0
-  for attr in "${REQUIRED_ATTRS[@]}"; do
+  for attr in ${REQUIRED_ATTRS[@]+"${REQUIRED_ATTRS[@]}"}; do
     name="${attr}${NW}"
     url=""
     [ "$DRY_RUN" -eq 1 ] || url=$(attr_url "$name")
