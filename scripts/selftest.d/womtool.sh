@@ -657,6 +657,15 @@ else
     skipped=$((skipped + 2))
 fi
 
+# The default --wf list is the only thing between "gsvtk check <ref>" and "gsvtk check --wf <the one
+# workflow that broke>". IntegrateGDVcf is the workflow that actually regressed in gatk-sv PR #966, so
+# the list has to name it. An offline --tree run prints exactly one row per default name (each ABSENT,
+# because the fixture tree holds a Widget), which is how the list is read here with no checkout, no
+# network and no jar -- and it is read from the gate's own output rather than from grepping its source,
+# so a rename in either place moves this assertion.
+want "the default set names the workflow that really regressed (PR #966), so a bare check can catch it" 1 \
+    "IntegrateGDVcf" "ABSENT at" -- gate_nojar --tree "$TMP/wdl-fix"
+
 printf '\nwomtool selftest: %s passed, %s failed, %s skipped (a SKIP here is not a pass in CI)\n' \
     "$ok" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1

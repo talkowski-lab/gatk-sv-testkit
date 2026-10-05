@@ -119,9 +119,15 @@ if [ ${#REFS[@]} -eq 0 ]; then
     [ -n "${GSVTK_BRANCH:-}" ] && REFS+=("$GSVTK_BRANCH")
 fi
 # The single-sample and batch entrypoints plus the two WDLs that churn most: enough to
-# catch a broken call binding without checking all ~120 files.
+# catch a broken call binding without checking all ~120 files. IntegrateGDVcf is named here for a
+# different reason than the other four: it is the workflow that ACTUALLY broke in gatk-sv PR #966 --
+# a required input no CI input JSON bound, which miniwdl cannot see and which is the whole reason this
+# gate grew an input layer. A default set that omits the thing which really regressed can only catch it
+# when someone remembers to type `--wf`, and "remember the flag" is not a guard. Measured cost of the
+# fifth name on origin/main: none (45.3 s vs 45.1 s -- the per-workflow miniwdl call is not what the run
+# spends its time on), and it keeps origin/main green (MISSING-INPUTS 0, EXTRA-KEYS clean).
 if [ ${#WFS[@]} -eq 0 ]; then
-    WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)
+    WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf IntegrateGDVcf)
 fi
 
 if [ ! -x "$MINIWDL" ] && ! command -v "$MINIWDL" >/dev/null 2>&1; then
