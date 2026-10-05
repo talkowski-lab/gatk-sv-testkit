@@ -4,11 +4,14 @@
 > **Status: revision 3 — §9 steps 1, 2 and 3 are shipped; step 4 is part-shipped and step 5 is a written
 > refusal.** The proposal is now partly a description of this checkout: `profiles/genotyping.json`
 > exists, `kit/module_profile.py` is its only reader, `batch_configs.py`'s maps are read from it, `check`
-> reads upstream's `.json.tmpl` files, and the three duplicate step→workflow maps are gone — `terra/steps.py`
-> is the one reader and it derives the map and the per-step root entity from the profile. What still does
-> not exist is the rest of §9 step 4's literal list (the fetch loop's export list, guarded but not
-> derived; the jar-probe target+flags, in another lane's files) and any second module: §9 step 5 has been
-> graded against this tree and **both** candidates fail it, with the wrong schema field named for each.
+> reads upstream's `.json.tmpl` files, the three duplicate step→workflow maps are gone — `terra/steps.py`
+> is the one reader and it derives the map and the per-step root entity from the profile — and the fetch
+> loop's export list is profile data too: `export` is a per-step field (§3 rule 5, §9 step 4's closed
+> bullet), so `batch_fetch_compare.sh` holds no copy of the names it demands. What still does not exist is
+> the rest of §9 step 4's literal list (the jar-probe target+flags, in another lane's files; the fetch
+> loop's 10 *optional* names, which stay in the shell for the reason §9 step 4 states) and any second
+> module: §9 step 5 has been graded against this tree and **both** candidates fail it, with the wrong
+> schema field named for each.
 > So those sections stay proposal, and every command in a `PROPOSED` block below still names a flag or
 > file that is not here — CONTRIBUTING's "never document a flag you did not run" still decides what is
 > fenced and what is not.
@@ -56,7 +59,7 @@ code, in more places than revision 1 admitted.
 | `terra/batch_check_inputs.py:42` `WDLS` | step→workflow map: **copy 1 of 3** |
 | `terra/batch_save_metadata.py:36` `STEPS` | step→workflow map: copy 2 of 3 |
 | `terra/batch_status.py:27` `STEPS` | the 5-step chain: copy 3 of 3 (revising a claim made in rev 1: `batch_status.py` *does* hardcode the genotyping chain) |
-| `terra/batch_fetch_compare.sh:141-148` (its header names 5 of the 7 at `:36-39`) | the exported-attribute list: **7** required + 10 optional names, and the largest concentration of genotyping literals after `batch_configs.py`. Still a literal (no `export` field exists to hold it: §9 step 4 names the schema change), and now guarded — `scripts/selftest.d/profiles.sh` compares it against the attributes the profile says the chain writes |
+| `terra/batch_fetch_compare.sh:156-159` `OPTIONAL_ATTRS` | ~~the exported-attribute list: **7** required + 10 optional names, the largest concentration of genotyping literals after `batch_configs.py`~~ — **the 7 required names are gone from this file.** They are `steps[].export` in `profiles/genotyping.json` (`:162-170`), asked of `kit/module_profile.py --print-exports` by `load_required_attrs()` (`:271`); that closed §9 step 4's last foldable item and docs/gap-ledger.md A21. What is transcribed here now is the **10 optional** names, and why they stay is written beside them: `export` carries the names whose *absence* is an error, and moving one of these into it would change the script's exit code (§9 step 4's rejected promotion). Guarded twice — `profiles.sh`'s export-list guard pins the data relationship with the delta stated, its `export-data` probe changes `export` in a temp profile and requires the plan to move |
 | `terra/batch_rerun_step.py` | `CONFIG = "10-GenotypeBatch-rerun"`, `ETYPE = "sample_set"`, the `GenotypeBatch.` key prefix, `body("10-GenotypeBatch")` |
 | `terra/stage_inputs.py:10,346` | `genotyped_depth_vcf` inside a generic tool's *help and error text* |
 | `checks/wdl_gate.sh:61` | `WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)` |
@@ -176,11 +179,19 @@ Nine rules, most of them review-derived:
    unfreezing 8 `_index` sidecars, and `batch_freeze.py:84-95` records the real incident where two
    attributes collapsing to one frozen object made "every head-to-head after it compare against
    partly wrong inputs". A per-module author must not get to re-create that by omission.
-5. **`export` is the target-attribute mapping (name → `this.<attr>` + suffix), not a restatement of
-   the WDL's outputs.** The forbidden list in rev 1 banned "output names a WDL declares" while
-   `export_attrs` was exactly that list, and `jar_probe.image` was a docker image name. Banned
-   instead: the *set* of declared/required input names, WDL defaults, image **URIs/tags**, workflow
-   existence: all of which the ref answers.
+5. **`export` is what a downstream tool FETCHES, not a restatement of the WDL's outputs.** The forbidden
+   list in rev 1 banned "output names a WDL declares" while `export_attrs` was exactly that list, and
+   `jar_probe.image` was a docker image name. Banned instead: the *set* of declared/required input names,
+   WDL defaults, image **URIs/tags**, workflow existence: all of which the ref answers. **As shipped:**
+   `export` is in `STEP_FIELDS` as a per-step **list of bare attribute names** — not the
+   `name → this.<attr>{new}` mapping the sketch above implied, because `outputs` already carries the path
+   and the suffix and a second copy of them is a second thing to drift. Non-empty when present; a path, a
+   `@`, a token, a blank or a duplicate each refuses by index (§9 step 4's bullet gives the measurement,
+   the 10-vs-8-vs-7 counts, and the rejected promotion). Two things it is not, both in the loader's
+   docstring: it is **not** `outputs` — `outputs` is what a step writes, `export` is what someone
+   downstream demands, they differ today by `regeno_coverage_medians`, and the loader does not compare
+   them because the guard that compares them must be able to fail — and it is **not** a promise the
+   attribute is in a workspace, which no reader here can know.
 6. **`_why_*` siblings carry the rationale, and `check_profiles.py` enforces the pairing.** JSON has
    no comments, and this repo already solved that: `replay/images.example.json:2-7` is load-bearing
    *because* of its `_about` / `_why_explicit` / `_gatk_note` pseudo-keys. Rev 1 said "no comments"
@@ -453,9 +464,10 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    tool's `--control` mode asserts the untouched capture **passes**, then deletes one input binding from
    step 06 and one output binding from step 10 out of a copy of the table and requires the comparison to
    **fail** both times — and `scripts/selftest.d/profiles.sh` asserts that control every run
-   (`profiles selftest: 18 ok, 0 failed` — 15 when this sentence was written; 16 after the export-list
+   (`profiles selftest: 23 ok, 0 failed` — 15 when this sentence was written; 16 after the export-list
    guard, 17 after its control, 18 after the `fetch_baseline` counted-gap guard, which carries ten
-   assertions of its own inside one tally line). The golden is *not* retired yet, as this step's original text
+   assertions of its own inside one tally line; 23 after `export` shipped, five of them the new
+   `export-data` probe that proves the shell follows the field and three the field's shape refusals). The golden is *not* retired yet, as this step's original text
    imagined: it stays while `CONFIGS` is populated from data, because it is the only content check the
    loader has. **Merge note:** the rerun lane holds `scripts/selftest.d/golden/rerun-step10-body.json`
    (2473 bytes) captured from the same placeholder coordinates (`your-namespace` /
@@ -505,7 +517,8 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    the genotyping chain cannot produce them.
 4. **Collapse, don't duplicate.** Delete the **three** step→workflow copies
    (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`) into one reader fed
-   by the module, and fold in `batch_fetch_compare.sh`'s export list (7 names),
+   by the module, and fold in `batch_fetch_compare.sh`'s export list (7 names — **done: that is the
+   `export` field, and §9 step 4's bullet on it is closed with the 10-vs-8-vs-7 measurement in it**),
    `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path, `build_inputs.py`'s `SVShell.` prefix
    (**done, and by a different route than this step assumed**: the prefix is not folded into a profile
    read, it is read out of the WDL document the caller already passed — see §1's row for that file),
@@ -536,7 +549,7 @@ changes, each named before the work starts. **Both candidates fail, and they fai
 No `profiles/traingcnv.json` or `profiles/cpx.json` was written by this decision, and none should be
 until the named fields exist.
 
-**`TrainGCNV` — 5 named changes, so the schema is wrong.** What the data actually is: the cohort
+**`TrainGCNV` — 4 named changes (5 while `export` did not exist), so the schema is wrong.** What the data actually is: the cohort
 template binds **53** keys, of which **39** are literals/`null` (typed, per §3 rule 3), **11** are
 `workspace.*`, and only **3** are `this.*` — two of them over a member collection,
 `TrainGCNV.count_files ← ${this.samples.coverage_counts}` and `TrainGCNV.samples ←
@@ -556,9 +569,12 @@ The changes, each one place:
 2. `kit/module_profile.py` + the profile — `freeze` is not in `STEP_FIELDS`, and §3's rule 7 wants it as
    objects that *name their entity path*. Without it the profile cannot state which member entity feeds
    which input, so change 1 has nothing to read.
-3. `kit/module_profile.py` + the profile — `export` (same blocker as §9 step 4's first bullet): nothing
+3. ~~`kit/module_profile.py` + the profile — `export` (same blocker as §9 step 4's first bullet): nothing
    declares which attributes a fetch should pull for this module, and the fetch loop's list is
-   genotyping's.
+   genotyping's.~~ **Closed while this decision stood: `export` shipped (§9 step 4's closed bullet), and for
+   a second module it is data rather than a change** — a TrainGCNV profile writes its own `export` names
+   and `batch_fetch_compare.sh` reads them, no shell edit. The count is 4, not 5; the verdict does not
+   move, because the test is two.
 4. `kit/module_profile.py` + the profile — `compare` (§3 rule 8) is not in the schema either, and
    `batch_fetch_compare.sh`'s `table` stage hardcodes one tool
    (`COMPARE_TABLES=$ROOT/compare/compare_batch_tables.py`) for one module's seven roles.
@@ -583,9 +599,12 @@ can open a tar".
 it writes — is the field this candidate needs and the schema does not have, and it is the one that cannot
 be worked around in data, because the freeze loop physically emits one row for one `sample_set`. (Changes
 3 and 4 are `export` and `compare`, and they are the same two fields step 4's first bullet names; change 5
-is code, not schema.)
+is code, not schema. **Aged by half while this page was unreviewed: `export` shipped (§9 step 4), so of
+that pair only `compare` is still missing, and change 3 is a profile a second module writes rather than a
+change to this repo.**)
 
-**The CPX pair (`ResolveComplexVariants` + `RefineComplexVariants`) — 5 named changes, and a different
+**The CPX pair (`ResolveComplexVariants` + `RefineComplexVariants`) — 4 named changes (5 while `export`
+did not exist), and a different
 field is wrong.** Measured from their two cohort templates: **26** keys bound (14 + 12), **2** literals,
 **10** `workspace.*`, and **12** `this.*` reads — of which **8** are member-collection reads over
 `this.sample_sets.*` (`disc_files`, `rf_cutoff_files`, `batch_name_list`, `batch_sample_lists`,
@@ -613,7 +632,8 @@ That is **six distinct producers** for a two-workflow chain — `GatherBatchEvid
 ("a 2-workflow CPX chain draws on ≥6 upstream producers") is confirmed rather than aged, and §9 step 5's
 claim stands. Its named changes: member-entity freeze (same `batch_freeze.py` gap, this time writing on
 every row of the *member* entity those `this.sample_sets.*` reads point at — §3 rule 7's other half); a
-field naming out-of-chain producers, plus the freeze-scope code that would read it; `export`; `compare`;
+field naming out-of-chain producers, plus the freeze-scope code that would read it; ~~`export`~~ (**shipped
+since this was written — §9 step 4 — so it is a profile's data here, not a change**); `compare`;
 and the same driver. **Wrong field: `steps`
 itself** — it is chain-shaped, and there is no field anywhere in the schema that can say "this chain
 consumes artifacts produced by six workflows that are not in it", which is the exact thing §2 said the
@@ -623,7 +643,8 @@ profile would have to be able to say. A profile that omitted them would still lo
 **What this decides.** Step 5 stays closed. Shipping either module now would mean shipping a profile
 whose inputs point at attributes no loop can freeze — §11 q3's "read and ignored" failure, one floor up.
 The two fields to add before any second module are `freeze` (§3's rule 7 object) and a producer field on
-the chain; `export` and `compare` are needed for the fetch/compare halves and are already named in step 4.
+the chain; of the fetch/compare pair, `export` has since shipped (§9 step 4's closed bullet) and `compare`
+is still only named in step 4.
 
 **Where this leaves the migration.** Steps 1-3 are built and gated (`scripts/selftest.d/profiles.sh`,
 `probe_fixes.py`'s two new probes, and the golden). **Step 4 is partly built, and its shape changed while
@@ -637,34 +658,58 @@ tables, and `rerun.sh` pins the agreement step by step *plus* the control that a
 shows up in the map (that control fails on the literals, which is what makes the agreement check a claim
 about one source rather than a tautology).
 
-Still open in step 4, one bullet per item, each saying what is actually blocking it:
+Step 4's items, one bullet per item: the first is **closed**, the rest say what is actually blocking them:
 
-* **`terra/batch_fetch_compare.sh`'s export list (7 required + 10 optional names): still a literal, and
-  the blocker is a schema field that does not exist, not work left undone.** §3 rule 5's `export` is the
-  field meant to hold it; `kit/module_profile.py` does not have it — `STEP_FIELDS` is
-  `step, wdl, workflow, rootEntityType, inputs, outputs, branch_only_inputs`, so a profile carrying
-  `export` is refused (measured: `unknown field 'export'`, exit 4). And no field that *does* exist
-  reproduces the seven, which is the thing to know before adding one: the terminal step's outputs are
-  **10** attributes, **8** once §3 rule 4's `_index` siblings are excluded, and the fetched 7 are those 8
-  minus **`regeno_coverage_medians`** — which the script lists as OPTIONAL. So deriving the list from the
-  profile as it stands would promote that one attribute to *required*, and "required" is the script's
-  exit code (`fetch incomplete: N required *<new> attribute(s) not set yet` → `return 1`): every baseline
-  whose chain never wrote `regeno_coverage_medians` would start failing a fetch that passes today. That
-  is a question to ask with a real run in hand, so it was **asked and rejected** rather than settled
-  inside a refactor whose promise was "collapse, don't duplicate".
+* **`terra/batch_fetch_compare.sh`'s export list: CLOSED — the field landed and the seven names are data
+  now.** ~~still a literal, and the blocker is a schema field that does not exist, not work left
+  undone.~~ `export` is in `STEP_FIELDS` as a per-step **list of bare attribute names** (not the
+  `name → this.<attr>{new}` mapping §3's sketch implied — `outputs` already carries the path and the
+  suffix, and a second copy of them is a second thing to drift), `profiles/genotyping.json` carries the
+  seven on `10-GenotypeBatch` (`:162-170`), and `batch_fetch_compare.sh` asks
+  `kit/module_profile.py --print-exports` for them — flat output, one name per line, the way bash already
+  asks the config layer for its suffixes, so the repo still has exactly one JSON parser and one expander
+  (§10). Shape refuses by name like every other field: a non-list, an empty list, a blank, a duplicate, or
+  a `this.x{new}` value pasted out of `outputs` (that is a PATH, §3 rule 3, and it would ask the entity for
+  an attribute no workspace holds) each exits 4 naming `export[i]`.
 
-  What ships instead is the guard that makes the eventual swap checkable:
-  `scripts/selftest.d/profiles.sh`'s export-list probe runs `terra/batch_fetch_compare.sh fetch
-  --dry-run` — which touches no Terra, no bucket and no dependency, so it has no SKIP branch — and asserts
-  the 7 and the 10 against the attributes the profile says the chain writes, **stating the one-name delta
-  as a fact instead of pretending the sets are equal**. Falsified from both sides: renaming a
-  terminal-step output *in the profile* fails 2 of its 6 assertions; making the rejected promotion (move
-  `regeno_coverage_medians` into the required list) fails 3; renaming a required name to an attribute no
-  step writes fails 2. **To finish this item in one move:** add `export` to `STEP_FIELDS` and to the
-  `Loaded` surface in `kit/module_profile.py`, give `profiles/genotyping.json` its per-step `export`
-  names, and read them in `batch_fetch_compare.sh` the way the suffixes are already read. That probe is
-  what tells the author whether the change kept the seven names — do not re-derive it, and do not
-  re-litigate the promotion without a run that shows whether the attribute is always written.
+  **The measurement that is why the field is not simply `outputs`, unchanged by this change:** the terminal
+  step writes **10** attributes, **8** once §3 rule 4's `_index` siblings are excluded, and **7** are
+  demanded — the delta being **`regeno_coverage_medians`**, which the script lists as OPTIONAL. The
+  promotion that delta invites was **asked and REJECTED**: “required” is the script's exit code
+  (`fetch incomplete: N required *<new> attribute(s) not set yet` → `return 1`), so requiring an attribute
+  some chain never wrote turns every such baseline into a fetch that exits 1 where it passes today. That is
+  a product decision with a money-path consequence, to be taken with a real run in hand — not a refactor
+  detail, and not this lane's call. The counts are in the profile's `_why_export` as well, so the next
+  reader meets them beside the data instead of rediscovering them, and the loader deliberately does NOT
+  compare `export` with `outputs`: that comparison is the guard below, and an equality test inside the
+  loader would leave the guard unable to fail.
+
+  **Behaviour-preserving by construction, and measured:** `fetch --dry-run` against the same `$GSVTK_WORK`
+  differs from the pre-change output by exactly one added line — `[export] 7 required attribute(s), from
+  steps[].export in the module profile: …` — plus the same seven names in the same order; fetch order is
+  profile order now. The cost is one more Python invocation per `fetch`: measured median **0.880 s →
+  1.00 s** on `fetch --dry-run` (n=9 per try, two tries each), and that +0.12 s is the call measured on its
+  own — 0.09–0.12 s — against the **eight** interpreter starts the same run already makes
+  (`kit/config.sh`'s `env` load, six `gsvtk_default` reads, one `gsvtk work`). ≈14 % of the time to preview
+  a download of hundred-MB objects: noise, recorded rather than argued.
+
+  **Two checks now, and they check different things.** The guard (`export-guard.py`) pins the DATA: the 7
+  against the attributes the profile says the chain writes, **stating the one-name delta as a fact instead
+  of pretending the sets are equal**, its 6 assertions unchanged and still falsified from both sides
+  (renaming a terminal-step output in the profile fails 2; the rejected promotion fails 3; a required name
+  no step writes fails 2). The probe (`export-data.py`) pins the WIRING: the plan IS `export` in profile
+  order, fetch prints what it derived and from which field, renaming one name in a **temporary** profile
+  moves the plan and takes the old name out of it, and stripping `export` makes `fetch` exit nonzero while
+  planning not one download. Reverting the shell to the version that typed the names leaves the guard
+  printing “6 ok, 0 failed” — seven literals agree with eight non-index outputs, which is all it ever read
+  — and fails 4 of the probe's 5 checks; check 1 (agreement) passes there, and that is the finding worth
+  keeping, because a hand-typed list agrees with a data list, so agreement alone certifies nothing.
+  `profiles selftest: 18 ok → 23 ok`.
+
+  **Still open here, unchanged by the field:** the 10 OPTIONAL names stay a shell literal, because `export`
+  carries the names whose absence is an error and those ten do not — data-ising them needs a second,
+  tolerant field, not this one — and the `table`/compare half is `compare` (§3 rule 8), still not in the
+  schema.
 * **the jar-probe target+flags: STILL OPEN, deliberately not touched here, and located differently than
   the hand-off note for this lane said.** The three flags are at
   `checks/image-check/jar_flag_probe.sh:52` and `checks/image-check/svshell_image_check.sh:148` (`for f
