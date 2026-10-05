@@ -1,9 +1,11 @@
 # Plan: launching modules outside the batch-chain steps 06-10
 
-Status: **revision 2, after adversarial review.** Revision 1's two load-bearing technical claims were both
-falsified by measurement, by me as well as by the reviewer; the corrected derivations are below, each with
-the command that reproduces it. Nothing here is implemented. Stage D spends money and is not authorized by
-this document.
+Status: **revision 3, after three adversarial charters** (derivation, repo rules, money). Revision 2's two
+load-bearing technical claims were falsified by measurement and replaced with things that measure; revision
+3 then absorbed the money charter, which found that the plan had asserted a guard (`submit` refuses an
+unpinned image) that the shipped code does not apply on the path that spends money, and had a cross-check
+whose population was five configs out of twenty-nine. Two of its findings were bugs in shipped code and are
+fixed, not planned. Nothing here is implemented. Stage D spends money and is not authorized by this document.
 
 ## What review found in revision 1
 
@@ -42,7 +44,7 @@ as `UNRESOLVED` with a reason instead of being guessed. The stage sequence survi
 | Upstream's renderer covers workflows outside the chain | **holds** | `inputs/templates/test/` holds 31 per-workflow template dirs; `build_default_inputs.sh` renders the single-sample one twice, plus 29 Terra configs |
 | The renderer supplies launch *values* | **dead** | its Terra half is a placeholder map (`${workspace.*}` / `${this.*}`) that womtool refuses to evaluate, and its test half resolves to another lab's sample: `gs://fc-…` workspace-bucket paths, and 14 `*_docker` bindings including a personal dev image |
 | Attribute names have no upstream home | **dead** | `inputs/templates/terra_workspaces/{cohort_mode,single_sample}/workspace.tsv.tmpl` are the rows Terra imports as workspace attributes |
-| Most launch-time values are workspace attributes, not file values | **holds** | 91 `${this.*}`/`${workspace.*}` placeholders in the 148-binding single-sample config; the 131/147 figure is specifically about image bindings and is labeled as such here |
+| Most launch-time values are workspace attributes, not file values | **holds** | the single-sample launch template measures **112 raw / 111 distinct** binding lines, of which the overwhelming majority are `${this.*}`/`${workspace.*}`; the 131/147 figure is specifically about image bindings and is labeled as such here |
 | Dockstore keys on workflow *name*, not path | **holds** | unchanged |
 
 The name-key rule is the replacement, and it is testable offline against a tree from `git archive`: for
@@ -70,10 +72,28 @@ WDL at the ref: declared inputs, optionality, struct shapes, call graph - the ha
 Entity type: the name key, refusing on zero or many. Also refuse when a workflow's config is absent from
 the corpus at that ref, naming the path looked in.
 
-One guard exists specifically because a plausible wrong entity is a silent wrong answer: the derived type
-must be compared against the profile's `rootEntityType` where a profile exists, and a disagreement is a
-plan-time error. `steps.py` refuses to fall back to `sample_set` for the same reason; the deriver inherits
-that, it does not replace it.
+A plausible wrong entity is a silent wrong answer, so revision 2's cross-check - compare against the
+profile's `rootEntityType` **where a profile exists** - was measured and found nearly empty: `ls profiles/`
+is one file carrying five steps, so that check covers exactly the five configs that already launch and says
+nothing about the ~24 it was built for. Worse, the refusal branch is measured empty on the corpus that
+matters: of the 31 config templates upstream ships, the 2 that give zero name keys are both
+`output_configurations/*` write-back files that could never be submitted, so "refuse on zero or many" has a
+0-of-29 hit rate on launchable configs. That is the same defect revision 2 indicts revision 1 for.
+
+What decides instead, and it needs no credentials:
+
+- the derived `<etype>` must be the type of a **shipped entity table** at that ref - a file whose first
+  column is `entity:<etype>_id` or `membership:<etype>_id` - and every `${this.<attr>}` the config reads
+  must be a column of that table. Anything else is `UNRESOLVED`. The single-sample flavor answers this
+  today: `sample.tsv.tmpl` is `entity:sample_id bam_or_cram_file bam_or_cram_index participant
+  case_stripy_file`, and that config's only four `${this.*}` reads are a subset of it, while
+  `participant.tsv.tmpl` carries a name key only. This is a second source that exists for all 29 configs,
+  not five, and it is independent of the deriver.
+- before any submission, the named row must be confirmed to exist under the derived type with the
+  read-only `terra.entity_sample()` that already ships. Nothing on a launch path calls it today.
+
+`terra/steps.py` refuses to fall back to `sample_set` for the same reason; the deriver inherits that, it
+does not replace it.
 
 Tests: offline fixtures per shape - one name key, no name key, two name keys, member reads from a different
 collection than the name key (the `MergeBatchSites` shape, which is the trap), config absent. Named counted
@@ -125,10 +145,31 @@ launcher carries no step literals; the deletion target does not exist. What Stag
 - the empty-that-reads-as-clean guard (§9 step 4's second guard) applies to "this module has no config"
   too.
 
-No guard is weakened. The image-pinning refusal, `--confirm`, read-only mode, the shared-target guard and
-explicit `useCallCache: false` are tested in `scripts/selftest.d/rerun.sh` and `scripts/selftest.d/cli.sh`;
-Stage C must keep both phases green before any behavior moves, and the phases are named here so the claim
-is checkable rather than aspirational.
+No guard may be weakened - and revision 2 overstated the position, so state it as measured. Reviewer
+probes (every Terra entry point replaced by a raiser, zero requests attempted) found that **`submit()`
+calls none of the guards** the paragraph below used to claim it satisfied: the unpinned/untagged image
+refusal lives in `make_body()`/`create()`, and `terra.submit` POSTs a config **name**, so the server runs
+whatever body the workspace already holds under `NN-<Wf>-rerun` - possibly written by another branch, an
+earlier session, or another person. The measured pair was the same argv both ways: `--step 10 show`
+refuses with a byte-exact golden (`golden/rerun-step10-unpinned.txt`), `--step 10 submit --confirm`
+proceeds while printing `sv_base_mini_docker=UNPINNED`. The pin test is also a name-suffix test, so it is
+vacuous for a workflow with no `*_docker` input, and for the single-sample candidate only 2 of its 14
+container inputs have a profile name at all - the other 12 are reachable only via
+`--allow-unpinned-docker`, i.e. 12 workspace attributes.
+
+So Stage C adds, as a requirement rather than an assurance: **`submit` must build the body, read back the
+workspace copy with the read-only `terra.config_payload()`, and refuse before the POST unless the two agree
+field by field and every `*_docker` value in the body that will run is a quoted literal from `IMAGES`.**
+Equivalently, make `submit` a thin wrapper that runs `create` in the same invocation and refuses any config
+it did not write. `--confirm`, read-only mode, the shared-target guard and explicit `useCallCache: false`
+remain, and are tested in `scripts/selftest.d/rerun.sh` (44) and `scripts/selftest.d/cli.sh` (117); those
+phases are named so the claim is checkable.
+
+Two more money-path facts from the same probes, both now in scope: `create` on a name that already exists
+**overwrites** under one `--confirm` and logs `create ... HTTP 200`, so a non-chain launch must name the
+config it writes and refuse an existing name unless the operator repeats it; and `--entity "$ROW"` with
+`ROW` unset silently fell through to the workspace's default batch row, which is fixed on the shipped side
+(now refused, with a control proving a named row still passes).
 
 ## Stage D - prove it, cheapest first
 
@@ -136,8 +177,17 @@ is checkable rather than aspirational.
    already means "print the freeze plan" (it dispatches `batch_freeze.py plan`). Any new mode also has to
    be registered in the read-only whitelist and get its own refusal probe - "no POST of any kind" is a
    claim that needs the raiser/recorder test `rerun.sh` already uses, not a sentence.
-2. Diff that body against the hand-assembled PR #966 config, **committed first as a redacted golden JSON**
-   so the diff runs in a clean checkout. A comparison only the author can perform is not an acceptance test.
+2. Diff that body against the hand-assembled PR #966 config. Part of that oracle is real and reachable
+   (`docs/handoff/003-single-sample-blockers-pr966.md` names method config `01-SingleSample-mwfix` with 112
+   inputs, in workspace `...-mw-fix966`, and the gatk-sv worktree `wt/fix-ss-blocking` exists), but the body
+   itself lives only in a live workspace - this repo's golden directory holds no single-sample capture, and
+   `golden/README.md` forbids regenerating instead of re-capturing. So commit the golden **with its capture
+   provenance** (workspace, config name, date, command), and make the diff two-part: (i) structural, over
+   binding keys and symbolic bindings only, and (ii) an independent assertion on the two fields the golden
+   must not vouch for - that run was recorded with `useCallCache: true` and two personal dev image tags, so a
+   naive body-vs-golden diff fails precisely on the money fields, and the only way to make it green is to
+   normalize away the fields that decide what ran. Those two get asserted directly: `useCallCache` false, and
+   every `*_docker` a quoted tagged literal.
 3. Only then, with an explicit cost ceiling stated before submission: one real launch outside the chain,
    watched with the existing monitor, outputs fetched and compared. Acceptance is the run producing the
    expected entity output with inputs matching the plan, not the submission being accepted.
@@ -179,11 +229,24 @@ the gatk-sv checkout; any local copy of upstream input files.
 
 ## Review record
 
-Charters: money/blast radius, derivation claims, repo-rule and verifiability consistency. Outcomes:
-derivation **DOES-NOT-SURVIVE** (both criticals above), repo-rules **SURVIVES-WITH-CHANGES** (Stage B's
-value source, Stage C's nonexistent deletion, §9 step 5 not invoked, acceptance criteria not checkable in a
-clean checkout, `--plan` name collision). The money charter returned no findings - the agent had no shell
-and stalled - so it is re-run rather than counted as passing. Method caveat on the derivation review: its
-per-file content claims were read from the local checkout and re-verified here; its file *enumeration* came
-from a public GitHub API pinned to the same sha, which was outside the no-network instruction and is noted
-rather than hidden.
+Charters: money/blast radius, derivation claims, repo-rule and verifiability consistency. All three
+reported; none is counted as a pass without findings.
+
+- **derivation - DOES-NOT-SURVIVE.** Both load-bearing claims of revision 1 falsified; the name-key
+  replacement measured 28/28 single-answer and 5/5 agreement with the shipped profile.
+- **repo rules - SURVIVES-WITH-CHANGES.** Stage B resolved to another lab's test bundle while its acceptance
+  called that success; Stage C named a deletion of data that is already a profile; acceptance criteria that
+  only the author can run; `--plan` collided with `gsvtk terra plan`.
+- **money - DOES-NOT-SURVIVE.** `submit` runs none of the guards named above; the entity cross-check outside
+  the chain was the deriver comparing itself; and the cost ceiling was prose - `batch_cost.py` computes
+  VM-minutes after the fact from Cromwell metadata, and the CLI's own text says Terra has no per-workspace
+  budget cap. Anything in revision 2 that read as a bound on spend is a decision to be made, not a control
+  that exists.
+
+Two of the money charter's findings were bugs in shipped code and are fixed rather than planned: a
+`--check`/`--dry-run` token anywhere in the argument list skipped both the read-only refusal and the
+`--confirm` requirement (mode names now decide; three assertions pin it), and `--entity` with an empty value
+fell through to the workspace's default batch row (now refused). Its remaining findings are folded into
+Stages A, C and D above. Method note on the derivation review: content claims were read from the local
+checkout and re-verified by the author; file *enumeration* came from a public GitHub API pinned to the same
+sha, which was outside the no-network instruction and is recorded rather than hidden.
