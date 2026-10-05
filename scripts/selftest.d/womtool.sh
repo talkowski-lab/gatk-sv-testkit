@@ -13,6 +13,32 @@
 # the assertions for it: `01107996` makes that input optional, and a check that reports the bug must
 # report NOTHING at the fix.
 #
+# Both directions, and why the second one is allowed to block a run
+# ------------------------------------------------------------------
+# §10-§11 are the mirror question: a key the input JSON names that the WDL never declared, which is
+# womtool's `Unexpected input provided` and the second thing gatk-sv CI fails on. It is a hard finding in
+# the gate like the required half, and the licence for that is a measurement, not a preference: this
+# layer's expected-key set is a SUPERSET of `womtool inputs` for 109/109 workflows with a primary
+# callable at each of gatk-sv origin/main, 7fbf1171 and 01107996, so a key it calls extra is a key womtool
+# calls extra too -- it can under-report, it cannot invent a finding. The fixtures are the four legal
+# shapes it must keep quiet about (call-qualified task input, defaulted task input, flat struct member
+# path, unknown member inside a struct object) and the two bogus ones it must name; §11 pins the answer to
+# womtool's own captured words on the same input, including the one case where the two deliberately
+# disagree. Numbers, and the four under-reports that come with it: docs/static-checks.md.
+#
+# Fixtures this phase owns (none of them needs a checkout, a jar or a network to grade)
+# ------------------------------------------------------------------------------------
+#   scripts/selftest.d/fixtures/womtool/wdl/Extras.wdl          the four legal shapes, in one WDL
+#   .../womtool/clean/inputs/...                               those shapes only: extras=0
+#   .../womtool/extra/inputs/...                               the same plus two bogus keys, test + -t
+#   scripts/selftest.d/fixtures/jar/womtool84-extras-crosscheck.{wdl,inputs.json,validate.txt}
+#                          pair A of the cross-check: womtool-84's verbatim answer to one input, and the
+#                          one key it names in it
+#   .../jar/womtool84-shapematrix-flatmember.{inputs.json,validate.txt}
+#                          pair B: the pinned divergence, womtool's words on a flat struct member path
+#   .../jar/womtool84-validate-extra-key.txt                   pair C (already here): the same class of
+#                          key, captured off a REAL rendered gatk-sv input JSON at 01107996
+#
 # Why stubs, and what they are allowed to prove
 # ---------------------------------------------
 # **There is no womtool jar on this machine and this file must pass anyway**, offline, with no network
@@ -40,12 +66,14 @@ if [ ! -x "$PY" ] && [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 
 CHECK="$ROOT/checks/wdl_inputs_check.py"
 GATE="$ROOT/checks/wdl_gate.sh"
+FIXJ="$ROOT/scripts/selftest.d/fixtures/jar"          # verbatim womtool-84 stdout, shared with jarshape.sh
+FIXW="$ROOT/scripts/selftest.d/fixtures/womtool"     # the extra-key WDL and the two input trees beside it
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gsvtk-womtool.XXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"                 # physical: the stub compares paths against these
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
-ok=0; fail=0
+ok=0; fail=0; skipped=0
 
 # want DESC WANT_RC NEEDLE... -- CMD...
 # Exit code AND every needle, because a refusal and a crash can share an exit code, and a verdict you
@@ -78,6 +106,43 @@ canary() {
         ok=$((ok + 1)); printf '  ok    this file notices a failing command (canary)\n'
     else
         fail=$((fail + 1)); printf '  FAIL  the harness in %s is vacuous\n' "$0"
+    fi
+}
+
+# want_no DESC WANT_RC ABSENT... -- CMD...   ...and NONE of the ABSENT strings may appear ANYWHERE in
+# the output. Absence is the harder half of an extras check: "the bogus key was reported" is worthless
+# unless the four legal shapes were NOT, and a needle-only suite cannot say that.
+want_no() {
+    local desc="$1" wantrc="$2"; shift 2
+    local absent=() out rc hit="" n
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do absent=("${absent[@]-}" "$1"); shift; done
+    shift
+    out="$("$@" 2>&1)"; rc=$?
+    for n in "${absent[@]-}"; do
+        [ -n "$n" ] || continue
+        printf '%s' "$out" | grep -qF -- "$n" && hit="$hit
+          unexpectedly present: $n"
+    done
+    if [ "$rc" = "$wantrc" ] && [ -z "$hit" ]; then
+        ok=$((ok + 1)); printf '  ok    %s (exit %s)\n' "$desc" "$rc"
+    else
+        fail=$((fail + 1))
+        printf '  FAIL  %s (exit %s, want %s)%s\n' "$desc" "$rc" "$wantrc" "$hit"
+        printf '%s\n' "$out" | head -10 | sed 's/^/          /'
+    fi
+}
+
+# same DESC GOT WANT -- for answers that have to be COMPUTED from two sources and compared, which no
+# fixed-needle grep can express: "the key this layer names is the key womtool named" is that shape. The
+# non-empty test is part of the assertion: two empty strings agreeing is exactly the vacuous pass this
+# suite exists to refuse.
+same() {
+    local desc="$1" got="$2" wantv="$3"
+    if [ -n "$got" ] && [ "$got" = "$wantv" ]; then
+        ok=$((ok + 1)); printf '  ok    %s (%s)\n' "$desc" "$got"
+    else
+        fail=$((fail + 1))
+        printf '  FAIL  %s\n          got:  %s\n          want: %s\n' "$desc" "${got:-(nothing)}" "$wantv"
     fi
 }
 
@@ -386,6 +451,213 @@ want "a workflow absent from the tree is still a failure" 1 \
     "ABSENT at" "nothing was checked" -- \
     gate_nojar --tree "$TMP/wdl-bug" --inputs-root "$TMP/in-bug" --wf NotThere
 
-printf '\nwomtool selftest: %s passed, %s failed\n' "$ok" "$fail"
+# 10. THE OTHER DIRECTION: keys the input JSON names that the WDL never declared. This is the half the
+#     layer was blind to exactly as A12 was blind on the required side, and the fixtures are the four
+#     shapes that make it safe to let it block a run. They are checked-in files, not heredocs, because
+#     the same pair of files is also the cross-check against womtool's own words below (§11), and a
+#     capture has to be pinned to bytes somebody can re-run.
+#
+#     The clean tree binds a call-qualified task input (`Extras.MakeThing.cpu`), a DEFAULTED task input,
+#     a struct member path written flat (`Extras.attrs.cpu`), and a struct handed over as an object with
+#     an unknown member in it. A naive "is this key a declared workflow input?" test calls all four
+#     extras; on gatk-sv's own trees those four shapes are what 4 and 8 of the 77 CI-matched JSONs
+#     actually do, so a check that called them extras would be noise on every clean ref there is.
+FIX_BAD="$FIXW/extra/inputs/build/ref_panel_1kg/test/Extras/Extras.json"
+want "a call-qualified, defaulted or member-path key is not an extra" 0 \
+    "GSVTK-EXTRAS wf=Extras pairs=1 extras=0 status=OK" \
+    "GSVTK-INPUTS wf=Extras pairs=1 missing=0 status=OK" -- \
+    run --wdl-dir "$FIXW/wdl" --inputs-root "$FIXW/clean" --wf Extras
+
+#    The bogus ones, with the required half CLEAN in the same run: that is what makes the exit code here
+#    attributable to the extras half alone -- the same assertion on a tree that also has a missing input
+#    would pass for the wrong reason.
+want "a key no declaration names is a finding, with the required half clean" 1 \
+    "GSVTK-INPUTS wf=Extras pairs=2 missing=0 status=OK" \
+    "GSVTK-EXTRAS wf=Extras pairs=2 extras=2 status=FINDING" \
+    "EXTRA-KEY Extras.this_key_does_not_exist_in_the_wdl is named by 2 of 2 CI-matched input JSONs" \
+    "EXTRA-KEY Extras.MakeThing.cpua is named by 1 of 2 CI-matched input JSONs" -- \
+    run --wdl-dir "$FIXW/wdl" --inputs-root "$FIXW/extra" --wf Extras
+
+#    Per-pair attribution, not a union: the typo is in the test JSON only, the invented key in both, and
+#    the [test]/[terra] tags below each line are the only thing that tells a reader which file to edit.
+want "and each extra is attributed to the JSON that actually carries it" 1 \
+    "[terra] " "[test] " "Nearest declared key: Extras.MakeThing.cpu" \
+    "No declared key is close to it" -- \
+    run --wdl-dir "$FIXW/wdl" --inputs-root "$FIXW/extra" --wf Extras
+
+#    The -t half again, this time for the extras answer: dropping it must halve the PAIRS and still find
+#    both keys, in exactly one file each.
+want "--no-terra drops the Terra JSON from the extras answer too" 1 \
+    "GSVTK-EXTRAS wf=Extras pairs=1 extras=2 status=FINDING" \
+    "named by 1 of 1 CI-matched input JSON and" -- \
+    run --wdl-dir "$FIXW/wdl" --inputs-root "$FIXW/extra" --wf Extras --no-terra
+
+#    Presence, not values, holds on this half as much as the other: the same keys with every value
+#    replaced by a path that exists nowhere must give the same two findings.
+mkdir -p "$TMP/in-xvalues/inputs/build/ref_panel_1kg/test/Extras"
+env "${cfgenv[@]-}" "$PY" - "$FIX_BAD" \
+    "$TMP/in-xvalues/inputs/build/ref_panel_1kg/test/Extras/Extras.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+out = {k: ({"replaced": True} if isinstance(v, dict) else "gs://nowhere-at-all/x")
+       for k, v in doc.items()}
+json.dump(out, open(sys.argv[2], "w"), indent=2)
+PY
+want "values that differ change the extras answer not at all" 1 \
+    "GSVTK-EXTRAS wf=Extras pairs=1 extras=2 status=FINDING" \
+    "Extras.this_key_does_not_exist_in_the_wdl" "Extras.MakeThing.cpua" -- \
+    run --wdl-dir "$FIXW/wdl" --inputs-root "$TMP/in-xvalues" --wf Extras
+
+#    THE GATE, both halves of the column. Hard either way, like MISSING-INPUTS: an extra this layer names
+#    is an extra womtool names (the superset measurement in the module docstring), and CI is red on it,
+#    so a clean cell is the only passable answer and `clean` is spelled differently from a count on
+#    purpose -- the column beside it already answers a different question with bare numbers.
+want "the gate fails on extra keys alone: 2 extra, and the row says so" 1 \
+    "EXTRA-KEYS" "2 extra" "FAILED — 2 un-declared key(s) in 1 of 1 workflow(s)" "gate FAILED" \
+    "EXTRA-KEY Extras.this_key_does_not_exist_in_the_wdl" -- \
+    gate_nojar --tree "$FIXW/wdl" --inputs-root "$FIXW/extra" --wf Extras
+want "the control: clean in that column, a CLEAN row, and exit 0" 0 \
+    "clean" "CLEAN — 1 workflow(s)' input JSON name no key the WDL does not declare" \
+    "no hard errors" -- \
+    gate_nojar --tree "$FIXW/wdl" --inputs-root "$FIXW/clean" --wf Extras
+
+#    A prerequisite that stopped the layer must not read as `clean` here any more than it does in the
+#    WOMTOOL row: named, counted, and fatal under --strict.
+want "no input JSON to render: the extras column SKIPS by name and count" 0 \
+    "EXTRA-KEYS" "SKIPPED — 1 of 1 workflow(s): no extra-key answer was produced" \
+    "not answered clean" -- \
+    gate_nojar --tree "$FIXW/wdl" --wf Extras
+want "and --strict refuses to certify a skipped extras answer" 1 \
+    "EXTRA-KEYS" "SKIPPED — 1 of 1 workflow(s)" -- \
+    gate_nojar --strict --tree "$FIXW/wdl" --wf Extras
+want "CI's own blind spot is NOT-CHECKED here, never clean" 0 \
+    "NO-INPUT-JSON" "NOT-CHECKED" "had no comparable input JSON at this ref" -- \
+    gate_nojar --tree "$TMP/wdl-bug" --inputs-root "$TMP/in-empty" --wf Widget
+
+# 11. THE CROSS-CHECK: this layer's answer and womtool's own words, on ONE input file. The three fixture
+#     files are a real WDL, the input JSON beside it, and the VERBATIM `java -jar womtool-84.jar
+#     validate` answer for that pair (rc=1, one WARNING). On that same input womtool accepted a
+#     call-qualified task input, a defaulted one, and a struct object carrying an unknown member, and
+#     complained about exactly one key -- so this pair pins both directions at once: what it names, this
+#     layer must name; what it waved through, this layer must not invent.
+#
+#     TWO PAIRS, NOT 77, ON PURPOSE. Each pair is a JVM start (~1.2 s) and the 77-pair sweep over three
+#     refs was already run out of band (measure4: `pairs_with_'unexpected_input'=0` at every ref, in
+#     docs/static-checks.md); re-running it here would cost ~15 minutes of wall clock to say the same
+#     sentence. What generalises a two-pair pin is not the pair count, it is the measured relation
+#     between the two expected sets: this file's set is a SUPERSET of `womtool inputs` for 109/109
+#     workflows with a primary callable at all three refs, so any key this layer calls extra is a key
+#     womtool calls extra too, at any input. Pinned below against the captures (no java needed), and
+#     re-derived from a real jar where one exists -- with a named, counted skip where there is none.
+want "the extras fixtures are present to be graded" 0 "$FIX_BAD" -- \
+    env "${cfgenv[@]-}" "$PY" - "$FIX_BAD" "$FIXW/clean/inputs/build/ref_panel_1kg/test/Extras/Extras.json" \
+        "$FIXJ/womtool84-extras-crosscheck.validate.txt" "$FIXJ/womtool84-extras-crosscheck.wdl" \
+        "$FIXJ/womtool84-extras-crosscheck.inputs.json" \
+        "$FIXJ/womtool84-shapematrix-flatmember.validate.txt" \
+        "$FIXJ/womtool84-shapematrix-flatmember.inputs.json" <<'PY'
+import os, sys
+missing = [p for p in sys.argv[1:] if not os.path.isfile(p)]
+if missing:
+    print("MISSING " + " ".join(missing))
+    sys.exit(1)
+print(sys.argv[1])
+PY
+mkdir -p "$TMP/cross/tree" "$TMP/cross/in/inputs/build/ref_panel_1kg/test/CrossCheck"
+cp "$FIXJ/womtool84-extras-crosscheck.wdl" "$TMP/cross/tree/CrossCheck.wdl"
+cp "$FIXJ/womtool84-extras-crosscheck.inputs.json" \
+   "$TMP/cross/in/inputs/build/ref_panel_1kg/test/CrossCheck/CrossCheck.json"
+cc_theirs=$(sed -n 's/^WARNING: Unexpected input provided: \([A-Za-z0-9_.]*\).*/\1/p' \
+    "$FIXJ/womtool84-extras-crosscheck.validate.txt" | head -1)
+cc_ours=$(run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck 2>&1 \
+    | sed -n 's/^  EXTRA-KEY \([A-Za-z0-9_.]*\) is named by.*/\1/p' | head -1)
+same "offline (no jar) and captured womtool-84 name the same extra key" "$cc_ours" "$cc_theirs"
+want "and the answer quotes womtool's own sentence for that key" 1 \
+    "GSVTK-EXTRAS wf=CrossCheck pairs=1 extras=1 status=FINDING" \
+    "Unexpected input provided: CrossCheck.this_key_does_not_exist_at_all" -- \
+    run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck
+#    The same input through the four shapes womtool waved through on that very file: none of them may
+#    come back as an extra, or the finding above is worthless.
+want "the answer on that input names exactly one key, no more" 1 \
+    "GSVTK-EXTRAS wf=CrossCheck pairs=1 extras=1 status=FINDING" -- \
+    run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck
+want_no "a call-qualified or struct-member key is absent from the findings on that input" 1 \
+    "EXTRA-KEY CrossCheck.MakeThing.cpu " "EXTRA-KEY CrossCheck.MakeThing.threads " \
+    "EXTRA-KEY CrossCheck.attrs " "EXTRA-KEY CrossCheck.vcf " -- \
+    run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck
+
+# 11b. PAIR B OF THE CROSS-CHECK, and it is the pair that does not agree: the shape-matrix WDL with a
+#      struct member path written flat as its own key. womtool-84's captured words call that key
+#      unexpected; this layer calls it bound, because required_inputs() already accepts that spelling and
+#      a tool that called the same key bound in one half and extra in the other would be unreadable. That
+#      is a MEASURED UNDER-REPORT, pinned here so it cannot quietly become a claimed coverage.
+#      PAIR C is the real rendered tree, pinned by its captured words alone (verbatim womtool-84 on the
+#      real IntegrateGDVcf test JSON at 01107996 with one bogus key added), because a selftest must not
+#      need a gatk-sv clone: the key it names and the key our fixture finding names differ only in the
+#      namespace prefix, which is the same finding on a differently-named workflow.
+mkdir -p "$TMP/cross/in2/inputs/build/ref_panel_1kg/test/ShapeProbe"
+cp "$FIXJ/womtool84-shapematrix.wdl" "$TMP/cross/tree/ShapeProbe.wdl"
+cp "$FIXJ/womtool84-shapematrix-flatmember.inputs.json" \
+   "$TMP/cross/in2/inputs/build/ref_panel_1kg/test/ShapeProbe/ShapeProbe.json"
+fm_theirs=$(sed -n 's/^WARNING: Unexpected input provided: \([A-Za-z0-9_.]*\).*/\1/p' \
+    "$FIXJ/womtool84-shapematrix-flatmember.validate.txt" | head -1)
+want "pair B is pinned: womtool's own words name the flat struct member path" 0 \
+    "Unexpected input provided: ShapeProbe.struct_opt.label" -- \
+    env "${cfgenv[@]-}" "$PY" -c 'import sys; sys.stdout.write(open(sys.argv[1]).read())' \
+        "$FIXJ/womtool84-shapematrix-flatmember.validate.txt"
+want "pair B: this layer reports nothing extra on that same input" 0 \
+    "GSVTK-EXTRAS wf=ShapeProbe pairs=1 extras=0 status=OK" \
+    "GSVTK-INPUTS wf=ShapeProbe pairs=1 missing=0 status=OK" -- \
+    run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in2" --wf ShapeProbe
+want_no "pair B: the key womtool named is NOT in this layer's findings (the under-report)" 0 \
+    "EXTRA-KEY ShapeProbe" -- \
+    run --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in2" --wf ShapeProbe
+extra_theirs=$(sed -n 's/^WARNING: Unexpected input provided: \([A-Za-z0-9_.]*\).*/\1/p' \
+    "$FIXJ/womtool84-validate-extra-key.txt" | head -1)
+case "$extra_theirs" in *.*) extra_tail="${extra_theirs##*.}";; *) extra_tail="$extra_theirs";; esac
+# Counted, not grepped-as-present: `same` refuses an empty left side, so a findings list that names the
+# captured key zero times or twice fails this instead of quietly agreeing.
+our_hits=$(run --wdl-dir "$FIXW/wdl" --inputs-root "$FIXW/extra" --wf Extras 2>&1 \
+    | sed -n "s/^  EXTRA-KEY \([A-Za-z0-9_.]*\.${extra_tail}\) is named by.*/x/p" | wc -l | tr -d ' ')
+same "pair C: the real render's captured key is one this layer names, once" "$our_hits" "1"
+
+jar="${WOMTOOL_JAR:-}"; java_bin="${JAVA:-java}"
+if [ -n "$jar" ] && [ -f "$jar" ] && command -v "$java_bin" >/dev/null 2>&1; then
+    cross_jar_out=$(env "${cfgenv[@]-}" WOMTOOL_JAR="$jar" JAVA="$java_bin" "$PY" "$CHECK" \
+        --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck 2>&1); ccrc=$?
+    cc_live=$(printf '%s\n' "$cross_jar_out" \
+        | sed -n 's/.*Unexpected input provided: \([A-Za-z0-9_.]*\).*/\1/p' | head -1)
+    cc_offline=$(printf '%s\n' "$cross_jar_out" \
+        | sed -n 's/^  EXTRA-KEY \([A-Za-z0-9_.]*\) is named by.*/\1/p' | head -1)
+    same "with the jar in hand, its own words name the captured key too" "$cc_live" "$cc_theirs"
+    same "and this layer's answer on the same file is that key" "$cc_offline" "$cc_theirs"
+    if printf '%s\n' "$cross_jar_out" | grep -q 'EXTRAS-CONFIRMED' && [ "$ccrc" -eq 1 ]; then
+        ok=$((ok + 1)); printf '  ok    the two mirrors agree out loud, and it still fails (exit 1)\n'
+    else
+        fail=$((fail + 1))
+        printf '  FAIL  agreeing mirrors did not print EXTRAS-CONFIRMED (exit %s)\n' "$ccrc"
+        printf '%s\n' "$cross_jar_out" | head -8 | sed 's/^/          /'
+    fi
+    #    Pair B through the live jar: the pinned words reproduce, and this layer still stays quiet about
+    #    it. That is the divergence asserted in BOTH directions, on the tool itself rather than on a file.
+    live=$("$java_bin" -jar "$jar" validate "$TMP/cross/tree/ShapeProbe.wdl" \
+        -i "$TMP/cross/in2/inputs/build/ref_panel_1kg/test/ShapeProbe/ShapeProbe.json" 2>&1)
+    live_key=$(printf '%s\n' "$live" \
+        | sed -n 's/.*Unexpected input provided: \([A-Za-z0-9_.]*\).*/\1/p' | head -1)
+    same "with the jar in hand, pair B still names the flat member path it names" "$live_key" "$fm_theirs"
+    #    rc=1 here is the point, not an accident: the offline half stays quiet about a flat struct member
+    #    path and womtool's own row refuses the pair, so the divergence costs a finding only to this
+    #    mirror and never to the gate. The no-jar twin of this assertion above expects rc=0 for the same
+    #    file, which is the same fact seen from the other side.
+    want_no "and this layer still does not report it (the pinned divergence, live)" 1 \
+        "EXTRA-KEY ShapeProbe.struct_opt.label" -- \
+        env "${cfgenv[@]-}" WOMTOOL_JAR="$jar" JAVA="$java_bin" "$PY" "$CHECK" \
+            --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in2" --wf ShapeProbe
+else
+    printf '  SKIP  womtool: WOMTOOL_JAR=%s, so the cross-check was not re-derived from the jar — both pinned pairs (the agreeing one and the diverging one) were graded against the captured words instead, and nothing above needed java\n' "${jar:-unset}"
+    skipped=$((skipped + 2))
+fi
+
+printf '\nwomtool selftest: %s passed, %s failed, %s skipped (a SKIP here is not a pass in CI)\n' \
+    "$ok" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0
