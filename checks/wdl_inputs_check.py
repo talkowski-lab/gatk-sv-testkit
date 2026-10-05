@@ -39,6 +39,33 @@ jar. Its pairing rule is copied as literally as bash-to-python allows, and named
 (`TEST_DIRS`, `TERRA_DIRS`), including the omission of `NA19240` from the test loop. Parity at a ref
 is the promise, not a better check.
 
+The other half of the question: EXTRA keys
+------------------------------------------
+Everything above asks one direction: is every REQUIRED key in the JSON. The opposite direction — is
+every key in the JSON something the WDL declares — was measured before it was written, because a check
+that cries wolf on a clean tree is worse than the blindness it closes. Three real trees, every pair
+this file pairs (38 workflows, 77 input JSONs each), expected set taken from womtool-84's own
+`womtool inputs`: gatk-sv `origin/main` (c0314afa), `7fbf1171` (CI-red), `01107996` (its fix):
+
+    origin/main   pairs=77  extras=0        7fbf1171  pairs=77  extras=0        01107996  pairs=77  extras=0
+
+Zero on a CI-green tree AND on a CI-red one, so an extra key is CI-red material and this half is a
+finding, not a warning — the same call `MISSING-INPUTS` made. What is NOT in the expected set is not
+merely the workflow's own declarations: `womtool inputs` also lists every input of every call the call
+site does not bind (`Workflow.call_name.input`, nested workflow calls included), so binding a task
+input from the JSON is legal, not extra. Measured across those three refs and the 109 workflows with a
+primary callable: this file's expected set is a SUPERSET of womtool's for every one of them (0 keys
+womtool expects that this file does not), which is the property that makes a nonzero `extras` a finding
+rather than a coin flip — a key this file cannot explain is a key womtool cannot explain either.
+
+Three ways this file is LOOSER than womtool here, each measured at womtool-84 and each costing
+blindness rather than a false finding (see `extra_keys`): a key BELOW a declared key is read as a member
+of a value, which womtool also accepts inside a struct literal; a key that is a namespace CONTAINER is
+not reported, because womtool does not name it either; and a struct member path written flat as its own
+key is legal here because `required_inputs` already calls that same spelling bound — where womtool
+really does answer `Unexpected input provided: ShapeProbe.struct_opt.label`. That last one is the known,
+pinned divergence, and the WOMTOOL row is where it shows.
+
 Key sets, never values
 ----------------------
 womtool checks **key presence**, not values: the same input file with every value replaced by
@@ -73,13 +100,16 @@ what `build_default_inputs.sh -d .` writes. Without it, pass `--repo`/`--ref` an
 `--no-terra` drops the `-t` half (Terra cohort and single-sample configs).
 
 Machine-readable lines are prefixed `GSVTK-` so `checks/wdl_gate.sh` can read a verdict while the
-human lines beside them stay readable. Exit: 0 clean, 1 findings, 2 nothing could be checked (a tree
-that will not load, or no input JSON for that workflow) — a different answer from "clean", and
-printed as one.
+human lines beside them stay readable. Three per workflow: `GSVTK-INPUTS` (a required key the JSON
+does not name), `GSVTK-EXTRAS` (a key the JSON names that no declaration of the WDL can name) and
+`GSVTK-WOMTOOL` (CI's own command, or the named reason it could not run). Exit: 0 clean, 1 findings, 2
+nothing could be checked (a tree that will not load, or no input JSON for that workflow) — a different
+answer from "clean", and printed as one.
 """
 from __future__ import annotations
 
 import argparse
+import difflib
 import fnmatch
 import json
 import os
@@ -139,6 +169,95 @@ def required_inputs(doc) -> list:
                 continue
         out.append((key, str(typ), line, None))
     return out
+
+
+def expected_input_keys(doc) -> set:
+    """Every key an input file may legally name for this WDL, spelled the way `womtool inputs` spells it.
+
+    NOT just the workflow's declarations. `womtool inputs` also lists each input of each call that the
+    call site does not bind — `Workflow.call_name.input`, and the same recursion through nested workflow
+    calls — and miniwdl's `Workflow.available_inputs` is exactly that set (its own docstring: "the
+    workflow's input declarations ... [and] available inputs of all calls, namespaced by the call
+    names"), including inputs the task gave defaults to. Taking only the unbound-and-required subset
+    would make every optional call input look extra, which is the wolf-crying shape this function exists
+    to avoid; `_*` names are miniwdl's synthetic `runtime`-override placeholder, not WDL inputs.
+
+    A struct-typed input contributes its member paths as well: `required_inputs` already accepts a flat
+    member path as binding a required member, and a key that this file calls bound in one half and
+    extra in the other would be the tool contradicting itself. That leniency is one of the two
+    under-reports named in `extra_keys`.
+    """
+    wf = doc.workflow
+    if wf is None:
+        return set()
+    ns = wf.name
+    out = set()
+    for binding in wf.available_inputs:
+        if binding.name.startswith("_"):
+            continue
+        key = "%s.%s" % (ns, binding.name)
+        out.add(key)
+        typ = binding.value.type
+        if isinstance(typ, WDL.Type.StructInstance):
+            out |= _struct_member_paths(typ, key, [])
+    return out
+
+
+def _struct_member_paths(stype, prefix: str, seen: list) -> set:
+    """Every member path of a struct, recursively; `seen` guards a self-referential struct."""
+    if stype.type_name in seen:
+        return set()
+    out = set()
+    for mname, mtype in (stype.members or {}).items():
+        path = "%s.%s" % (prefix, mname)
+        out.add(path)
+        if isinstance(mtype, WDL.Type.StructInstance):
+            out |= _struct_member_paths(mtype, path, seen + [stype.type_name])
+    return out
+
+
+def extra_keys(provided: set, expected: set) -> list:
+    """Keys the input JSON names that no declaration of this WDL can name: womtool's own words are
+    `WARNING: Unexpected input provided: <key> (expected inputs: [...])`, and gatk-sv's CI fails on it
+    twice over — `validate.sh` on the test JSONs, and `scripts/test/terra_validation.py`'s own loop
+    (`for inp in terra_inputs: if inp not in womtool_inputs: ... "Unexpected input"; valid = False`).
+
+    Two ways this is LOOSER than womtool, both measured at womtool-84 on a synthetic WDL, both costing
+    blindness rather than noise, so neither can turn a clean tree red:
+
+    * a key under a declared key is treated as a member of a value, not as a key. womtool accepts an
+      unknown member inside a struct literal outright (`{"ShapeProbe.struct_req": {"label": "x",
+      "bogus_member": 3}}` -> `Success!`), and a `Map` is spelled as an object too, so nothing below a
+      declared key is anybody's finding. (A flat member path of a STRUCT typed input, written as its own
+      top-level key, is a separate leniency — `expected_input_keys` — where womtool really does object:
+      it answers `Unexpected input provided: ShapeProbe.struct_opt.label`. Under-reporting that one is
+      the price of not contradicting `required_inputs`, which calls the same spelling bound.)
+    * a key that is a namespace CONTAINER (`{"ShapeProbe": {"plain_req": ...}}`) is not reported: at
+      womtool-84 that spelling is silently unfulfilling rather than unexpected (every required input
+      comes back `not specified` and the container key is never named), and the required half already
+      reads it as bound by flattening it.
+
+    Only the top-most unexplained key of a nested value is reported, so one stale binding is one finding.
+    """
+    out = []
+    for key in sorted(provided, key=lambda k: (k.count("."), k)):
+        if key in expected:
+            continue
+        if any(key.startswith(k + ".") for k in expected):        # a member of something declared
+            continue
+        if any(k.startswith(key + ".") for k in expected):        # a namespace container, not a key
+            continue
+        if any(key.startswith(k + ".") for k in out):             # already named by its parent
+            continue
+        out.append(key)
+    return out
+
+
+def nearest_expected(key: str, expected: set) -> str:
+    """The declared key this one is closest to, for a human reading a rename. Advisory only: a finding
+    never depends on it, and an empty answer is a normal answer for a key from another workflow."""
+    hit = difflib.get_close_matches(key, sorted(expected), n=1, cutoff=0.8)
+    return hit[0] if hit else ""
 
 
 def _struct_members(stype, prefix: str, line: int, seen: list) -> list:
@@ -209,10 +328,16 @@ def find_pairs(build_root: str, name: str, terra: bool) -> list:
 
 
 def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True) -> dict:
-    """One workflow's verdict. Ordinary failures come back as a `status`, never as a traceback."""
+    """One workflow's verdict. Ordinary failures come back as a `status`, never as a traceback.
+
+    Two answers come back, for the two directions the question has: `missing` (a required key the JSON
+    does not name) and `extras` (a key the JSON names that no declaration can name). `status` is the
+    required half ONLY — every existing reader of it, in the gate and in `report`, keeps meaning exactly
+    what it meant before the extras half existed; the extras half carries `extra_status`.
+    """
     path = os.path.join(wdl_dir, name + ".wdl")
     if not os.path.isfile(path):
-        return {"status": "NO-WDL", "pairs": [], "missing": [], "note":
+        return {"status": "NO-WDL", "pairs": [], "missing": [], "extras": [], "note":
                 "no %s.wdl in %s" % (name, wdl_dir)}
     try:
         doc = WDL.load(path, path=[wdl_dir], import_max_depth=15)
@@ -224,23 +349,25 @@ def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True)
         detail = str(exc)
         if isinstance(exc, WDL.Error.MultipleValidationErrors) and exc.exceptions:
             detail = str(exc.exceptions[0])
-        return {"status": "LOAD-FAILURE", "pairs": [], "missing": [],
+        return {"status": "LOAD-FAILURE", "pairs": [], "missing": [], "extras": [],
                 "note": "%s: %s" % (type(exc).__name__, detail.strip().splitlines()[0] if detail.strip() else "")}
     if doc.workflow is None:
-        return {"status": "NO-WDL", "pairs": [], "missing": [],
+        return {"status": "NO-WDL", "pairs": [], "missing": [], "extras": [],
                 "note": "%s.wdl declares tasks only: there is nothing to bind" % name}
     req = required_inputs(doc)
+    expected = expected_input_keys(doc)
     ns = doc.workflow.name
     pairs = find_pairs(build_root, name, terra)
     if not pairs:
-        return {"status": "NO-INPUTS", "pairs": [], "missing": [], "required": len(req), "ns": ns,
+        return {"status": "NO-INPUTS", "pairs": [], "missing": [], "extras": [], "required": len(req),
+                "expected": len(expected), "ns": ns,
                 "note": "no rendered input JSON pairs with %s" % name}
     keys = {}
     for ppath, _kind in pairs:
         try:
             keys[ppath] = provided_keys(ppath)
         except (ValueError, OSError) as exc:
-            return {"status": "BAD-JSON", "pairs": pairs, "missing": [], "note": str(exc)}
+            return {"status": "BAD-JSON", "pairs": pairs, "missing": [], "extras": [], "note": str(exc)}
     missing = []
     for key, type_text, line, parent in req:
         absent = [(p, k) for p, k in pairs
@@ -248,6 +375,14 @@ def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True)
         if absent:
             missing.append({"key": key, "type": type_text, "line": line,
                             "absent": absent, "of": len(pairs)})
+    # The other direction, per pair: `extra_keys` is a set difference against every key the WDL can
+    # legally be handed, so a key showing up here is one neither this file nor womtool can attribute to
+    # a declaration (see `extra_keys` for the two ways that is looser than womtool, and docs).
+    unexplained = {ppath: set(extra_keys(keys[ppath], expected)) for ppath in keys}
+    extras = []
+    for key in sorted({k for s in unexplained.values() for k in s}):
+        extras.append({"key": key, "found": [(p, kind) for p, kind in pairs if key in unexplained[p]],
+                       "of": len(pairs), "near": nearest_expected(key, expected)})
     namespaces = set()
     for ppath in keys:
         namespaces |= {k.split(".")[0] for k in keys[ppath]}
@@ -256,7 +391,8 @@ def check_workflow(wdl_dir: str, name: str, build_root: str, terra: bool = True)
         note = ("the key namespace in those JSONs is %s, not the workflow name %s: womtool would call "
                 "every key out of place" % ("/".join(sorted(namespaces)), ns))
     return {"status": "FINDING" if missing else "OK", "pairs": pairs, "missing": missing,
-            "required": len(req), "ns": ns, "note": note}
+            "extra_status": "FINDING" if extras else "OK", "extras": extras,
+            "required": len(req), "expected": len(expected), "ns": ns, "note": note}
 
 
 # womtool's own words, through a banner, a slf4j line, and sometimes a stack trace: the line that says
@@ -281,16 +417,16 @@ ERROR_MARKS = ("not specified", "unrecognized", "out-of-place", "error", "invali
 # rejection is reported as what it is, and a DISAGREES is only claimed when both sides answered the
 # same question. womtool's verdict still prints and still fails the run either way.
 #
-# The third class is the gap this file has always had and now names. Measured by adding one key to a
-# real rendered test JSON and re-running the same command (gatk-sv `01107996`):
+# The third class is the gap this lane just closed, and the measurement that closed it is in the module
+# docstring. Measured by adding one key to a real rendered test JSON and re-running the same command
+# (gatk-sv `01107996`):
 #
 #     WARNING: Unexpected input provided: IntegrateGDVcf.this_key_does_not_exist_in_the_wdl
 #     (expected inputs: [...])                                      rc=1
 #
-# An input file naming a key the WDL never declares is a KEY question, but it is not the question this
-# file asks — it compares REQUIRED keys against the JSON, never the JSON's keys back against the WDL —
-# so a rejection of this class must not be reported as the mirror being wrong either. Nothing here
-# invents an extras check: it names what womtool saw and says which layer does not cover it.
+# An input file naming a key the WDL never declares is a KEY question, and it is now this file's
+# question too (`extra_keys`): a rejection of this class is comparable with the GSVTK-EXTRAS line, and
+# `report` says whether the two agree or whether one of them saw something the other did not.
 KEY_MARKS = ("not specified", "no such key", "required workflow input")
 EXTRAS_MARKS = ("unexpected input", "unrecognized", "unrecognised", "out-of-place")
 VALUE_MARKS = ("failed to evaluate input", "no coercion defined", "coercion", "was not found in the",
@@ -298,10 +434,9 @@ VALUE_MARKS = ("failed to evaluate input", "no coercion defined", "coercion", "w
 
 
 def rejection_class(text: str) -> str:
-    """'keys' (a required input the JSON does not name — this file's question), 'extras' (a key the
-    JSON names that the WDL does not declare — a key question this file does NOT ask), 'value' (what a
-    value evaluates to), or 'other'. Order matters: a rejection that names a missing required input is
-    comparable no matter what else it says."""
+    """'keys' (a required input the JSON does not name), 'extras' (a key the JSON names that the WDL does
+    not declare — the `GSVTK-EXTRAS` question), 'value' (what a value evaluates to), or 'other'. Order
+    matters: a rejection that names a missing required input is comparable no matter what else it says."""
     low = text.lower()
     if any(mark in low for mark in KEY_MARKS):
         return "keys"
@@ -327,8 +462,9 @@ def womtool_run(wdl_dir: str, name: str, pairs: list, jar: str, java: str) -> di
     Local and offline — womtool parses, it launches nothing. The verdict is the exit code plus
     womtool's own first error line, so a finding here reads like the CI log. `class_counts` sorts the
     failures by the question each rejection asks (see rejection_class): every class still counts as a
-    failure, and only the 'keys' class is comparable with this file's answer. `value_failures` is the
-    non-comparable total (`value` + `other`).
+    failure, `keys` is comparable with the required half and `extras` with `GSVTK-EXTRAS`, and
+    `value_failures` is the total of everything that is neither (value + other + extras) — which is what
+    the OUT-OF-LAYER branch tests, after the extras branches have had their say.
     """
     base = {"pairs": 0, "failures": 0, "value_failures": 0, "lines": [],
             "class_counts": {"keys": 0, "extras": 0, "value": 0, "other": 0}}
@@ -454,6 +590,26 @@ def report(name: str, res: dict, wom: dict) -> int:
     elif res["note"]:
         print("  NOTE %s" % res["note"])
 
+    # The second direction, on its own machine-readable line: `GSVTK-INPUTS ... missing=` keeps meaning
+    # exactly what it meant before this existed, and nothing that reads it has to change.
+    print("GSVTK-EXTRAS wf=%s pairs=%s extras=%s status=%s"
+          % (name, len(res["pairs"]), len(res["extras"]),
+             res["status"] if res["status"] in NOTHING else res.get("extra_status", "OK")))
+    for extra in res["extras"]:
+        rc = 1
+        print("  EXTRA-KEY %s is named by %s of %s CI-matched input JSON%s and declared nowhere in %s"
+              % (extra["key"], len(extra["found"]), extra["of"], "" if extra["of"] == 1 else "s",
+                 name + ".wdl"))
+        for ppath, kind in extra["found"]:
+            print("      [%s] %s" % (kind, ppath))
+        print("      womtool answers \"Unexpected input provided: %s\" and gatk-sv CI fails on that "
+              % extra["key"])
+        print("      (validate.sh on the test JSONs, terra_validation.py's own loop on the Terra ones).")
+        print("      %s" % ("Nearest declared key: %s — a rename leaves the old binding behind, which is "
+                            "the usual reason for this line." % extra["near"] if extra["near"]
+                            else "No declared key is close to it, so this is not a rename left behind: a "
+                                 "binding was added for an input the WDL never had."))
+
     print("GSVTK-WOMTOOL wf=%s status=%s pairs=%s failures=%s%s%s"
           % (name, wom["status"], wom["pairs"], wom["failures"],
              (" reason=%s" % wom["reason"]) if wom["reason"] else "",
@@ -469,18 +625,26 @@ def report(name: str, res: dict, wom: dict) -> int:
     if wom["status"] == "RUN":
         ours, theirs = res["status"] == "FINDING", wom["failures"] > 0
         counts = wom.get("class_counts") or {}
-        if theirs and counts.get("extras", 0) == wom["failures"]:
-            # The named offline gap, when it fires: a key the input file names and the WDL does not
-            # declare. womtool sees it; this layer never looks that direction.
+        extras_theirs = counts.get("extras", 0)
+        extras_ours = len(res["extras"])
+        if theirs and extras_theirs and extras_ours:
+            # Both mirrors now ask the question, and both answered it: the strongest form of the answer
+            # this file can give, so it is said out loud rather than left to the reader to line up.
+            print("  EXTRAS-CONFIRMED womtool rejected %s pair(s) for keys the WDL does not declare and "
+                  % extras_theirs)
+            print("        this layer named %s of them on the same file(s). Two independent mirrors, the "
+                  % extras_ours)
+            print("        same finding: the binding is stale, and CI is red on it either way.")
+        elif theirs and extras_theirs:
+            # womtool saw an un-declared key that this layer did NOT name. That is the looser half of
+            # `extra_keys` firing (a flat struct member path, a key below a declared one, a namespace
+            # container): this file does not ask about those, so it is not calling womtool wrong.
             print("  EXTRAS-GAP womtool rejected %s pair(s) because the input JSON names a key the WDL "
-                  % wom["failures"])
-            print("        does not declare, which is the question this layer does not ask: it compares")
-            print("        REQUIRED keys into the JSON and never the JSON's keys back into the WDL. So")
-            print("        this file says %s and womtool says %s because neither mirror is wrong — one of" %
-                  ("clean" if not ours else "missing-keys", "extra keys"))
-            print("        them was never asked. CI's -t half DOES ask it (terra_validation.py prints")
-            print("        \"Unexpected input\"), and the test-dir half gets it from womtool, which is")
-            print("        why the womtool verdict above is the one to act on.")
+                  % extras_theirs)
+            print("        does not declare, and this layer's own GSVTK-EXTRAS line found none on the same")
+            print("        file(s). Its rule is the deliberately looser of the two (see `extra_keys`), so on")
+            print("        this input it does not ask the question womtool just asked — it is not that one")
+            print("        mirror is wrong. womtool is the one CI runs: act on the line above.")
         elif theirs and wom["value_failures"] == wom["failures"]:
             # Every rejection asked a question this file does not ask. Named rather than folded into a
             # DISAGREES, because "one of the two mirrors is wrong" would send a reader to fix a mirror
@@ -507,6 +671,17 @@ def report(name: str, res: dict, wom: dict) -> int:
             print("        the two mirrors is wrong; womtool is the one CI runs, so start there. The")
             print("        likely causes are a struct member this file expands differently, or a call")
             print("        -level key womtool accepts and this pairing does not.")
+        elif extras_ours:
+            # The one combination the measured relationship says should not happen: this file's expected
+            # set is a superset of `womtool inputs` on every workflow measured, so a key it cannot explain
+            # is a key womtool should refuse too. Named rather than swallowed, because the likeliest
+            # explanations are two versions of the WDL or a stale render — not a passing pair.
+            print("  EXTRAS-UNCONFIRMED this layer named %s extra key(s) and womtool accepted every "
+                  % extras_ours)
+            print("        pair, which the two rules cannot both be right about: a key this file cannot")
+            print("        attribute to a declaration is one `womtool inputs` should not list either (that")
+            print("        superset relation is measured, not assumed). Check that the WDL and the render")
+            print("        belong to the same ref before believing either answer.")
     return rc
 
 
@@ -552,6 +727,7 @@ def main() -> int:
         # input JSON for this workflow", and the second one is a claim about gatk-sv. Keep them apart.
         for name in a.wf:
             print("GSVTK-INPUTS wf=%s pairs=0 missing=0 status=NO-BUILD" % name)
+            print("GSVTK-EXTRAS wf=%s pairs=0 extras=0 status=NO-BUILD" % name)
             print("  NOTHING-CHECKED %s: %s does not exist. Render it (--repo/--ref, or "
                   % (name, build_root))
             print("        gatk-sv's own scripts/inputs/build_default_inputs.sh) or pass the tree you")
@@ -569,6 +745,7 @@ def main() -> int:
                   % (res["status"], res["detail"]))
             for name in a.wf:
                 print("GSVTK-INPUTS wf=%s pairs=0 missing=0 status=RENDER-SKIPPED" % name)
+                print("GSVTK-EXTRAS wf=%s pairs=0 extras=0 status=RENDER-SKIPPED" % name)
                 print("GSVTK-WOMTOOL wf=%s status=SKIPPED pairs=0 failures=0 reason=render" % name)
             return 1
         build_root = os.path.join(dest, BUILD)
