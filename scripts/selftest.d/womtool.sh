@@ -62,6 +62,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd -P)"
 cd "$ROOT" || exit 2
 
 PY="${1:-${PYTHON:-python3}}"
+# Absolute, and exported under the knob `kit/config.sh` and `gsvtk` both honor. This suite drives
+# checks/wdl_gate.sh directly, and the gate resolves its own interpreter: without this it took "python3 on
+# PATH" and then looked for miniwdl in $ROOT/.venv/bin, so every gate-backed assertion below was really
+# testing whether whoever ran it keeps a venv inside the checkout. On a checkout without one they did not
+# skip — they died on "miniwdl not found", fifteen at a time, which is a red suite telling you nothing
+# about the code.
+case "$PY" in
+    */*) if [ -x "$PY" ]; then
+             PYABS="$(cd "$(dirname "$PY")" && pwd -P)/$(basename "$PY")"
+         else
+             PYABS="$PY"
+         fi ;;
+    *)   PYABS="$(command -v "$PY" 2>/dev/null || printf '%s' "$PY")" ;;
+esac
+export GSVTK_PY="$PYABS"
 if [ ! -x "$PY" ] && [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 
 CHECK="$ROOT/checks/wdl_inputs_check.py"

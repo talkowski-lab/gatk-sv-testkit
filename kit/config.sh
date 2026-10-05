@@ -11,6 +11,20 @@
 GSVTK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P)"
 export GSVTK_ROOT
 
+# GSVTK_PY is the repo-wide interpreter knob, the same one `gsvtk`'s py_for honors. It is consulted
+# BEFORE the PATH probe because "the python3 that happens to be on PATH" is not what a caller means when
+# it names an interpreter: a checkout whose venv lives somewhere other than $ROOT/.venv, and every
+# selftest that hands its own interpreter down, both need the named python to actually be the one that
+# runs. Naming it and getting python3 anyway is how a suite ends up grading somebody's machine layout
+# while reading like it grades the code.
+if [ -z "${GSVTK_PYTHON:-}" ] && [ -n "${GSVTK_PY:-}" ]; then
+    if "$GSVTK_PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+        GSVTK_PYTHON="$GSVTK_PY"
+    else
+        echo "kit/config.sh: GSVTK_PY=$GSVTK_PY is not python >= 3.9 (gsvtk-config uses str.removeprefix); refusing to run under it" >&2
+        exit 3
+    fi
+fi
 if [ -z "${GSVTK_PYTHON:-}" ]; then
     for _gsvtk_py in python3 python; do
         if command -v "$_gsvtk_py" >/dev/null 2>&1 \
