@@ -8,6 +8,7 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 | A call site that never binds a required input | `miniwdl check` treats `IncompleteCall` as a warning and exits 0 | `wdl_gate.sh` |
 | A call site passing an input the callee never declared | typechecking does not compare call sites across files | `wdl_gate.sh` |
 | A required workflow input that the repo's own input JSON never binds | no WDL validator opens an input file, and `IncompleteCall` stays 0 because the call site *does* bind it — the caller who never will is Cromwell, at submission time. CI's `Test with WOMtool` step catches it; nothing here used to | `wdl_gate.sh` (`MISSING-INPUTS`, via `wdl_inputs_check.py`) |
+| The mirror of that: an input JSON that binds a key the WDL does not declare — a stale or misspelled binding left behind by a rename | `miniwdl check` never opens an input file, and the required-half check only asks whether required keys are present, so a key that should not be there is invisible. gatk-sv CI fails on it twice (`womtool … validate`, and `terra_validation.py`'s own loop); nothing here used to | `wdl_gate.sh` (`EXTRA-KEYS`, same file, other direction) |
 | A renamed `sv_shell` JSON key with a reader left behind | `jq -r '.missing'` yields the string `null`, forwarded as `--flag null`, failing stages later | `svshell_contract_check.py`, `svshell_jq_plumbing_scan.py` |
 | A workflow-scope `write_*`, a `File` input only ever tested with `defined()`, a `pipefail` pipe whose reader exits early, or a command block that is not valid bash | to a WDL validator a command block is a string, and "this File is only tested for" is a localization fact, not a type error | `wdl_semantics.py` |
 | A shipped image whose jar predates the flags its WDL passes | the image is built from a pinned commit, not your branch | `image-check/` |
@@ -66,11 +67,11 @@ reports a result that is neither the old bug nor the new one.
 The output is a count per ref, meant to be **diffed**:
 
 ```
-WORKFLOW                       REF              EXIT   INCOMPLETECALL   STALE-BINDINGS   MISSING-INPUTS
-SVShell                        main@9a34dc12    0      2                0                NO-INPUT-JSON
-SVShell                        main@77c1e0b2    0      3                1                NO-INPUT-JSON
-IntegrateGDVcf                 7fbf1171         0      0                0                1
-IntegrateGDVcf                 01107996         0      0                0                0
+WORKFLOW                       REF              EXIT   INCOMPLETECALL   STALE-BINDINGS   MISSING-INPUTS   EXTRA-KEYS
+SVShell                        main@9a34dc12    0      2                0                NO-INPUT-JSON    NOT-CHECKED
+SVShell                        main@77c1e0b2    0      3                1                NO-INPUT-JSON    NOT-CHECKED
+IntegrateGDVcf                 7fbf1171         0      0                0                1              clean
+IntegrateGDVcf                 01107996         0      0                0                0              clean
 ```
 
 (Pick refs where **both** sides actually contain the workflow you named: `--strict` now fails with an
@@ -104,7 +105,77 @@ counted in the closing note, and deliberately *not* a `--strict` failure, since 
 is the promise and CI is green on such a ref. With `WOMTOOL_JAR` exported every pair also gets CI's
 exact `java -jar $WOMTOOL_JAR validate` and the two answers are compared; without it the layer prints a
 named, counted `SKIPPED` row that `--strict` fails on. See [troubleshooting](troubleshooting.md) for the
-CI log line this column exists to predict.
+CI log line this column exists to predict. `EXTRA-KEYS` is its mirror, and the last paragraph of this
+section is about it.
+
+### `EXTRA-KEYS`: a key the input JSON names that the WDL does not declare
+
+`MISSING-INPUTS` asks whether every required key is in the JSON. `EXTRA-KEYS` asks whether every key in
+the JSON is something the WDL declares — the same seven JSONs read backwards. Its CI signal is womtool's
+second failure mode, which the required-half check cannot see:
+
+```
+WARNING: Unexpected input provided: IntegrateGDVcf.this_key_does_not_exist_in_the_wdl
+(expected inputs: [IntegrateGDVcf.ConcatVcfs.allow_overlaps, …])                    rc=1
+```
+
+and gatk-sv CI fails on it twice over: `validate.sh` womtool-validates the test JSONs, and
+`terra_validation.py` (upstream's, not this repo's) has its own loop for the `-t` half —
+`for inp in terra_inputs: if inp not in womtool_inputs: … "Unexpected input"; valid = False`. So a PR can
+rename an input, leave the old binding in a template, get a red build, and this repo's `gsvtk check` says
+clean. That is the same blind spot `MISSING-INPUTS` closed, one direction over.
+
+**Why it is allowed to block a run.** The extras=0 measurement is the necessary half — every pair this
+layer pairs, at three refs (`origin/main` c0314afa, `7fbf1171`, `01107996`), every one of them clean:
+
+```
+origin/main   workflows_with_pairs=38  pairs=77  extras=0     (and womtool's own `validate` on those 77
+7fbf1171      workflows_with_pairs=38  pairs=77  extras=0      pairs: 0 answered "Unexpected input")
+01107996      workflows_with_pairs=38  pairs=77  extras=0
+```
+
+but a zero on three trees does not license a hard gate on the fourth. The licence is the **direction of
+the difference** between the two expected-key sets. For all 109 workflows with a primary callable, at all
+three refs (327 workflow-ref comparisons), this layer's expected set is a **superset** of `womtool
+inputs` — zero keys that womtool expects and this layer does not. So a key this layer cannot attribute to
+a declaration is a key womtool cannot attribute either: the offline answer can be *quieter* than CI, never
+louder, and only a check that cannot over-report is allowed to fail something. That is also why the
+column is `clean`/`N extra` rather than a bare number — the column beside it answers a different question
+with bare numbers, and a `1` in both would read as the same finding twice.
+
+The expected set is not merely the workflow's declarations. `womtool inputs` also lists every input of
+every call the call site does not bind — `Workflow.call_name.input`, nested workflow calls included —
+and miniwdl's `Workflow.available_inputs` is that set. Real gatk-sv input JSONs use it: of the 77 pairs,
+4 bind a call-qualified key and 8 bind a struct as an object, so a naive "is this a declared workflow
+input?" test would cry wolf on 12 of 77 files at every clean ref there is.
+
+**What it cannot see.** Four under-reports, each measured at womtool-84, each one blindness rather than
+noise, and none of them a gate pass — where the offline layer is quiet and CI is not, the `WOMTOOL` row
+still runs CI's own command and still fails the run:
+
+| The shape | This layer | womtool-84, measured |
+|---|---|---|
+| A struct member path written flat as its own key (`ShapeProbe.struct_opt.label`) | not an extra: `required_inputs` already accepts that spelling as binding the member, and the tool would contradict itself otherwise | `WARNING: Unexpected input provided: ShapeProbe.struct_opt.label` — pinned as pair B of the cross-check (`fixtures/jar/womtool84-shapematrix-flatmember.*`), asserted in both directions |
+| A key *below* a declared key (a member of a struct or map handed over as one object) | not an extra, and only the outermost unexplained key is ever reported | `Success!` on `{"struct_req": {"label": "x", "bogus_member": 3}}` — womtool does not police members of a value either |
+| A namespace container (`{"ShapeProbe": {"plain_req": …}}`) | not an extra (and the required half reads it as bound) | never names the container; reports every required input `not specified` instead |
+| A call path deeper than `womtool inputs` prints (`Wf.Call.SubCall.input`) | legal, because miniwdl's recursion goes deeper than the jar's printout | absent from `womtool inputs`, so womtool would refuse it — the superset relation is one-way, and this is the direction it leans |
+
+The gate treats a skipped extras answer the way it treats a skipped womtool answer: `SKIPPED — N of M
+workflow(s): no extra-key answer was produced`, printed as a per-ref row, counted into the prerequisite
+totals, and fatal under `--strict` — never a `clean` cell in a column that never ran. `NOT-CHECKED` (a
+workflow with no CI input JSON at all) is likewise not a pass; the reason is named one column left.
+
+**Hard, with and without `--strict`** — like `MISSING-INPUTS`, because CI is red on it either way. That
+was checked against the pre-change gate, not assumed: the same `--tree`/`--inputs-root` runs at all three
+refs, before the column existed and after, give the same exit status every time (`origin/main` 0 → 0,
+`7fbf1171` 1 → 1 on `IntegrateGDVcf.sample_id`, `01107996` 0 → 0), with every `EXTRA-KEYS` cell reading
+`clean` on all of them. `scripts/selftest.d/womtool.sh` §10 asserts the fixture twin of that claim — a
+tree whose required half is clean and whose only finding is an extra key must exit 1 — and §11 pins this
+layer's answer to womtool's own words on the same input file. The cross-check is deliberately **two
+pairs** (one where the two agree, one where they deliberately differ, plus a capture taken off a real
+rendered gatk-sv JSON), because a pair is a JVM start and the 77-pair sweep above was already run once
+out of band; what generalises the two pairs is the superset relation, which is what the paragraph above
+measured.
 
 ## `wdl_semantics.py`: does it RUN, or does it only typecheck?
 
