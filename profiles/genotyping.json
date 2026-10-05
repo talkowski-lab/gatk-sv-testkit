@@ -158,7 +158,17 @@
         "GenotypeBatch.genotyping_sr_table": "this.genotyping_sr_table{new}",
         "GenotypeBatch.genotyping_sr_cutoff_diagnostics": "this.genotyping_sr_cutoff_diagnostics{new}",
         "GenotypeBatch.regeno_coverage_medians": "this.regeno_coverage_medians{new}"
-      }
+      },
+      "export": [
+        "genotyped_pesr_vcf",
+        "genotyped_depth_vcf",
+        "genotyping_rd_depth_table",
+        "genotyping_rd_pesr_table",
+        "genotyping_pe_table",
+        "genotyping_sr_table",
+        "genotyping_sr_cutoff_diagnostics"
+      ],
+      "_why_export": "The new-side attributes terra/batch_fetch_compare.sh fetches off the entity once the chain finishes, as data rather than as shell literals (docs/gap-ledger.md A21; docs/module-profiles.md §9 step 4). These 7 are NOT derived from `outputs` and the loader deliberately does not compare the two: this step WRITES 10 attributes, 8 once §3 rule 4's `_index` siblings are excluded, and the script demanded 7 of those 8, carrying the eighth -- regeno_coverage_medians -- as optional. Promoting that eighth name was asked and REJECTED: `required` is the script's exit code, so a required attribute that some chain never wrote turns every such baseline into a fetch that exits 1 where it passes today -- a product decision with a money-path consequence, to be taken with a real run in hand, not smuggled inside a refactor. `scripts/selftest.d/profiles.sh`'s export-list guard pins these 7 against `outputs`, states the 7-vs-8 delta as a fact, and carries the positive control that edits THIS field to prove the shell follows the data rather than a literal."
     }
   ]
 }

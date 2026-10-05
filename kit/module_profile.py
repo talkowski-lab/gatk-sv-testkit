@@ -26,9 +26,30 @@ carry the rationale JSON cannot hold as comments, and this loader ENFORCES the p
 nobody reads. Rule 9: `schema_version` is mandatory, so a stale reader is distinguishable from a stale
 file: a version this build does not implement refuses rather than best-effort parses.
 
-Not in this schema yet, on purpose: `export`, `freeze` and `compare` (§3's rules 5, 7, 8) and the
-per-module literals owned by `batch_fetch_compare.sh` / `batch_rerun_step.py` / `build_inputs.py` /
-`wdl_gate.sh` (§9 step 4). Those stay open; §9 says so.
+`export`: what it is, and the two things it deliberately is not
+--------------------------------------------------------------
+`export` (§3's rule 5) is one step's list of new-side attribute names a downstream tool FETCHES off the
+entity after the chain finishes. It exists now because `terra/batch_fetch_compare.sh` carried those seven
+names as literals and no field this schema had could hold them: measured at gatk-sv `main`, the terminal
+step's `outputs` are 10 names, 8 once rule 4's `_index` siblings are excluded, and the fetched set is 7.
+No rule derives the 7 from any field that existed, which is docs/gap-ledger.md A21 -- so the schema grew
+one field instead of the shell keeping the list, and §9 step 4 keeps the measurement.
+
+It is NOT `outputs`. `outputs` says what a step writes; `export` says what someone downstream demands, and
+today they differ by exactly one name (`regeno_coverage_medians`: written, fetched as optional). The
+loader deliberately does NOT compare the two: `scripts/selftest.d/profiles.sh`'s export-list guard is what
+compares them, and an equality test inside the loader would make that guard unable to fail -- a check that
+cannot fail is the thing this repo keeps meeting.
+
+It is NOT a promise that the attribute is in a workspace. This reader has no workspace, no run and no
+entity; a name in `export` that nobody wrote is a `[missing]` line and a nonzero fetch, which is the
+answer the tool already gives and the honest one.
+
+Shape, refused by name like every other field here: a list, non-empty when present, of BARE attribute
+names. `this.genotyped_pesr_vcf{new}` is `outputs` syntax (§3 rule 3), not an attribute name, and copying
+it into `export` would ask the entity for an attribute no workspace holds -- so it is a finding, not a
+string. `freeze` (§3 rule 7) and `compare` (rule 8) stay out, with the per-module literals of
+`batch_rerun_step.py` / `build_inputs.py` / `wdl_gate.sh` (§9 step 4); §9 says so.
 
 Never at import
 ---------------
@@ -64,7 +85,7 @@ KNOWN_TOKENS = ("frz", "new")
 
 TOP_FIELDS = ("schema_version", "name", "callers", "steps")
 STEP_FIELDS = ("step", "wdl", "workflow", "rootEntityType", "inputs", "outputs",
-               "branch_only_inputs")
+               "branch_only_inputs", "export")
 # A `_why_` key normally pairs with a bound key. The reserved siblings carry the rationale for what a
 # map deliberately does NOT bind, which is the rationale §1 calls the price of transcription and which
 # has no key to hang off. Explicit list, so an orphan typo still gets refused.
@@ -84,6 +105,8 @@ FIELD_HELP = (
     "                inputs          the COMPLETE input map, never a delta\n"
     "                outputs         the COMPLETE output map\n"
     "  optional step branch_only_inputs  keys the ref under test does not declare\n"
+    "                export            bare new-side attribute names a downstream tool fetches\n"
+    "                                (not the `outputs` map, and not `this.<attr>` values -- names)\n"
     "  anywhere      _why_<key>       a rationale beside the key it explains; `_why_unbound` for the\n"
     "                                keys deliberately left to a WDL default")
 
@@ -91,17 +114,19 @@ FIELD_HELP = (
 class Loaded:
     """What one profile read produced: the tables, or the findings. Never both empty.
 
-    `configs`/`callers`/`branch_only_inputs` are the shapes the tools have always read; `problem` is
-    the single sentence a command prints when the tables cannot be used, and `reason` says why an
-    absent profile is fine (`found=False`, which is how `--help` answers without repo data).
+    `configs`/`callers`/`branch_only_inputs` are the shapes the tools have always read; `exports` is the
+    one this reader added for `batch_fetch_compare.sh` (step -> its `export` names, profile order), and
+    `problem` is the single sentence a command prints when the tables cannot be used. `found=False` says
+    why an absent profile is fine -- it is how `--help` answers without repo data.
     """
 
-    def __init__(self, path, found, configs, callers, branch_only, problems, notes):
+    def __init__(self, path, found, configs, callers, branch_only, exports, problems, notes):
         self.path = path
         self.found = found
         self.configs = configs
         self.callers = callers
         self.branch_only_inputs = branch_only
+        self.exports = exports
         self.problems = problems
         self.notes = notes
 
@@ -132,6 +157,45 @@ class Loaded:
         # `gsvtk-config require` prints for a missing key, because a missing module IS a missing value
         # -- it is just carried in a file instead of a key. `SystemExit(str)` would be a 1, and a 1 is
         # what every other refusal in this repo prints, so a caller could not tell the two apart.
+        print("\n".join(lines), file=sys.stderr)
+        raise SystemExit(4)
+
+    def require_exports(self, tag: str = "") -> list:
+        """The fetch list -- every step's `export` names, in profile order, de-duplicated -- or exit 4.
+
+        The refusal is the whole point of this method. A consumer that asked for the list and got `[]`
+        would fetch nothing and report a clean plan, which is this repo's named failure class: an empty
+        that reads like nothing was wrong. So the message names the module, the file, EVERY step it
+        looked for `export` on, and the field it looked for, and says what to write.
+
+        Steps that carry no `export` contribute nothing rather than refusing: a step whose outputs no
+        tool fetches legitimately has no export list, and the profile as a whole is the unit that must
+        answer. Same 4 as `require()` -- "the value you need is not there".
+        """
+        names, seen = [], set()
+        for step, attrs in self.exports.items():
+            for a in attrs:
+                if a not in seen:
+                    seen.add(a)
+                    names.append(a)
+        if names:
+            return names
+        prefix = f"{tag}: " if tag else ""
+        steps = list(self.configs) or ["(no usable steps)"]
+        lines = [
+            f"{prefix}module profile {self.path} exports nothing: no step of it carries a non-empty",
+            "`export` list, so there is nothing to fetch and this command refuses to plan an empty run.",
+            f"  steps `export` was looked for on: {', '.join(steps)}",
+            "  `export` is per-step, so the profile as a whole has to answer. It is the list of the",
+            "  new-side attributes a downstream tool reads off the entity after the chain runs",
+            "  (docs/module-profiles.md §3 rule 5). It is NOT the `outputs` map: `outputs` says what a step",
+            "  writes, `export` says what someone downstream demands. It is not a promise the attribute is",
+            "  in a workspace either -- it is a list of names to go and look for, and a name nobody wrote",
+            "  is the `[missing]` line the fetch already prints.",
+            "  Write it beside the step's `outputs`, as bare attribute names:",
+            '      "export": ["genotyped_pesr_vcf", "genotyping_pe_table"]',
+            "  Planning an empty fetch and exiting 0 is not an acceptable answer here.",
+        ]
         print("\n".join(lines), file=sys.stderr)
         raise SystemExit(4)
 
@@ -307,6 +371,8 @@ def _validate_step(step, all_steps) -> list:
         problems.append(f"{name}: `inputs` is empty. Terra has no inherit-from-upstream, so an empty "
                         "input map is a workflow run entirely on WDL defaults, not a step with no "
                         "parameters to speak of")
+    if "export" in step:
+        problems += _validate_export(step["export"], name)
     # `_why_` pairing, the rule that keeps a rationale from rotting into a comment about a key that no
     # longer exists. An orphan is a refusal, not a warning: the whole reason the sibling exists is that
     # the pairing is checkable.
@@ -326,6 +392,52 @@ def _validate_step(step, all_steps) -> list:
     return problems
 
 
+def _validate_export(value, name: str) -> list:
+    """Shape of `export`: a non-empty list of BARE attribute names, each finding naming the index.
+
+    What is refused here is what a name is NOT, because that is the mistake a real author makes: pasting
+    `this.genotyped_pesr_vcf{new}` out of the `outputs` map above. That is a PATH with a suffix token
+    (§3 rule 3), and a consumer holding it would ask the entity for an attribute called
+    `genotyped_pesr_vcf_new_new` -- or `this.genotyped_pesr_vcf{new}` -- and never find it. A duplicate
+    would fetch the same object twice, and an empty list is the named failure class, not a step with
+    nothing to fetch: a step nobody fetches from leaves the field out.
+
+    What is deliberately NOT checked: whether the step's `outputs` writes each name, or whether anything
+    in the map is fetchable. That comparison is `scripts/selftest.d/profiles.sh`'s export-list guard;
+    doing it here too would leave the guard unable to fail.
+    """
+    if not isinstance(value, list):
+        return [f"{name}: `export` is a {type(value).__name__}, not a list of attribute names"]
+    if not value:
+        return [f"{name}: `export` is an empty list. A step nothing fetches from leaves the field out; "
+                f"an empty list reads as \"run this step and bring back nothing\", which is the emptiness "
+                f"this schema refuses out loud"]
+    problems, seen = [], set()
+    for i, attr in enumerate(value):
+        if not isinstance(attr, str):
+            problems.append(f"{name}: export[{i}] is a {type(attr).__name__}, not an attribute name")
+            continue
+        if not attr.strip():
+            problems.append(f"{name}: export[{i}] is blank")
+            continue
+        if attr.startswith(PATH_PREFIXES):
+            problems.append(f"{name}: export[{i}] is {attr!r}, a path, not an attribute name. `export` "
+                            f"holds bare names; the `this.`/`workspace.` prefix and the suffix token "
+                            f"belong to `outputs`, which already carries them (§3 rule 3), so "
+                            f"copying one in here asks the entity for an attribute no workspace has")
+            continue
+        if "{" in attr or "@" in attr:
+            problems.append(f"{name}: export[{i}] is {attr!r}, which carries expansion syntax. Names "
+                            f"here are literal: no {{frz}}/{{new}} token, no `@` caller fan-out")
+            continue
+        if attr in seen:
+            problems.append(f"{name}: export[{i}] is {attr!r}, already listed -- a name twice would "
+                            f"fetch the same attribute twice")
+            continue
+        seen.add(attr)
+    return problems
+
+
 def load(name: str = "") -> "Loaded":
     """Read one module profile. NEVER raises, NEVER exits, NEVER creates a file.
 
@@ -336,20 +448,20 @@ def load(name: str = "") -> "Loaded":
     """
     p = path(name)
     if not os.path.isfile(p):
-        return Loaded(p, False, {}, [], {}, [f"no profile at {p}"], [])
+        return Loaded(p, False, {}, [], {}, {}, [f"no profile at {p}"], [])
     try:
         with open(p) as fh:
             doc = json.load(fh)
     except ValueError as e:
-        return Loaded(p, True, {}, [], [], [f"{p} is not readable JSON ({e})"], [])
+        return Loaded(p, True, {}, [], {}, {}, [f"{p} is not readable JSON ({e})"], [])
     except OSError as e:
-        return Loaded(p, False, {}, [], [], [f"{p} could not be read ({e.strerror})"], [])
+        return Loaded(p, False, {}, [], {}, {}, [f"{p} could not be read ({e.strerror})"], [])
     problems = validate(doc)
     if problems:
-        return Loaded(p, True, {}, [], [], problems, [])
+        return Loaded(p, True, {}, [], {}, {}, problems, [])
     callers = [str(c) for c in doc["callers"]]
     sfx = suffixes()
-    configs, branch_only = {}, {}
+    configs, branch_only, exports = {}, {}, {}
     notes = []
     for step in doc["steps"]:
         where = str(step["step"])
@@ -371,14 +483,20 @@ def load(name: str = "") -> "Loaded":
                                 f"bind, so the drop flag could never reach it")
             if not unknown:
                 branch_only[where] = set(step["branch_only_inputs"])
+        # The fetch list, carried per step and in profile order. Not folded into `configs` on purpose:
+        # `CONFIGS` is the POSTed-config table that five probes and `batch_rerun_step.py` read as an
+        # attribute, and an extra key in every step spec would ride into `show`/`body()` for a name that
+        # is never POSTed. The consumer that wants it asks for it.
+        if step.get("export"):
+            exports[where] = [str(a) for a in step["export"]]
         npath = sum(1 for v in list(inputs.values()) + list(outputs.values())
                     if binding_kind(v)[0] == "path")
         ntot = len(inputs) + len(outputs)
         notes.append(f"{where}: {len(inputs)} in / {len(outputs)} out "
                      f"({npath} path, {ntot - npath} literal)")
     if problems:
-        return Loaded(p, True, {}, [], [], problems, notes)
-    return Loaded(p, True, configs, callers, branch_only, [], notes)
+        return Loaded(p, True, {}, [], {}, {}, problems, notes)
+    return Loaded(p, True, configs, callers, branch_only, exports, [], notes)
 
 
 def main(argv=None) -> int:
@@ -388,14 +506,34 @@ def main(argv=None) -> int:
     inventing discovery commands is a priced tax. This exists so `--print` can answer the two questions
     a profile answers differently from the file itself -- what the tokens expand to on THIS machine,
     and which values are paths rather than literals -- which is also what the selftest asserts.
+
+    `--print-exports` is the door `terra/batch_fetch_compare.sh` knocks on, and it is the reason bash
+    never opens `profiles/*.json` (§10's two-expander rule: a second reader would be a second JSON parser
+    AND a second expander). Flat by contract -- one attribute name per line on stdout, provenance on
+    stderr -- in the same `KEY=value`-flat spirit as the config layer's own bash door.
     """
     import argparse
     ap = argparse.ArgumentParser(description="show one module profile expanded (offline, read-only)")
     ap.add_argument("--module", default="", help=f"default {module_name()!r}")
     ap.add_argument("--print", action="store_true",
                     help="print the expanded bindings and their kind (path|literal)")
+    ap.add_argument("--print-exports", action="store_true",
+                    help="print the profile's export attribute names, one per line (for a shell "
+                         "consumer); refuses with exit 4 naming every step it looked on")
     a = ap.parse_args(argv)
     r = load(a.module)
+    if a.print_exports:
+        # Two refusal classes, both exit 4: `require()` for a profile that cannot be used at all, and
+        # `require_exports()` for one that loads fine and still has no export list. A caller must not be
+        # able to read "no names" as "nothing to fetch, all clear".
+        r.require("module_profile --print-exports")
+        names = r.require_exports("module_profile --print-exports")
+        print("module_profile: %d export attribute(s) for module %s, from %s (%s)"
+              % (len(names), a.module or module_name(),
+                 ", ".join(f"{s}.export" for s in r.exports), r.path), file=sys.stderr)
+        for n in names:
+            print(n)
+        return 0
     if not r.found:
         print(f"module {a.module or module_name()}: {r.problems[0]}")
         print(FIELD_HELP)
