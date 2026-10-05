@@ -35,6 +35,15 @@
 #   checks/wdl_gate.sh --wf SVShell --wf ResolveCpxSvGenotyping HEAD
 #   checks/wdl_gate.sh --strict HEAD        # nonzero exit if anything is unlaunchable
 #   checks/wdl_gate.sh --wf IntegrateGDVcf 7fbf1171   # the MISSING-INPUTS column is CI's question
+#
+# Beside MISSING-INPUTS sits its mirror, EXTRA-KEYS: the same input JSONs read the other direction. A
+# cell of `clean` means every key those JSONs name is an input the WDL can actually be handed (its own
+# declaration, an input of a call the call site does not bind, or a member of a struct it declares); a
+# count means one of them is not -- a stale or misspelled binding, which womtool answers "Unexpected
+# input provided" and which gatk-sv CI fails on. It is a hard finding like MISSING-INPUTS, not a
+# --strict-only one, because the offline expected set was measured to be a superset of `womtool inputs`
+# for every workflow that has one: an extra this layer names is an extra womtool names too. See
+# docs/static-checks.md for the four shapes it deliberately does not report.
 #   checks/wdl_gate.sh --tree DIR --inputs-root RENDERED --wf SVShell  # a tree and JSONs you have
 #   checks/wdl_gate.sh --no-terra HEAD      # skip CI's -t half (the Terra input JSONs)
 #
@@ -158,7 +167,13 @@ SEM_LINES=()
 # lands here, where --strict turns the whole set into a failure.
 skip_prereq=0                          # no jinja2 / no WDL module / no womtool jar / no java
 skip_nopairs=0                         # CI itself has no input JSON for that workflow
-printf '%-30s %-26s %-6s %-16s %-15s %s\n' WORKFLOW REF EXIT INCOMPLETECALL STALE-BINDINGS MISSING-INPUTS
+# The extra-key half, summed over the ref's workflows. Its own counters, because "clean", "could not
+# run" and "nothing to check" are three different answers and a blank cell cannot tell them apart.
+ek_skip=0                              # the layer could not run at all (prerequisite, or no answer)
+ek_pairs=0                             # workflows whose JSONs were read and found free of extras
+ek_found=0                             # extra keys named
+ek_bad=0                               # workflows carrying at least one
+printf '%-30s %-26s %-6s %-16s %-15s %-15s %s\n' WORKFLOW REF EXIT INCOMPLETECALL STALE-BINDINGS MISSING-INPUTS EXTRA-KEYS
 for ref in "${REFS[@]}"; do
     # A ref is user input that becomes a directory name under a `rm -rf`. `.` and `..` are
     # legal-ish git spellings and would point that wipe at the cache parent -- into the work
@@ -206,6 +221,7 @@ for ref in "${REFS[@]}"; do
     fi
     wt_run=0; wt_fail=0; wt_skip=0; wt_nopairs=0; wt_reason=""
     ref_nopairs=0
+    ek_skip=0; ek_pairs=0; ek_found=0; ek_bad=0; ek_unanswered=0
     for wf in "${WFS[@]}"; do
         # An absent workflow is a failure, not a blank cell. A typo'd name, or a name that only
         # exists on newer refs (v1.1.1 has no SVShell.wdl), used to contribute nothing to the exit
@@ -228,25 +244,57 @@ for ref in "${REFS[@]}"; do
         # count to diff -- it is the submission that dies, and CI is red on it, so it fails the gate
         # with or without --strict.
         icell="-"
+        ecell="-"
         idetail=""
         if [ -n "$inputs_note" ]; then
             icell="SKIPPED"
+            # Named and counted on its own line too: the two questions this file asks of the same files
+            # went unanswered for the same reason, and each gets its own row saying so.
+            ecell="SKIPPED"
+            ek_skip=$((ek_skip + 1))
             skip_prereq=$((skip_prereq + 1))
         else
             iargs=(--wdl-dir "$dir" --wf "$wf" --inputs-root "$inputs_root")
             [ "$TERRA" -eq 0 ] && iargs+=(--no-terra)
             iout="$("$SEM_PY" "$HERE/wdl_inputs_check.py" "${iargs[@]}" 2>&1)"; irc=$?
             iline=$(printf '%s\n' "$iout" | grep -F "GSVTK-INPUTS wf=$wf " | head -1 | sed 's/^[^ ]* //')
+            eline=$(printf '%s\n' "$iout" | grep -F "GSVTK-EXTRAS wf=$wf " | head -1 | sed 's/^[^ ]* //')
             wline=$(printf '%s\n' "$iout" | grep -F "GSVTK-WOMTOOL wf=$wf " | head -1 | sed 's/^[^ ]* //')
             if [ -z "$iline" ]; then
                 # No verdict line means the checker itself failed. Report it as the tool's failure,
                 # with its own output, rather than as a blank cell or a pass.
                 icell="CHECK-FAILED"
                 idetail="exited $irc without a verdict; its output:"
+                ecell="NO-ANSWER"; ek_skip=$((ek_skip + 1)); ek_unanswered=$((ek_unanswered + 1))
                 status=1
             else
                 istatus=$(printf '%s' "$iline" | sed -n 's/.* status=\([A-Za-z-]*\).*/\1/p')
                 imissing=$(printf '%s' "$iline" | sed -n 's/.* missing=\([0-9]*\).*/\1/p')
+                ecount=$(printf '%s' "$eline" | sed -n 's/.* extras=\([0-9]*\).*/\1/p')
+                extras_flag=0
+                if [ -z "$eline" ]; then
+                    # The required half answered and the extras half did not: that is the new column
+                    # going unanswered, which reads as "clean" to anything that guesses. Name it.
+                    ecell="NO-ANSWER"; ek_skip=$((ek_skip + 1)); ek_unanswered=$((ek_unanswered + 1))
+                    extras_flag=1; status=1
+                else
+                    estatus=$(printf '%s' "$eline" | sed -n 's/.* status=\([A-Za-z-]*\).*/\1/p')
+                    case "$estatus" in
+                        # `clean`/`N extra`, never a bare number: a bare 0 or 1 in the column beside
+                        # MISSING-INPUTS would be read as the same question answered twice.
+                        OK)        ecell="clean"; ek_pairs=$((ek_pairs + 1));;
+                        FINDING)   ecell="${ecount:-?} extra"
+                                   ek_found=$((ek_found + ${ecount:-1}))
+                                   ek_bad=$((ek_bad + 1)); status=1;;
+                        *)         ecell="NOT-CHECKED";;  # why is one column left, in MISSING-INPUTS
+                    esac
+                    # Detail lines are worth printing when the extras answer is anything but "checked
+                    # and clean" or "nothing to check" -- and NOT-CHECKED already says why, in the
+                    # column beside it. Grouped as its own test rather than chained with && because
+                    # `a || b && c` is left-associative in bash: it would have silenced the detail of a
+                    # MISSING-INPUT finding whenever the extras answer came back clean.
+                    case "$ecell" in clean|NOT-CHECKED) ;; *) extras_flag=1;; esac
+                fi
                 wstatus=$(printf '%s' "$wline" | sed -n 's/.* status=\([A-Za-z-]*\).*/\1/p')
                 wfail=$(printf '%s' "$wline" | sed -n 's/.* failures=\([0-9]*\).*/\1/p')
                 case "$wstatus" in
@@ -263,12 +311,13 @@ for ref in "${REFS[@]}"; do
                     *)         icell="${istatus:-UNKNOWN}"; status=1;;   # NO-WDL, LOAD-FAILURE, BAD-JSON
                 esac
                 if [ "$istatus" != OK ] || [ "$wstatus" = SKIPPED ] || [ "${wfail:-0}" -gt 0 ] \
+                   || [ "$extras_flag" -eq 1 ] \
                    || printf '%s\n' "$iout" | grep -q '^  DISAGREES'; then
                     idetail="$(printf '%s\n' "$iout" | grep -v '^GSVTK-')"
                 fi
             fi
         fi
-        printf '%-30s %-26s %-6s %-16s %-15s %s\n' "$wf" "$refsha" "$rc" "$inc" "$stale" "$icell"
+        printf '%-30s %-26s %-6s %-16s %-15s %-15s %s\n' "$wf" "$refsha" "$rc" "$inc" "$stale" "$icell" "$ecell"
         grep -oE "No such input [A-Za-z0-9_]+" "$log" 2>/dev/null | sort -u | sed 's/^/        stale binding: /'
         [ -n "$idetail" ] && printf '%s\n' "$idetail" | sed 's/^/        /'
         if [ "$rc" -ne 0 ] || { [ "$STRICT" -eq 1 ] && { [ "${inc:-0}" -ne 0 ] || [ "${stale:-0}" -ne 0 ]; }; }; then
@@ -297,7 +346,29 @@ for ref in "${REFS[@]}"; do
     elif [ "$wt_nopairs" -gt 0 ]; then
         printf '%-30s %-26s %s\n' WOMTOOL "$refsha" "NO-PAIRS — CI has no input JSON for these either"
     fi
-    skip_prereq=$((skip_prereq + wt_skip))
+    # One EXTRA-KEYS row per ref, for the same reason the WOMTOOL row exists: the per-workflow cell
+    # already carries the answer, and this row is what distinguishes "read every key and found none
+    # un-declared" from "never got to read a key". `clean` in a cell is never printed from here on a
+    # layer that did not run -- that answer is SKIPPED, counted, and --strict fails on it.
+    ek_noans=$(( ${#WFS[@]} - ek_pairs - ek_bad - ek_skip ))
+    if [ "$ek_skip" -gt 0 ]; then
+        printf '%-30s %-26s %s\n' EXTRA-KEYS "$refsha" \
+            "SKIPPED — $ek_skip of ${#WFS[@]} workflow(s): no extra-key answer was produced"
+        echo "        Whether those input JSONs bind an input the WDL never declared is UNANSWERED"
+        echo "        for this ref, not answered clean. Same prerequisite as the INPUTS-JSON row above;"
+        echo "        --strict fails on it."
+    elif [ "$ek_found" -gt 0 ]; then
+        printf '%-30s %-26s %s\n' EXTRA-KEYS "$refsha" \
+            "FAILED — $ek_found un-declared key(s) in $ek_bad of ${#WFS[@]} workflow(s)"
+    elif [ "$ek_pairs" -gt 0 ]; then
+        ek_plural="s"; [ "$ek_pairs" -eq 1 ] && ek_plural=""
+        printf '%-30s %-26s %s\n' EXTRA-KEYS "$refsha" \
+            "CLEAN — $ek_pairs workflow(s)' input JSON${ek_plural} name no key the WDL does not declare"
+    else
+        printf '%-30s %-26s %s\n' EXTRA-KEYS "$refsha" \
+            "NOT-CHECKED — $ek_noans workflow(s) had no comparable input JSON at this ref"
+    fi
+    skip_prereq=$((skip_prereq + wt_skip + ek_unanswered))
     # Counted separately on purpose: a prerequisite skip fails --strict, a CI blind spot does not.
     skip_nopairs=$((skip_nopairs + ref_nopairs + wt_nopairs))
 
@@ -364,20 +435,25 @@ fi
 
 if [ "$status" -eq 0 ] && [ "$STRICT" -eq 1 ]; then
     echo "no hard errors, and --strict is satisfied: no IncompleteCall, no stale binding, no missing"
-    echo "required input in any CI-matched input JSON, no womtool failure, no rise in any SEMANTICS"
-    echo "count, no layer skipped for a missing prerequisite, and every workflow named was present."
+    echo "required input in any CI-matched input JSON, no un-declared key in one either, no womtool"
+    echo "failure, no rise in any SEMANTICS count, no layer skipped for a missing prerequisite, and"
+    echo "every workflow named was present."
 elif [ "$status" -eq 0 ]; then
     echo "no hard errors. Re-run with --strict to treat IncompleteCall / stale bindings / a rise in"
     echo "the SEMANTICS counts / any prerequisite skip as failure (today's gatk-sv carries a few of"
-    echo "each on purpose, so --strict is a diff-against-baseline decision, not a default). A MISSING-"
-    echo "INPUTS count is NOT in that list: a required input no CI input JSON binds is a hard finding"
-    echo "either way, because CI is red on it."
+    echo "each on purpose, so --strict is a diff-against-baseline decision, not a default). Neither"
+    echo "hard column is in that list: a MISSING-INPUTS count is a required input no CI input JSON"
+    echo "binds, and an EXTRA-KEYS count is an input JSON naming a key the WDL never declared. Both"
+    echo "are hard either way, because CI is red on both -- womtool's 'Unexpected input provided' for"
+    echo "the second one."
 else
     echo "gate FAILED: see the rows above; rc=2 is a hard error, IncompleteCall means a required"
     echo "             input is never bound (unlaunchable), stale binding means the callee has"
-    echo "             dropped or renamed an input this caller still passes, and MISSING-INPUTS means"
+    echo "             dropped or renamed an input this caller still passes, MISSING-INPUTS means"
     echo "             a required input is absent from the input JSONs CI renders -- which is what"
-    echo "             'Required workflow input ... not specified' in CI says, and miniwdl cannot see."
+    echo "             'Required workflow input ... not specified' in CI says, and miniwdl cannot"
+    echo "             see -- and EXTRA-KEYS is its mirror: those JSONs name a key no declaration"
+    echo "             can hand, which is womtool's 'Unexpected input provided' and CI's red build."
 fi
 if [ "$skip_nopairs" -gt 0 ]; then
     echo "note: $skip_nopairs workflow-run(s) had no CI input JSON to check, so the required-input"

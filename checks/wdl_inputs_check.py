@@ -602,9 +602,10 @@ def report(name: str, res: dict, wom: dict) -> int:
                  name + ".wdl"))
         for ppath, kind in extra["found"]:
             print("      [%s] %s" % (kind, ppath))
-        print("      womtool answers \"Unexpected input provided: %s\" and gatk-sv CI fails on that "
-              % extra["key"])
-        print("      (validate.sh on the test JSONs, terra_validation.py's own loop on the Terra ones).")
+        print("      This is what womtool calls \"Unexpected input provided: %s\", and gatk-sv CI fails" %
+              extra["key"])
+        print("      on it twice: validate.sh womtool-validates the test JSONs, and terra_validation.py's")
+        print("      own loop is the -t half.")
         print("      %s" % ("Nearest declared key: %s — a rename leaves the old binding behind, which is "
                             "the usual reason for this line." % extra["near"] if extra["near"]
                             else "No declared key is close to it, so this is not a rename left behind: a "
@@ -630,7 +631,7 @@ def report(name: str, res: dict, wom: dict) -> int:
         if theirs and extras_theirs and extras_ours:
             # Both mirrors now ask the question, and both answered it: the strongest form of the answer
             # this file can give, so it is said out loud rather than left to the reader to line up.
-            print("  EXTRAS-CONFIRMED womtool rejected %s pair(s) for keys the WDL does not declare and "
+            print("  EXTRAS-CONFIRMED womtool rejected %s pair(s) for keys the WDL does not declare, and "
                   % extras_theirs)
             print("        this layer named %s of them on the same file(s). Two independent mirrors, the "
                   % extras_ours)
