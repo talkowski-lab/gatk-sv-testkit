@@ -74,8 +74,18 @@ if [ ! -x "$PY" ] && [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 # caller's python3 has no firecloud while ./.venv has it is a phase that reported nothing.
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1 && [ -x .venv/bin/python ] \
    && .venv/bin/python -c 'import firecloud' >/dev/null 2>&1; then PY=.venv/bin/python; fi
-# Absolute, because one assertion runs under `env -i` with an empty PATH on purpose.
-PY="$ROOT/${PY#./}"
+# Absolute, because one assertion runs under `env -i` with an empty PATH on purpose. What was here was
+# `PY="$ROOT/${PY#./}"` -- correct for exactly one of the three ways a caller can name a python, and wrong
+# for the other two: an absolute path became `/checkout//Users/.../python` and a bare `python3` became
+# `/checkout/python3`. Neither exists, and a python that does not exist is not a failure here, it is a
+# SKIP: on a checkout with no `.venv` of its own the suite reported "1 passed, 1 skipped" while 48
+# assertions had quietly not run at all.
+case "$PY" in
+    /*)  : ;;                                        # already absolute
+    ./*) PY="$ROOT/${PY#./}" ;;
+    */*) if [ -x "$PY" ]; then PY="$ROOT/$PY"; fi ;; # repo-relative without the leading ./
+    *)   PY="$(command -v "$PY" 2>/dev/null || printf '%s' "$PY")" ;;
+esac
 
 TOOL="$ROOT/terra/batch_check_inputs.py"
 FIX="$ROOT/scripts/selftest.d/fixtures/jar"
