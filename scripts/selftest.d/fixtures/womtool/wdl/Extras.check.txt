@@ -1,0 +1,9 @@
+* Suggestion: install shellcheck (www.shellcheck.net) to check task commands. (--suppress CommandShellCheck suppresses this message)
+Extras.wdl
+    workflow Extras
+        (Ln 17, Col 5) UnusedDeclaration, nothing references WidgetOpt attrs
+        (Ln 18, Col 5) UnusedDeclaration, nothing references WidgetOpt? more_attrs
+        (Ln 19, Col 5) UnusedDeclaration, nothing references String? note
+        call MakeThing
+            (Ln 21, Col 3) IncompleteCall, required input(s) omitted in call to MakeThing (cpu)
+    task MakeThing
