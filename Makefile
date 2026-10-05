@@ -245,6 +245,8 @@ selftest:
 	@$(SHELL) scripts/selftest.d/rerun.sh "$(PYTHON)"    # rerun any step of the batch chain, own tally
 	@$(SHELL) scripts/selftest.d/profiles.sh "$(PYTHON)" # module profiles: golden vs loader, own tally
 	@$(SHELL) scripts/selftest.d/womtool.sh "$(PYTHON)"  # CI's womtool half: bindings vs rendered JSONs, own tally
+	@$(SHELL) scripts/selftest.d/reach.sh "$(PYTHON)"    # reach's image buckets on a synthetic tree, own tally
+	@$(SHELL) scripts/selftest.d/jarshape.sh "$(PYTHON)" # womtool's inputs shape, graded with and without a jar
 
 lint: syntax
 

@@ -310,7 +310,7 @@ cmd_tools() {
 cmd_check() {
   stamp
   if [ -z "${MINIWDL:-}" ] && wdlbin="$(miniwdl_bin)"; then MINIWDL="$wdlbin"; export MINIWDL; fi
-  ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0; reach_targets=()
+  ref=""; wfargs=(); pyargs=(); compare_to=""; want_sem=0; want_reach=0; want_images=0; reach_targets=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --help|-h)    printf '%s\n' "usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR]"
@@ -327,6 +327,9 @@ cmd_check() {
                    printf '%s\n' '  --reach          wdl_reach.py over the tree, once, answering every --wf NAME:'
                    printf '%s\n' '                   what that name reaches (--reverse is not exposed here; run the'
                    printf '%s\n' '                   tool directly for that)'
+                   printf '%s\n' '  --images         with --reach only: also print the container images the reached set'
+                   printf '%s\n' '                   binds, and which of them a run would NOT build. The render knobs'
+                   printf '%s\n' '                   (--inputs-root/--checkout/--head-sha) stay on the tool itself.'
                    printf '%s\n' ''
                    printf '%s\n' 'Exit codes: 0 clean, 1 a checker reported findings (findings are not a verdict),'
                    printf '%s\n' '          2 usage error (nothing ran), 3 a prerequisite is missing.'
@@ -337,6 +340,7 @@ cmd_check() {
       --repo)       pyargs=(--repo "${2:?--repo needs a directory}"); shift 2;;
       --compare-to) compare_to="${2:?--compare-to needs a ref}"; shift 2;;
       --semantics)  want_sem=1; shift;;
+      --images)     want_images=1; shift;;
       --reach)      want_reach=1; shift;;
       -*)           die "check: unknown flag $1 (usage: gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach]; --reach needs at least one --wf NAME)";;
       *)            ref="$1"; shift;;
@@ -365,6 +369,15 @@ cmd_check() {
   wdl_reach has no default target: it answers NAMED files, workflows, tasks and scripts, one
   answer per --wf NAME from a single tree load. There is no default target, because a reach
   answer about the wrong file is worse than no answer."
+  fi
+  # --images qualifies --reach and means nothing without it: no target means no reached set, and no
+  # reached set means the image list would be an empty list that reads like "no images to rebuild".
+  # Ignoring the flag would print a clean check that never looked at images, so refuse before anything
+  # runs -- the same rule, and for the same reason, as --reach with no target.
+  if [ "$want_images" = 1 ] && [ "$want_reach" != 1 ]; then
+    die "check --images needs --reach: the image list is what the REACHED set binds, and with no
+  target there is no reached set to ask. Pass both, e.g.
+  ./gsvtk check --reach --images --wf GenotypeBatch"
   fi
   if [ -n "$ref" ]; then
     printf '\n=== wdl_gate.sh %s ===\n' "$ref"
@@ -407,6 +420,17 @@ cmd_check() {
       reach_names="${reach_names:+$reach_names, }$t"
       reach_flags+=(--target "$t")
     done
+    # The image list costs a second look at the same load (measured on the real tree: 41 s against
+    # 38 s for the same command), so it is opt-in here exactly as it is on the tool.
+    [ "$want_images" = 1 ] && reach_flags+=(--images)
+    # The image verdict is a claim about a COMMIT, and the tool's default is the checkout's HEAD (its
+    # own --help says so). When the caller named a ref, THAT is the commit under review: without
+    # forwarding it, a `<branch>-<sha>` image tag is compared against whatever the checkout happens to
+    # be sitting on, and "not a build of this commit" is answered about the wrong commit -- the exact
+    # wrongness this whole feature exists to catch, arriving by wiring instead of by code.
+    if [ "$want_images" = 1 ] && [ -n "$ref" ]; then
+      reach_flags+=(--inputs-ref "$ref")
+    fi
     printf '\n=== wdl_reach.py %s ===\n' "$reach_names"
     "$PY" checks/wdl_reach.py ${pyargs[@]+"${pyargs[@]}"} \
       ${reach_flags[@]+"${reach_flags[@]}"} || rc=1

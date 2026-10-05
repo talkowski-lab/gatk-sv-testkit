@@ -485,6 +485,33 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     check 'REAL composition, no stub anywhere: check --reach answers the question it advertises' \
         real_reach
 
+    # --images is a DISPATCHED flag, and the two ways it can be broken are different: swallowed by the
+    # dispatcher (the answer comes back with no image section), or answered by a section that quietly
+    # omits what it could not resolve. This tree declares no docker input at all, so the honest answer
+    # is "binds none" -- and the tool must SAY that rather than print an empty list, because an empty
+    # image list is exactly what a caller reads as "nothing to rebuild".
+    real_reach_images() {
+        local out rc
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+                 bash "$ROOT/gsvtk" check --reach --images --repo "$TMP/reach-tree" --wf Foo 2>&1)"; rc=$?
+        if [ "$rc" -gt 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
+        if ! printf '%s\n' "$out" | grep -qF 'target: Foo.wdl::Foo [workflow]'; then
+            printf '--images lost the reach answer it was added to:\n%s\n' "$out"; return 1
+        fi
+        if ! printf '%s\n' "$out" | grep -qF 'image sources:'; then
+            printf '--images never reached wdl_reach.py (no image section):\n%s\n' "$out"; return 1
+        fi
+        if ! printf '%s\n' "$out" | grep -qF 'bind no docker input'; then
+            printf 'a workflow binding no image was dropped instead of reported:\n%s\n' "$out"; return 1
+        fi
+        if ! printf '%s\n' "$out" | grep -qF 'rendered input JSON: SKIPPED'; then
+            printf 'a source that could not run was silent instead of named:\n%s\n' "$out"; return 1
+        fi
+        return 0
+    }
+    check 'REAL composition: --reach --images answers AND reports every source it could not use' \
+        real_reach_images
+
     # The same composition proof for SEVERAL names, on the same two-node tree: the dispatcher used to
     # run one wdl_reach process per name, so two names cost two whole-tree parses. `tree:` is printed
     # once per parse, which makes it the counter — and it is counted here, on the real tool over a real
@@ -587,6 +614,23 @@ expect 'and --reach with no target is a usage error, stated as one' 2 \
     'check --reach needs a target: pass --wf NAME' -- run check --reach
 absent 'refused BEFORE any checker ran (a usage error must not spend a scan)' 2 \
     'STUB checks/svshell_contract_check.py' -- run check --reach
+# --images qualifies --reach. Two separate claims, because two different bugs pass a single one: the
+# flag reaching the tool (forwarded once, at the end of that tool's flags), and the flag meaning
+# nothing on its own (a bare --images would print a clean check that never looked at images).
+expect '--images is forwarded to the ONE wdl_reach call, not swallowed by the dispatcher' 0 \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch --images' \
+    -- run check --reach --images --repo /tmp --wf GenotypeBatch
+# `wdl_reach --images` defaults its commit-under-review to the checkout's HEAD (its own --help says the
+# default is HEAD "because the question is about YOUR branch"). A caller who typed a ref asked about a
+# different commit, so the ref must travel — otherwise the "NOT A BUILD OF THIS COMMIT" verdict is
+# computed against the wrong commit, which is the failure the feature exists to catch.
+expect 'a named ref travels with --images, so the verdict is about the ref asked about' 0 \
+    'STUB checks/wdl_reach.py --repo /tmp --target GenotypeBatch --images --inputs-ref base-ref' \
+    -- run check base-ref --reach --images --wf GenotypeBatch --repo /tmp
+expect '--images without --reach is a usage error, stated as one' 2 \
+    'check --images needs --reach' -- run check --images --wf GenotypeBatch
+absent 'and that refusal happens before anything ran: no gate, no scan' 2 \
+    'STUB checks/wdl_gate.sh' -- run check --images --wf GenotypeBatch
 # The tree the opt-in checkers read comes from the resolver, not from the caller remembering --repo.
 expect 'with no --repo, the tree is what the resolver says, so --semantics can answer' 0 \
     'STUB checks/wdl_semantics.py --repo /tmp/resolved-checkout' \
