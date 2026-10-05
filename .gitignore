@@ -91,3 +91,9 @@ audit.local.txt
 # pushed), while the history audit keeps finding whatever those commits and blobs already published.
 docs/archive/
 docs/handoff/
+
+# Tool-local state: editor/agent settings, lock files, per-machine project config. Not repo content --
+# and while untracked they were enough to make `git status` report a dirty tree, which is the check
+# worktree isolation runs before handing a review or implementation lane its own checkout.
+.claude/
+.serena/
