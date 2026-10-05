@@ -1,13 +1,17 @@
 # Supporting any gatk-sv module: loops, profiles, and one question per oracle
 
 > [!IMPORTANT]
-> **Status: revision 3 — §9 steps 1, 2 and 3 are shipped; steps 4 and 5 are not.** The proposal is now
-> partly a description of this checkout: `profiles/genotyping.json` exists, `kit/module_profile.py` is
-> its only reader, `batch_configs.py`'s maps are read from it, and `check` reads upstream's
-> `.json.tmpl` files. What still does not exist is the collapsing of the duplicate step maps and the
-> per-module literals (§9 step 4) and a second module (§9 step 5), so those sections stay proposal, and
-> every command in a `PROPOSED` block below still names a flag or file that is not here — CONTRIBUTING's
-> "never document a flag you did not run" still decides what is fenced and what is not.
+> **Status: revision 3 — §9 steps 1, 2 and 3 are shipped; step 4 is part-shipped and step 5 is a written
+> refusal.** The proposal is now partly a description of this checkout: `profiles/genotyping.json`
+> exists, `kit/module_profile.py` is its only reader, `batch_configs.py`'s maps are read from it, `check`
+> reads upstream's `.json.tmpl` files, and the three duplicate step→workflow maps are gone — `terra/steps.py`
+> is the one reader and it derives the map and the per-step root entity from the profile. What still does
+> not exist is the rest of §9 step 4's literal list (the fetch loop's export list, guarded but not
+> derived; the jar-probe target+flags, in another lane's files) and any second module: §9 step 5 has been
+> graded against this tree and **both** candidates fail it, with the wrong schema field named for each.
+> So those sections stay proposal, and every command in a `PROPOSED` block below still names a flag or
+> file that is not here — CONTRIBUTING's "never document a flag you did not run" still decides what is
+> fenced and what is not.
 >
 > **Revision 1 was reviewed adversarially by three independent reviewers and it was wrong in four
 > load-bearing places.** §13 lists each overturned claim, the measurement that overturned it, and
@@ -52,12 +56,12 @@ code, in more places than revision 1 admitted.
 | `terra/batch_check_inputs.py:42` `WDLS` | step→workflow map: **copy 1 of 3** |
 | `terra/batch_save_metadata.py:36` `STEPS` | step→workflow map: copy 2 of 3 |
 | `terra/batch_status.py:27` `STEPS` | the 5-step chain: copy 3 of 3 (revising a claim made in rev 1: `batch_status.py` *does* hardcode the genotyping chain) |
-| `terra/batch_fetch_compare.sh:36-38` | the exported-attribute list: **7** names, and the largest concentration of genotyping literals after `batch_configs.py` |
+| `terra/batch_fetch_compare.sh:141-148` (its header names 5 of the 7 at `:36-39`) | the exported-attribute list: **7** required + 10 optional names, and the largest concentration of genotyping literals after `batch_configs.py`. Still a literal (no `export` field exists to hold it: §9 step 4 names the schema change), and now guarded — `scripts/selftest.d/profiles.sh` compares it against the attributes the profile says the chain writes |
 | `terra/batch_rerun_step.py` | `CONFIG = "10-GenotypeBatch-rerun"`, `ETYPE = "sample_set"`, the `GenotypeBatch.` key prefix, `body("10-GenotypeBatch")` |
 | `terra/stage_inputs.py:10,346` | `genotyped_depth_vcf` inside a generic tool's *help and error text* |
 | `checks/wdl_gate.sh:61` | `WFS=(SVShell GATKSVPipelineSingleSample GenotypeBatch MakeCohortVcf)` |
 | `checks/image-check/*.sh` | `GenotypeSVs` **and the flags it probes** (`jar_flag_probe.sh:52`: `rd-depth-table rd-pesr-table rd-table`) |
-| `replay/build_inputs.py:57,159-214` | the #961 rename, and a hardcoded `SVShell.` prefix: the replay loop is not parameterized by workflow at all |
+| `replay/build_inputs.py:57,159-214` | ~~the #961 rename, and a hardcoded `SVShell.` prefix: the replay loop is not parameterized by workflow at all~~ — **this row is stale; both literals in it are gone.** `wdl_inputs()` returns `f"{wf.name}."` out of the miniwdl-loaded document (`:86-101`), so the prefix is the arm's own root workflow (`SVShell` for the cohort arm, `GATKSVPipelineSingleSample` for the single-sample one), and the private #961 rename table was deleted as "not this file's business" (9c9c910). What is left in the file is `LOCAL_PREFIX` (`:61`), a Cromwell staging convention rather than a module fact. Pinned by a control that cannot pass on the literal it replaced (eee444c): two fixture WDLs, one named `SVShell` and one not, must produce different prefixes from the same code path — wired at `scripts/selftest.sh:271`, and a NAMED skip when the interpreter has no miniwdl |
 | `compare/compare_batch_tables.py:38-55` | 7 table roles, 3 readers, tolerances, `RENAMES`, the 10× `SRQ`/`PEQ` scale note |
 | `compare/diff_rd_states.py:26,31-32` | baseline/new VCF defaults, computed **at import** |
 | `Makefile:242`, `kit/gsvtk-config:57` | an audit pattern; "used when running the java genotyper" |
@@ -449,7 +453,9 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    tool's `--control` mode asserts the untouched capture **passes**, then deletes one input binding from
    step 06 and one output binding from step 10 out of a copy of the table and requires the comparison to
    **fail** both times — and `scripts/selftest.d/profiles.sh` asserts that control every run
-   (`profiles selftest: 15 ok, 0 failed`). The golden is *not* retired yet, as this step's original text
+   (`profiles selftest: 18 ok, 0 failed` — 15 when this sentence was written; 16 after the export-list
+   guard, 17 after its control, 18 after the `fetch_baseline` counted-gap guard, which carries ten
+   assertions of its own inside one tally line). The golden is *not* retired yet, as this step's original text
    imagined: it stays while `CONFIGS` is populated from data, because it is the only content check the
    loader has. **Merge note:** the rerun lane holds `scripts/selftest.d/golden/rerun-step10-body.json`
    (2473 bytes) captured from the same placeholder coordinates (`your-namespace` /
@@ -500,8 +506,11 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
 4. **Collapse, don't duplicate.** Delete the **three** step→workflow copies
    (`batch_check_inputs.py:42`, `batch_save_metadata.py:36`, `batch_status.py:27`) into one reader fed
    by the module, and fold in `batch_fetch_compare.sh`'s export list (7 names),
-   `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path, `build_inputs.py`'s `SVShell.` prefix,
-   `wdl_gate`'s default set and the jar-probe target+flags. Two guards on this step, both from review:
+   `batch_rerun_step.py`'s prefix/`ETYPE`/Dockstore path, `build_inputs.py`'s `SVShell.` prefix
+   (**done, and by a different route than this step assumed**: the prefix is not folded into a profile
+   read, it is read out of the WDL document the caller already passed — see §1's row for that file),
+   `wdl_gate`'s default set and the jar-probe target+flags (**still open, and in another lane's files**:
+   see the list after item 5). Two guards on this step, both from review:
    the default `--wf` set stays the script's own list with profiles *added* (a profile naming only
    `GenotypeBatch` would silently drop `SVShell`, `GATKSVPipelineSingleSample` and `MakeCohortVcf`,
    three of four, in a tool whose comment says an unchecked workflow must fail because "the gate
@@ -512,11 +521,109 @@ sub-workflow's declared inputs instead of waiving it; see §3 rule 1's `wdl`/`wo
    entry for it (`:137-143`). Both become reachable the moment chains are data, and both are this
    repo's named failure class: an empty that reads like nothing was wrong.
 5. **Ship a second module, honestly.** Rev 1's "zero new Python" is already false for both its own
-   candidates: `TrainGCNV` needs member-entity freeze (§3.7) **and** a comparator nobody has (its
+   candidates: `TrainGCNV` needs member-entity freeze (§3's rule 7) **and** a comparator nobody has (its
    comparable artifacts are tarballs and per-interval VCF sets; no existing tool reads those), and the
    CPX pair draws on ≥6 out-of-chain producers. So the acceptance test is: **a profile, plus at most
    two named code changes, each listed here before the work starts.** If it needs more, the schema is
    wrong; say which field.
+
+### Step 5: the gate decision, taken against this tree (no profile shipped)
+
+Measured read-only at **gatk-sv `main`** — templates with the one substitution §4 ships (`{{…}}` →
+`null`) and a strict `json.loads`, never rendered; WDL sides read with miniwdl; this repo at the commit
+this paragraph is committed in. The test is applied as written: a profile plus **at most two** named
+changes, each named before the work starts. **Both candidates fail, and they fail on different fields.**
+No `profiles/traingcnv.json` or `profiles/cpx.json` was written by this decision, and none should be
+until the named fields exist.
+
+**`TrainGCNV` — 5 named changes, so the schema is wrong.** What the data actually is: the cohort
+template binds **53** keys, of which **39** are literals/`null` (typed, per §3 rule 3), **11** are
+`workspace.*`, and only **3** are `this.*` — two of them over a member collection,
+`TrainGCNV.count_files ← ${this.samples.coverage_counts}` and `TrainGCNV.samples ←
+${this.samples.sample_id}` (`TrainGCNV.json.tmpl:60-61`, still the same two lines §3's rule 7 cites).
+`TrainGCNV.wdl` declares **68** inputs of which **12** are required, and **11** outputs, all optional:
+`cohort_gcnv_model_tars` / `cohort_contig_ploidy_{model,calls}_tar` / `cohort_gcnv_tracking_tars` as
+`File?`/`Array[File]?`, `cohort_gcnv_calls_tars` as `Array[Array[File]]?`, and
+`cohort_genotyped_{intervals,segments}_vcfs` plus `cohort_denoised_copy_ratios` as `Array[File]?`. The
+53-vs-12 ratio is why §3 rule 2 refuses a "required + deltas" profile, and it is unchanged.
+
+The changes, each one place:
+
+1. `terra/batch_freeze.py` — member-entity freeze. `attrs()` writes a two-line TSV headed
+   `entity:sample_set_id` with one row (the batch), so it cannot put `coverage_counts{frz}` on every row
+   of the member entity that path points at (`this.samples.*`, §3 rule 7's "another entity type"), which
+   is what freezing this step's second input means.
+2. `kit/module_profile.py` + the profile — `freeze` is not in `STEP_FIELDS`, and §3's rule 7 wants it as
+   objects that *name their entity path*. Without it the profile cannot state which member entity feeds
+   which input, so change 1 has nothing to read.
+3. `kit/module_profile.py` + the profile — `export` (same blocker as §9 step 4's first bullet): nothing
+   declares which attributes a fetch should pull for this module, and the fetch loop's list is
+   genotyping's.
+4. `kit/module_profile.py` + the profile — `compare` (§3 rule 8) is not in the schema either, and
+   `batch_fetch_compare.sh`'s `table` stage hardcodes one tool
+   (`COMPARE_TABLES=$ROOT/compare/compare_batch_tables.py`) for one module's seven roles.
+5. A driver that turns `compare` entries into calls: nothing in this repo iterates *N* bundle pairs or
+   *N* per-interval VCF pairs from data.
+
+**The half of the objection that has aged, and the half that has not.** The sentence above says "a
+comparator nobody has", and that is now only half true. `compare/tar_manifest.py` exists and names this
+exact gap in its own header; it diffs two `.tar.gz` (or two directories) by **member manifest** — path,
+size, type — recurses nested tars to `--depth` 2 so the gCNV sample×shard nesting reads as one manifest,
+ignores mtimes, and checks bytes only under `--hash`. That covers the *bundle* half of `TrainGCNV`:
+model/calls/tracking/ploidy tars are comparable today, and the `Array[Array[File]]` shape is exactly what
+its recursion was written for. What survives is the other half: a manifest diff answers "which member
+appeared, vanished or changed size", not "this interval's callset gained three calls". The per-interval
+and per-segment VCF sets, and `cohort_denoised_copy_ratios`, still need someone to decide which interval
+on side A is the same interval on side B and then diff the calls — `vcf_paired_diff.py`,
+`site_set_diff.py` and `matrix_diff.py` each do that for **one** pair of files and nothing drives them
+over a set. So: change 5 stands; the reason in this bullet is now "no driver over N pairs", not "no tool
+can open a tar".
+
+**Wrong field, named: `freeze`.** §3's rule 7 — freeze entries as objects, each naming the entity path
+it writes — is the field this candidate needs and the schema does not have, and it is the one that cannot
+be worked around in data, because the freeze loop physically emits one row for one `sample_set`. (Changes
+3 and 4 are `export` and `compare`, and they are the same two fields step 4's first bullet names; change 5
+is code, not schema.)
+
+**The CPX pair (`ResolveComplexVariants` + `RefineComplexVariants`) — 5 named changes, and a different
+field is wrong.** Measured from their two cohort templates: **26** keys bound (14 + 12), **2** literals,
+**10** `workspace.*`, and **12** `this.*` reads — of which **8** are member-collection reads over
+`this.sample_sets.*` (`disc_files`, `rf_cutoff_files`, `batch_name_list`, `batch_sample_lists`,
+`PE_metrics`, `PE_metrics_indexes`, `Depth_DEL_beds`, `Depth_DUP_beds`) and **0** of the 12 are written by
+the pair itself. `ResolveComplexVariants.wdl` requires 14 of its inputs, `RefineComplexVariants.wdl` 12,
+so neither is a small chain. One thing this corpus cannot answer, measured rather than assumed: the
+string `rootEntityType` appears **nowhere** in gatk-sv at `main` (`git grep` over the ref: no hits), so
+which entity a step is submitted against is a workspace-side fact this repo learns only from a live
+workspace (`fetch_baseline.py` reads it off each config) — an independent reason §5's lock sidecar has to
+exist, and a reason a profile's `rootEntityType` cannot be graded upstream. The out-of-chain producers,
+named from the WDL corpus by the output that
+carries each attribute (a name match, stated as one; the wrapper WDLs `GATKSVPipelinePhase1`,
+`GATKSVPipelineBatch` and `SVShell` re-declare most of these and are not counted separately):
+
+| attribute read by the pair | producer workflow at `main` |
+|---|---|
+| `sample_sets.merged_PE`, `merged_PE_index`, `merged_dels`, `merged_dups` | `GatherBatchEvidence` (`BatchEvidenceMerging` underneath) |
+| `sample_sets.cutoffs` | `FilterBatchSites` |
+| `sample_sets.filtered_batch_samples_file` | `FilterBatchSamples` (only WDL declaring it) |
+| `combined_vcfs`, `cluster_bothside_pass_lists`, `cluster_background_fail_lists` | `CombineBatches`, `MakeCohortVcf` |
+| `cleaned_vcf` | `CleanVcf` (only WDL declaring it) |
+
+That is **six distinct producers** for a two-workflow chain — `GatherBatchEvidence`, `FilterBatchSites`,
+`FilterBatchSamples`, `CombineBatches`, `MakeCohortVcf`, `CleanVcf` — so §2's prediction
+("a 2-workflow CPX chain draws on ≥6 upstream producers") is confirmed rather than aged, and §9 step 5's
+claim stands. Its named changes: member-entity freeze (same `batch_freeze.py` gap, this time writing on
+every row of the *member* entity those `this.sample_sets.*` reads point at — §3 rule 7's other half); a
+field naming out-of-chain producers, plus the freeze-scope code that would read it; `export`; `compare`;
+and the same driver. **Wrong field: `steps`
+itself** — it is chain-shaped, and there is no field anywhere in the schema that can say "this chain
+consumes artifacts produced by six workflows that are not in it", which is the exact thing §2 said the
+profile would have to be able to say. A profile that omitted them would still load, still pass
+`batch_configs.py check`, and freeze nothing.
+
+**What this decides.** Step 5 stays closed. Shipping either module now would mean shipping a profile
+whose inputs point at attributes no loop can freeze — §11 q3's "read and ignored" failure, one floor up.
+The two fields to add before any second module are `freeze` (§3's rule 7 object) and a producer field on
+the chain; `export` and `compare` are needed for the fetch/compare halves and are already named in step 4.
 
 **Where this leaves the migration.** Steps 1-3 are built and gated (`scripts/selftest.d/profiles.sh`,
 `probe_fixes.py`'s two new probes, and the golden). **Step 4 is partly built, and its shape changed while
@@ -530,14 +637,89 @@ tables, and `rerun.sh` pins the agreement step by step *plus* the control that a
 shows up in the map (that control fails on the literals, which is what makes the agreement check a claim
 about one source rather than a tautology).
 
-Still open in step 4, each with its guard named in item 4 above: `terra/batch_fetch_compare.sh`'s 7-name
-export list, `replay/build_inputs.py`'s `SVShell.` prefix, the jar-probe target+flags, and
-`fetch_baseline.py:160`'s `!! no config for step`, which prints and continues -- its comment at `:108`
-says why it declines `steps.match_configs` (that lookup answers a request for a known step; this one
-enumerates a workspace). `checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item
-4's first guard is that a profile naming only `GenotypeBatch` would silently drop three of the four
-workflows it certifies, in the one tool whose comment says an unchecked workflow must fail. Step 5 stays
-open, and §11's questions (1, 2, 3) are unanswered.
+Still open in step 4, one bullet per item, each saying what is actually blocking it:
+
+* **`terra/batch_fetch_compare.sh`'s export list (7 required + 10 optional names): still a literal, and
+  the blocker is a schema field that does not exist, not work left undone.** §3 rule 5's `export` is the
+  field meant to hold it; `kit/module_profile.py` does not have it — `STEP_FIELDS` is
+  `step, wdl, workflow, rootEntityType, inputs, outputs, branch_only_inputs`, so a profile carrying
+  `export` is refused (measured: `unknown field 'export'`, exit 4). And no field that *does* exist
+  reproduces the seven, which is the thing to know before adding one: the terminal step's outputs are
+  **10** attributes, **8** once §3 rule 4's `_index` siblings are excluded, and the fetched 7 are those 8
+  minus **`regeno_coverage_medians`** — which the script lists as OPTIONAL. So deriving the list from the
+  profile as it stands would promote that one attribute to *required*, and "required" is the script's
+  exit code (`fetch incomplete: N required *<new> attribute(s) not set yet` → `return 1`): every baseline
+  whose chain never wrote `regeno_coverage_medians` would start failing a fetch that passes today. That
+  is a question to ask with a real run in hand, so it was **asked and rejected** rather than settled
+  inside a refactor whose promise was "collapse, don't duplicate".
+
+  What ships instead is the guard that makes the eventual swap checkable:
+  `scripts/selftest.d/profiles.sh`'s export-list probe runs `terra/batch_fetch_compare.sh fetch
+  --dry-run` — which touches no Terra, no bucket and no dependency, so it has no SKIP branch — and asserts
+  the 7 and the 10 against the attributes the profile says the chain writes, **stating the one-name delta
+  as a fact instead of pretending the sets are equal**. Falsified from both sides: renaming a
+  terminal-step output *in the profile* fails 2 of its 6 assertions; making the rejected promotion (move
+  `regeno_coverage_medians` into the required list) fails 3; renaming a required name to an attribute no
+  step writes fails 2. **To finish this item in one move:** add `export` to `STEP_FIELDS` and to the
+  `Loaded` surface in `kit/module_profile.py`, give `profiles/genotyping.json` its per-step `export`
+  names, and read them in `batch_fetch_compare.sh` the way the suffixes are already read. That probe is
+  what tells the author whether the change kept the seven names — do not re-derive it, and do not
+  re-litigate the promotion without a run that shows whether the attribute is always written.
+* **the jar-probe target+flags: STILL OPEN, deliberately not touched here, and located differently than
+  the hand-off note for this lane said.** The three flags are at
+  `checks/image-check/jar_flag_probe.sh:52` and `checks/image-check/svshell_image_check.sh:148` (`for f
+  in rd-depth-table rd-pesr-table rd-table`), with the VM target in `run_in_image.sh`'s `$RUN_TARGET`.
+  `terra/batch_check_inputs.py`, the file this lane was told owned them, carries **no** probe target or
+  flags in this tree — it reads the step→workflow map from `terra/steps.py` and its only jar reference is
+  `WOMTOOL_JAR`. Both `checks/**` and `terra/batch_check_inputs.py` are a concurrent lane's, so nothing
+  here moved either way. Recorded as open rather than dropped, because a still-open item that looks
+  finished costs the next reader a whole lane to rediscover.
+* **`replay/build_inputs.py`'s `SVShell.` prefix: shut — and it shut on 2026-09-25, before the paragraph
+  above was written.** "Still open" that is already shut is worse than an absent list, because the next
+  reader spends a lane rediscovering it, so this bullet exists to stop that. What the code does now:
+  `wdl_inputs()` loads the WDL the caller passed with miniwdl and returns
+  (`f"{wf.name}.", declared_inputs`) — the prefix IS the loaded document's root workflow name, so a
+  single-sample arm gets `GATKSVPipelineSingleSample.`-keyed JSON instead of JSON its submission could
+  not read. The five literals came out in 9c9c910 (*"the prefix comes from the WDL you passed, and the
+  #961 rename is not this file's business"*), which also deleted the file's private copy of the
+  `genotyping_rd_table` rename. The proof came later, in eee444c, and its shape is the reason to copy it:
+  asserting "the keys say `SVShell.`" would have passed on the very literal that caused the bug, so the
+  control is **two fixture WDLs, one whose workflow really is named `SVShell` and one that is not, both
+  loaded, expected to differ**: the first must yield `MyCoolPipeline.` (a name the file never mentions),
+  the second must yield `SVShell.` — the same string the literal carried, reached by loading a document
+  instead of reciting a constant. Runs at `scripts/selftest.sh:271`, inside the `import WDL` guard that
+  prints a named SKIP (never a silent ok) when miniwdl is absent.
+
+  The §9 item-4 list above and §1's row for this file are corrected in place rather than deleted: the
+  inventory of "what is genotyping-specific" is also a record of what stopped being specific, and the
+  commit that closed a row is the thing a reader needs when the row reopens for a new module.
+* **`fetch_baseline.py`'s `!! no config for step`: the counted failure shipped in 0029972; the guard for
+  it ships here.** Item 4's description of it ("prints … and continues, writing a manifest with no entry
+  for it") is the state as review saw it. What the code does now: every skipped step is named, the run
+  records `steps_missing` **inside** `baseline_run.json` — the artifact a later loop reads — prints `!! 4
+  of 6 step(s) had no config to freeze: 05, 07, 08, 09`, says the manifest is PARTIAL, and exits 1. That
+  half was already true and had **no test at all**, which is the only thing this lane added:
+  `scripts/selftest.d/profiles.sh` now runs the tool's own `main()` against a fake workspace (`terra`
+  replaced in `sys.modules`, anything unexpected raises with the URL, API root a closed port — so no
+  network, and no `firecloud` either, which means this guard has no SKIP branch). Ten assertions, incl.
+  the live-config-before-snapshot ordering rule, the PARTIAL record, and a CONTROL on a workspace that
+  does hold every step (exit 0, no `steps_missing`, no `!!`). While falsifying it, one of those
+  assertions turned out to be unfailable on prefix-shaped names and was rebuilt — see the commit that
+  follows 950f0be.
+
+  The declined lookup stays declined, and now has a test instead of a comment: a workspace holding a bare
+  `GenotypeBatch` answers `[]` to `pick_config` while `steps.match_configs` answers `['GenotypeBatch']`.
+  Collapsing the two was tried as a falsification and fails **six** assertions, because `match_configs`
+  refuses step 05 outright — the exact "agree with my table" regression the comment warns about.
+  What changed in the sentence itself: it now names the one pattern it tried and how many names it
+  searched (`nothing among the 2 method config name(s) in ns/ws starts with '05-'`), so an empty answer
+  cannot be misread as "the workspace has no configs".
+
+`checks/wdl_gate.sh`'s default `--wf` set stays its own list **by design**: item 4's first guard is that
+a profile naming only `GenotypeBatch` would silently drop three of the four workflows it certifies, in
+the one tool whose comment says an unchecked workflow must fail. Step 5 is graded below (it stays open:
+both candidates fail the test, with the wrong field named for each), and §11's questions (1, 2, 3) are
+unanswered.
 
 ## 10. What this makes newly possible to get wrong
 

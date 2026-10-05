@@ -157,7 +157,13 @@ def main():
     for prefix in args.steps:
         matches = pick_config(by_name, prefix)
         if not matches:
-            p(f"!! no config for step {prefix}")
+            # What was tried, and how big the haystack was. `pick_config` declines
+            # `steps.match_configs` on purpose (see its comment), so it cannot borrow that lookup's
+            # three-pattern message -- this line has to carry its own one pattern. A bare "no config for
+            # step 05" is one word away from "this workspace has no configs", which is the reading that
+            # sends someone off to re-upload configs that were there all along.
+            p(f"!! no config for step {prefix}: nothing among the {len(by_name)} method config name(s) "
+              f"in {args.ns}/{args.ws} starts with '{prefix}-'")
             missing.append(prefix)
             continue
         name = matches[0]
