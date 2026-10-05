@@ -304,6 +304,19 @@ expect 'so is the real build, even though --confirm was typed' 2 \
     'REFUSED' 'docker/gatk-sv-build.sh my-branch' -- run_bare_ro build my-branch --confirm
 expect 'and a bulk download is refused by the same rule' 2 \
     'REFUSED' 'terra/fetch_outputs.py' -- run_bare_ro terra fetch --all
+# The plan-token hole, pinned. A --dry-run / --check ANYWHERE in the argument list used to skip both gates
+# at once, so a run stamped read-only reached a method-config write, an entity-attribute upload and
+# `submit`. The exemption is now decided by the mode name, because a token is only a plan when the tool on
+# the other end implements it -- and in all three shapes below it does not: batch_configs.py's positional
+# loop discards unknown flags, batch_freeze.py gates on --write alone, batch_rerun_step.py rejects
+# --dry-run outright. The two legitimate exemptions (fetch --dry-run, check image ... --dry-run) are pinned
+# as dispatching above, so this cannot be satisfied by sealing every plan mode.
+expect 'read-only + --dry-run: a mutating mode is still refused (configs-create)' 2 \
+    'REFUSED' 'terra configs-create' -- run_readonly terra configs-create --dry-run --confirm
+expect 'read-only + --dry-run: a submission is still refused (rerun-submit)' 2 \
+    'REFUSED' 'terra rerun-submit' -- run_readonly terra rerun-submit --dry-run --confirm
+expect 'read-only + --check --write: the attribute upload is still refused (freeze-attrs)' 2 \
+    'REFUSED' 'terra freeze-attrs' -- run_readonly terra freeze-attrs --check --write
 
 # The refusal must say so itself, not merely be indistinguishable from one by luck: the CLI states
 # that it consulted no dependency, credential or config value. Asserting that sentence is what stops

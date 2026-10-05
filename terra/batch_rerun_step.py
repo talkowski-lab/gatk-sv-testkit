@@ -302,6 +302,13 @@ def entity(r: dict) -> str:
     Submitting 09 with the batch name as if it were a cohort is how a submission gets accepted, boots a
     fleet and binds nothing, so the missing row is refused by name instead of guessed.
     """
+    if "--entity" in sys.argv and not _opt("--entity"):
+        raise SystemExit(
+            "refusing: --entity was given, and it resolved to an empty value.\n"
+            "  This is what `--entity \"$ROW\"` looks like when ROW is unset (and what `--entity --confirm`\n"
+            "  looks like too). The alternative was to fall through to the workspace's default batch row,\n"
+            "  which submits a DIFFERENT cohort than the one asked for, and a submission like that reports\n"
+            "  itself as accepted. Drop --entity to take the default deliberately, or name the row.")
     name = _row_name(r)
     if not name:
         raise SystemExit(

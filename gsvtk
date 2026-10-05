@@ -119,9 +119,13 @@ stamp() {
 read_only_on() { [ -n "$READ_ONLY" ] && [ "$READ_ONLY" != "0" ]; }
 
 # ------------------------------------------------------------------ the gates
-# is_plan_only "$@" — does this argument list only ask for a plan? --check / --dry-run are this
-# repo's two spellings for "print what you would do and create nothing", and both stay dispatchable
-# under read-only without --confirm because the tools that take them touch nothing.
+# is_plan_only "$@" — does this argument list ask only for a plan? LEGITIMATE ONLY where the target
+# script implements the token itself, and after the terra gate stopped depending on this it has exactly
+# one caller for exactly that reason: the image-check scripts, whose --dry-run assembles and validates the
+# startup script and prints the create command without invoking gcloud (`--dry-run) DRY_RUN=1` in
+# checks/image-check/run_in_image.sh). Do NOT reuse this to decide anything about a mode whose tool ignores
+# unknown flags -- see the measurement on the terra gate below, where the same shape let a read-only run
+# reach a config write.
 is_plan_only() {
   local a
   for a in "$@"; do
@@ -601,13 +605,27 @@ terra_mutating_or_refuse() {
     *)  terra_usage_refuse "$what" ;;
   esac
 
-  # --dry-run / --check (and fetch --verify, which re-hashes what is already on disk) transfer
-  # nothing, so they stay dispatchable: rule 3 in the header. The list is the tools' own wording for
-  # "prints the plan", not a general permission for any flag that happens to be present.
+  # Whether a call is plan-only is decided by the MODE, because a token in the argument list is only a
+  # plan when the tool on the other end actually implements it. The rule here used to be
+  # `is_plan_only "$@"`: scan every forwarded argument for --check/--dry-run and, on a hit, skip BOTH the
+  # read-only refusal and the --confirm requirement. The comment beside it claimed the list was "the tools'
+  # own wording for 'prints the plan', not a general permission for any flag that happens to be present" --
+  # the code was the general permission, and the comment was the thing a reader trusted. Measured on this
+  # tree with a stand-in interpreter, so no request left the machine:
+  #   GSVTK_READ_ONLY=1 ./gsvtk terra configs-create --dry-run --confirm  -> reached batch_configs.py
+  #     create, whose positional loop does `if a.startswith("-"): continue`, so the token was inert and
+  #     the config write was the real one;
+  #   GSVTK_READ_ONLY=1 ./gsvtk terra freeze-attrs --check --write        -> reached the entity-attribute
+  #     upload, which gates on "--write" in sys.argv and could see nothing else;
+  #   GSVTK_READ_ONLY=1 ./gsvtk terra rerun-submit --dry-run --confirm    -> reached submit, whose parser
+  #     rejects --dry-run outright, so nothing about that call was a plan.
+  # These are the only exemptions, and each is a token its own tool implements: `fetch_outputs.py` prints
+  # the download plan for --dry-run and re-hashes what is already on disk for --verify, and
+  # `fetch-compare table` diffs files that are already local. Every other mode reaching this function
+  # POSTs, boots, or uploads, and faces both gates whatever it is handed.
   plan_only=0
-  is_plan_only "$@" && plan_only=1
   case "$what" in
-    fetch)          has_flag --verify "$@" && plan_only=1 ;;
+    fetch)          { has_flag --dry-run "$@" || has_flag --verify "$@"; } && plan_only=1 ;;
     fetch-compare)  [ "${1:-}" = "table" ] && plan_only=1 ;;   # local diff of already-fetched files
   esac
 

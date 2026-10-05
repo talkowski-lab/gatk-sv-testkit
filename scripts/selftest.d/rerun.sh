@@ -494,6 +494,33 @@ PY
 inproc "controls: the disagreement / no-input-map / no-root-entity guards all fire when provoked" \
     0 "$TMP/guards.py"
 
+# `--entity ""` is the shape a script produces when it passes --entity "$ROW" with ROW unset. It used to be
+# indistinguishable from not passing --entity at all, and the fall-through was the workspace's default batch
+# row -- a different cohort, submitted, reported as accepted. Measured before the fix: `--step 10 --entity ''
+# submit` reached terra.submit with row='all_samples'. The control below is what keeps this a guard rather
+# than a wall: a named row must still go straight through.
+cat > "$TMP/empty_entity.py" <<'PY'
+"""--entity given an empty value must refuse; a named row must still pass."""
+import os, sys
+repo = os.environ["GSVTK_REPO_ROOT"]
+sys.path.insert(0, os.path.join(repo, "kit"))
+sys.path.insert(0, os.path.join(repo, "terra"))
+import batch_rerun_step as rr
+step = {"step": "10", "workflow": "GenotypeBatch", "root_entity": "sample_set"}
+sys.argv = ["batch_rerun_step.py", "--step", "10", "--entity", "", "submit", "--confirm"]
+try:
+    fell = rr.entity(step)
+except SystemExit as e:
+    assert "empty value" in str(e) and "ROW" in str(e), str(e)
+else:
+    raise AssertionError("--entity '' fell through to %r: a different cohort, submitted" % (fell,))
+sys.argv = ["batch_rerun_step.py", "--step", "10", "--entity", "my_cohort", "submit"]
+assert rr.entity(step) == "my_cohort", rr.entity(step)
+print("PASS --entity with an empty value is refused; a named row is still honoured")
+PY
+inproc "--entity with an empty value is refused, not defaulted to the workspace's batch row" \
+    0 "$TMP/empty_entity.py"
+
 # The resolution line must point at the tool that CAN check the attributes a mid-chain step reads --
 # derived from batch_configs' own maps, so it cannot rot into a sentence about a different chain.
 run "a mid-chain step names the upstream steps whose outputs it reads (and the check that proves them)" 1 \
