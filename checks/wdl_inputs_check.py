@@ -182,10 +182,8 @@ def expected_input_keys(doc) -> set:
     would make every optional call input look extra, which is the wolf-crying shape this function exists
     to avoid; `_*` names are miniwdl's synthetic `runtime`-override placeholder, not WDL inputs.
 
-    A struct-typed input contributes its member paths as well: `required_inputs` already accepts a flat
-    member path as binding a required member, and a key that this file calls bound in one half and
-    extra in the other would be the tool contradicting itself. That leniency is one of the two
-    under-reports named in `extra_keys`.
+    A struct-typed input needs no special case here: a member path written flat (`W.attrs.cpu`) is
+    handled by `extra_keys`, which treats anything below a declared key as a member of a value.
     """
     wf = doc.workflow
     if wf is None:
@@ -195,24 +193,7 @@ def expected_input_keys(doc) -> set:
     for binding in wf.available_inputs:
         if binding.name.startswith("_"):
             continue
-        key = "%s.%s" % (ns, binding.name)
-        out.add(key)
-        typ = binding.value.type
-        if isinstance(typ, WDL.Type.StructInstance):
-            out |= _struct_member_paths(typ, key, [])
-    return out
-
-
-def _struct_member_paths(stype, prefix: str, seen: list) -> set:
-    """Every member path of a struct, recursively; `seen` guards a self-referential struct."""
-    if stype.type_name in seen:
-        return set()
-    out = set()
-    for mname, mtype in (stype.members or {}).items():
-        path = "%s.%s" % (prefix, mname)
-        out.add(path)
-        if isinstance(mtype, WDL.Type.StructInstance):
-            out |= _struct_member_paths(mtype, path, seen + [stype.type_name])
+        out.add("%s.%s" % (ns, binding.name))
     return out
 
 
@@ -228,10 +209,12 @@ def extra_keys(provided: set, expected: set) -> list:
     * a key under a declared key is treated as a member of a value, not as a key. womtool accepts an
       unknown member inside a struct literal outright (`{"ShapeProbe.struct_req": {"label": "x",
       "bogus_member": 3}}` -> `Success!`), and a `Map` is spelled as an object too, so nothing below a
-      declared key is anybody's finding. (A flat member path of a STRUCT typed input, written as its own
-      top-level key, is a separate leniency — `expected_input_keys` — where womtool really does object:
-      it answers `Unexpected input provided: ShapeProbe.struct_opt.label`. Under-reporting that one is
-      the price of not contradicting `required_inputs`, which calls the same spelling bound.)
+      declared key is anybody's finding. That one rule is also what makes a flat member path of a STRUCT
+      typed input legal here — `W.attrs.cpu` sits under the declared key `W.attrs` — which is the
+      deliberate divergence from womtool, measured on the pinned capture (pair B of
+      `scripts/selftest.d/womtool.sh`): there it answers `Unexpected input provided:
+      ShapeProbe.struct_opt.label`. Under-reporting that is the price of not contradicting
+      `required_inputs`, which calls the same spelling bound.
     * a key that is a namespace CONTAINER (`{"ShapeProbe": {"plain_req": ...}}`) is not reported: at
       womtool-84 that spelling is silently unfulfilling rather than unexpected (every required input
       comes back `not specified` and the container key is never named), and the required half already
