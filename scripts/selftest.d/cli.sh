@@ -465,7 +465,7 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
         > "$TMP/reach-tree/Foo.wdl"
     real_reach() {
         local out rc
-        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PY="$PYABS" \
                  bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo 2>&1)"; rc=$?
         # 0 or 1: on a two-node tree svshell_contract_check has nothing to compare, and the CLI reports
         # that as findings-not-a-verdict. What may NOT happen is the reach tool answering with its own
@@ -492,14 +492,14 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     # image list is exactly what a caller reads as "nothing to rebuild".
     real_reach_images() {
         local out rc
-        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PY="$PYABS" \
                  bash "$ROOT/gsvtk" check --reach --images --repo "$TMP/reach-tree" --wf Foo 2>&1)"; rc=$?
         if [ "$rc" -gt 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
         if ! printf '%s\n' "$out" | grep -qF 'target: Foo.wdl::Foo [workflow]'; then
-            printf '--images lost the reach answer it was added to:\n%s\n' "$out"; return 1
+            printf -- '--images lost the reach answer it was added to:\n%s\n' "$out"; return 1
         fi
         if ! printf '%s\n' "$out" | grep -qF 'image sources:'; then
-            printf '--images never reached wdl_reach.py (no image section):\n%s\n' "$out"; return 1
+            printf -- '--images never reached wdl_reach.py (no image section):\n%s\n' "$out"; return 1
         fi
         if ! printf '%s\n' "$out" | grep -qF 'bind no docker input'; then
             printf 'a workflow binding no image was dropped instead of reported:\n%s\n' "$out"; return 1
@@ -525,7 +525,7 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     # needle. An assertion that counts a path suffix is an assertion that can never go green.
     real_reach_two() {
         local out rc n_tree n_block n1 n2
-        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PY="$PYABS" \
                  bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo --wf Bar 2>&1)"; rc=$?
         if [ "$rc" -gt 1 ]; then printf 'unexpected exit %s\n%s\n' "$rc" "$out"; return 1; fi
         n_tree="$(printf '%s\n' "$out" | grep -cE '^tree: ')"
@@ -562,7 +562,7 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     # about NoSuchThing and the printed order stops being the order asked.
     real_reach_unknown() {
         local out rc n1 n2
-        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PYTHON="$PYABS" \
+        out="$(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PY="$PYABS" \
                  bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo --wf NoSuchThing 2>&1)"; rc=$?
         # 1, not 2: wdl_reach exits 2 on an unknown name and the CLI reports a checker's nonzero as
         # findings (its 2 means "nothing ran"). What is being proved is WHICH names got answered.
@@ -583,6 +583,28 @@ if "$PYABS" -c 'import WDL' >/dev/null 2>&1; then
     }
     check 'REAL composition, piped: an unknown name is reported by name and does not swallow or reorder the answered one' \
         real_reach_unknown
+    # GSVTK_PY has to be the interpreter that RUNS, not one that is merely set. The guard wrapping this
+    # block asks whether $PYABS can import WDL, and then handed the CLI a variable called GSVTK_PYTHON
+    # that nothing in the repo reads: the CLI resolved its own interpreter ($ROOT/.venv, else python3),
+    # so on a checkout with no .venv the guard described one python and the tool ran under another, and
+    # four assertions here went red for a reason none of them could state. Pinning the knob is what makes
+    # the guard's claim true; the marker below is the proof, because a knob that is only read by --help
+    # would leave it unwritten.
+    real_reach_interpreter() {
+        local marker="$TMP/py-ran"
+        printf '#!/bin/sh\nprintf ran > "%s"\nexec "%s" "$@"\n' "$marker" "$PYABS" > "$TMP/fakepy"
+        chmod +x "$TMP/fakepy"
+        rm -f "$marker"
+        env GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" GSVTK_PY="$TMP/fakepy" \
+            bash "$ROOT/gsvtk" check --reach --repo "$TMP/reach-tree" --wf Foo >/dev/null 2>&1
+        if [ ! -f "$marker" ]; then
+            printf 'the dispatched checker did not run under GSVTK_PY — nothing wrote the marker, so the\n'
+            printf 'guard above and the interpreter under test are different pythons again:\n%s\n' "$PYABS"
+            return 1
+        fi
+    }
+    check 'GSVTK_PY is the interpreter the dispatched python tool actually runs under' \
+        real_reach_interpreter
 else
     skipped "reach-real" "miniwdl absent: the reach answer needs the WDL module, so the composition proof cannot run (a SKIP here is not a pass in CI)"
 fi

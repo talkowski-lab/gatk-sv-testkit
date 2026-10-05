@@ -80,7 +80,12 @@ py_for() {
             else
               return 1
             fi ;;
-    *)      if [ -x "$ROOT/$VENV" ]; then printf '%s' "$ROOT/$VENV"; else printf 'python3'; fi ;;
+    *)      if [ -n "${GSVTK_PY:-}" ] && [ -x "$GSVTK_PY" ]; then
+              printf '%s' "$GSVTK_PY"           # the python-loop twin of GSVTK_TERRA_PY. The default is
+                                               # $ROOT/.venv, which is a fact about a developer's machine
+                                               # and not about this repo, and a selftest that set some
+                                               # other name to steer it was steering nothing
+            elif [ -x "$ROOT/$VENV" ]; then printf '%s' "$ROOT/$VENV"; else printf 'python3'; fi ;;
   esac
 }
 
