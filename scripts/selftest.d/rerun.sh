@@ -37,6 +37,12 @@ if ! "$PY" -c 'import firecloud' >/dev/null 2>&1 && [ -x .venv/bin/python ] \
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 . "$(dirname "$SELF")/declared.sh"
 GSVTK_DECL_FUNCS="run run_absent bytes inproc"
+# Declared, not assumed: exactly ONE site in this file runs inside a loop — the `for s in 06 07 08 09 10` step
+# sweep, five executions of one call site — so the executions exceed the sites by 4. Declaring the number is
+# what keeps the pair strict: an unexplained surplus is now a failure, and if someone adds a second loop site
+# this line goes red rather than quietly widening the blind spot. Verify with `bash scripts/selftest.d/rerun.sh
+# <python>` and read the declared/reached line.
+GSVTK_DECL_SURPLUS=4
 DECLARED=$(gsvtk_declared_count "$SELF")
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     printf 'rerun: SKIP — %s cannot import firecloud (python -m pip install -r requirements.txt)\n' "$PY"
@@ -544,10 +550,20 @@ run "a step fed by the freeze loop says so, naming the frozen file count not a c
     "$PY" terra/batch_rerun_step.py --step 10 show $PIN10
 
 printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
-# `reached` can legitimately exceed `declared` here (a call site inside a loop is counted once and runs many
-# times), so this phase reports the pair and fails only when FEWER sites ran than the file contains. That is
-# weaker than entity.sh's strict equality: a disappearance smaller than the loop surplus would still be
-# invisible. Pinning it needs this file's call sites out of loops, which is not this lane's scope.
+# What this pair does and does not prove, stated exactly, because an earlier version of this comment
+# understated its own blindness. `reached` exceeds `declared` by the DECLARED surplus of 4 (one site inside the
+# `for s in 06 07 08 09 10` sweep), and the surplus has to match EXACTLY — measured: declaring 3 fails,
+# declaring 6 fails, declaring 4 passes. Consequences:
+#   - Hiding an assertion behind a condition that never holds is caught from the FIRST one, because 43 against
+#     40 is a surplus of 3, which this file does not declare. An adversarial review measured 4 hideable under
+#     the previous rule (any surplus tolerated); exact matching is what closed that.
+#   - DELETING a call site is still NEVER caught, because declared and reached drop together and the surplus
+#     stays 4. All 40 sites in this file can be deleted and the pair still prints an all-clear. The pair's
+#     teeth are against sites that exist and do not run — see the header of scripts/selftest.d/declared.sh and
+#     docs/gap-ledger.md C10.
+# The whole-phase bail further up also exits 0, deliberately: a machine without `firecloud` must still be able
+# to run the offline gate. That is why the bail line itself says a SKIP is not a pass in CI, and why the
+# declared/reached line beside it names all 40.
 gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

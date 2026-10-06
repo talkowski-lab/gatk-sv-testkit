@@ -131,9 +131,12 @@ test:
 #
 # What it does NOT prove, so that nobody reads a green run as "works on a clean machine": the caller's
 # interpreter, cloud credentials, gatk-sv checkout and womtool jar all live OUTSIDE the repo and stay
-# reachable from the fresh tree. A verification run at 33c0358 found the operator's real gatk-sv checkout by
-# normal config discovery and ran the ref-pinned cross-check instead of skipping it. This removes uncommitted
-# STATE, not the MACHINE.
+# reachable from the fresh tree. Worse, they are INHERITED rather than scrubbed: an exported GSVTK_CONFIG or
+# GSVTK_GATK_SV_CHECKOUT retargets the graded run, so a verification run at 33c0358 found the operator's real
+# gatk-sv checkout by normal config discovery and ran the ref-pinned cross-check instead of skipping it. The
+# target now prints the inherited values on its first line, because a log that does not say which checkout it
+# graded cannot be audited later. A fresh tree removes uncommitted STATE, not the MACHINE and not the
+# ENVIRONMENT.
 #
 #   make verify-commit                                              # REV=HEAD, inner target `test`
 #   make verify-commit REV=<sha> GSVTK_VERIFY_MAKE=syntax           # one cheap target, one commit
@@ -145,10 +148,12 @@ test:
 # `git worktree prune` plus `rm -rf $${TMPDIR:-/tmp}/gsvtk-verify.*` clears it.
 verify-commit:
 	@rev=$${REV:-HEAD}; what=$${GSVTK_VERIFY_MAKE:-test}; \
+	case "$$what" in ''|*[!A-Za-z0-9_-]*) echo "  FAIL  GSVTK_VERIFY_MAKE must be ONE make target name (letters, digits, _ and -); got: [$${what:-empty}]"; exit 1;; esac; \
 	py='$(PYTHON)'; case "$$py" in /*) : ;; */*) py="$$PWD/$$py" ;; esac; \
-	echo "verify-commit: grading $$rev with '$$what' in a fresh tree, PYTHON=$$py"; \
+	printf 'verify-commit: grading %s with "%s" in a fresh tree, PYTHON=%s\n' "$$rev" "$$what" "$$py"; \
+	printf 'verify-commit: config INHERITED from this shell — GSVTK_CONFIG=%s, GSVTK_GATK_SV_CHECKOUT=%s, GSVTK_ENTITY_REF=%s. A fresh tree does not scrub these, so they retarget what is graded; when one reads <unset> the tree runs its own discovery and the phase SKIP lines are the authority on what it found.\n' "$${GSVTK_CONFIG:-<unset>}" "$${GSVTK_GATK_SV_CHECKOUT:-<unset>}" "$${GSVTK_ENTITY_REF:-<default>}"; \
 	wt=$$(mktemp -d "$${TMPDIR:-/tmp}/gsvtk-verify.XXXXXX"); rmdir "$$wt"; \
-	git worktree add --detach "$$wt" "$$rev" >/dev/null 2>&1 </dev/null || { echo "  FAIL  cannot make a detached worktree at $$rev"; exit 1; }; \
+	git worktree add --detach "$$wt" "$$rev" >/dev/null </dev/null || { echo "  FAIL  cannot make a detached worktree at $$rev (git's reason is above, if any)"; exit 1; }; \
 	st=0; start=$$(date +%s); \
 	$(MAKE) -C "$$wt" --no-print-directory $$what PYTHON="$$py" || st=1; \
 	end=$$(date +%s); \

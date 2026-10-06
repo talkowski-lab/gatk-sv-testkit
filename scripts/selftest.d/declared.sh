@@ -11,42 +11,43 @@
 # phase say both numbers: how many assertion call sites its own source contains, and how many this run
 # reached.
 #
-# HOW, AND WHY IT CANNOT BE A CONSTANT
+# WHAT THE PAIR ACTUALLY PROVES, AND WHAT IT CANNOT
 #
-# The count is derived from the phase's own source with grep, never typed. A hardcoded expectation is the
-# same mistake in a different place: when someone deletes six assertions the gate goes quiet instead of
-# complaining, which is the exact failure this is meant to catch. Deriving it means deleting a block moves the
-# number, and an assertion hidden behind a false condition stays visible as a site while never running, which
-# is exactly the pair of cases you want separated.
+# It catches a site that EXISTS AND NEVER RUNS — an assertion behind a condition that cannot hold, a block
+# orphaned by a refactor, a helper renamed out of the counted set. It does NOT catch a DELETION, because
+# deleting a call site lowers `declared` and `reached` together and the pair stays satisfied. Anyone tempted
+# to read a green pair as "no assertions were lost" should read this paragraph again; docs/gap-ledger.md C10
+# words the same limit, and a claim of coverage here would be the second source telling you what you wanted
+# to hear. If deletions must ever be caught, compare this number against the value in the PREVIOUS commit
+# (which keeps the no-rot property that a pinned constant would destroy), do not pin a constant.
 #
-# WHAT `DECLARED` MEANS, PRECISELY
+# HOW, AND WHY THE NUMBER CANNOT BE A CONSTANT
 #
-# It counts call SITES, not executions. A call site inside a loop is counted once and may execute many times,
-# so `reached` can legitimately EXCEED `declared`. Therefore:
-#   reached < declared, and nothing skipped   -> FAIL. A block went missing and no skip explains it.
-#   reached > declared                        -> reported as re-execution, not a failure.
-#   skipped > 0                               -> the pair line is informational; the skip's own message
-#                                                names how many sites it withholds.
+# The count is derived from the phase's own source, never typed. A hardcoded expectation is the same mistake
+# in a different place: when someone deletes six assertions the gate goes quiet instead of complaining.
 #
-# Each phase declares which of its own functions count as assertion call sites, because they are spelled
-# differently in every file (`check`/`expect` in cli.sh, `wantf`/`wantline` in reach.sh and entity.sh,
-# `want`/`want_no` in womtool.sh and jarshape.sh). The set has to be exactly the functions whose call sites
-# record a verdict — include a helper that does not increment ok/fail and the guard fires on a run that is
-# fine; omit one and a disappearance goes unreported. So the callee names are an argument here rather than a
-# name list baked into this file, and each phase's declaration line says which they are.
-#
-# Heredoc bodies are excluded: a here-doc is data handed to another program, not a call site in this file, and
-# a python body that says `check the output` would otherwise be counted as a bash assertion. A site that
-# itself opens a here-doc is counted and its body skipped. Nested here-docs are not tracked; none exist in
-# these phases, and adding one would over-count (a visible wrong number) rather than under-count.
+# WHAT `DECLARED` COUNTS, PRECISELY
+#   - a call site is a line whose first token is one of the phase's assertion callees, outside a here-doc body
+#     and outside a comment. A here-doc body is data handed to another program; a commented-out assertion
+#     cannot run, so neither is a site.
+#   - `reached` counts EXECUTIONS. One site in a `for` loop over five values is one site and five executions,
+#     so `reached` can exceed `declared` legitimately — but ONLY by a surplus the phase DECLARES below. Before
+#     an adversarial review this file instead assumed any surplus was fine, and that was a hole worth two
+#     CRITICAL findings: a wrong callee list, or assertions arriving from a sourced here-doc file, both looked
+#     like a healthy surplus and printed an all-clear that blamed a loop the code cannot see.
 #
 # USAGE from a phase:
 #   . scripts/selftest.d/declared.sh
-#   GSVTK_DECL_FUNCS="want want_no"
+#   GSVTK_DECL_FUNCS="want want_no"          # required: the callees that record a verdict
+#   GSVTK_DECL_SURPLUS=4                     # optional: executions a loop is known to add
 #   DECLARED=$(gsvtk_declared_count "$SELF")
 #   ...  gsvtk_declared_report "womtool selftest" "$SELF" "$ran" "$skipped" || fail=$((fail + 1))
+#
+# A here-doc opener whose terminator never appears makes the rest of the file look like a body, so the count
+# collapses; the reporter treats `declared == 0` as a failure, and `make syntax` (`bash -n`) rejects an
+# unterminated here-doc long before this runs. Nested here-docs are not tracked — none exist in these phases.
 
-# Count assertion call sites in $1, where the callee names are in GSVTK_DECL_FUNCS (space-separated).
+# Count assertion call sites in $1. The callee names come in GSVTK_DECL_FUNCS (space-separated).
 gsvtk_declared_count() {
     _file=$1
     [ -f "$_file" ] || { echo 0; return 1; }
@@ -60,12 +61,14 @@ gsvtk_declared_count() {
         }
         {
             line = $0
-            if (inhere != "") {                 # inside a here-doc body: data, not call sites
+            if (inhere != "") {                                  # inside a here-doc body: data, not sites
                 if (line ~ ("^[ \t]*" inhere "[ \t]*$")) inhere = ""
                 next
             }
+            if (line ~ /^[ \t]*#/) next          # a commented-out assertion cannot run, so it is not a site;
+                                                 # and a comment ending in `<<TAG` must not start a body here,
+                                                 # which is how a whole file once counted zero sites
             if (line ~ pat) n_sites++
-            # a here-doc opener at end of line: capture its tag, then skip until the terminator
             if (match(line, /<<-?[ \t]*[\x27"]?([A-Za-z_][A-Za-z0-9_]*)[\x27"]?[ \t]*$/)) {
                 tag = substr(line, RSTART, RLENGTH)
                 sub(/^<<-?[ \t]*/, "", tag); gsub(/[\x27"]/, "", tag)
@@ -76,29 +79,50 @@ gsvtk_declared_count() {
     ' "$_file"
 }
 
-# Print the declared/reached pair for a phase, and fail (return 1) when sites vanished with no skip to
-# explain it. $1 = label used by the phase's own summary line, $2 = file to count, $3 = ran, $4 = skipped.
+# Pair the count with what ran, and decide. $1 = the label the phase prints in its own summary, $2 = file to
+# count, $3 = ran (ok+fail), $4 = skipped. GSVTK_DECL_SURPLUS declares the executions a loop legitimately
+# adds. Returns 1 for anything the reader must not walk past.
 gsvtk_declared_report() {
     _label=$1
     _file=$2
     _ran=$3
     _skipped=${4:-0}
+    _surplus=${GSVTK_DECL_SURPLUS:-0}
     _decl=$(gsvtk_declared_count "$_file")
+
+    if [ -z "$GSVTK_DECL_FUNCS" ]; then
+        printf '  FAIL  %s: declares no assertion callees (GSVTK_DECL_FUNCS is empty), so the declared/reached pair is vacuous\n' "$_label"
+        return 1
+    fi
+    if [ "$_decl" -eq 0 ]; then
+        printf '  FAIL  %s: 0 assertion call sites counted for [%s] — the guard has nothing to check, which is not the same as passing\n' \
+            "$_label" "$GSVTK_DECL_FUNCS"
+        return 1
+    fi
+
     if [ "${_skipped:-0}" -gt 0 ]; then
         printf '%s: declares %s assertion call(s); this run reached %s, so %s did not run behind %s named skip(s)\n' \
             "$_label" "$_decl" "$_ran" "$((_decl - _ran))" "$_skipped"
         return 0
     fi
+
     if [ "$_ran" -lt "$_decl" ]; then
-        printf '  FAIL  %s: %s assertion call site(s) declared, %s ran — a block went missing and nothing skipped\n' \
-            "$_label" "$_decl" "$_ran"
+        printf '  FAIL  %s: %s assertion call site(s) declared, %s ran — %s site(s) became unreachable and nothing skipped\n' \
+            "$_label" "$_decl" "$_ran" "$((_decl - _ran))"
         return 1
     fi
+
     if [ "$_ran" -gt "$_decl" ]; then
-        printf '%s: declares %s assertion call(s); this run reached %s (%s call(s) came from a site in a loop)\n' \
-            "$_label" "$_decl" "$_ran" "$((_ran - _decl))"
-        return 0
+        if [ "$_surplus" -gt 0 ] && [ "$((_ran - _decl))" -eq "$_surplus" ]; then
+            printf '%s: declares %s assertion call(s); this run reached %s (%s call(s) from a declared loop surplus)\n' \
+                "$_label" "$_decl" "$_ran" "$_surplus"
+            return 0
+        fi
+        printf '  FAIL  %s: %s site(s) declared, %s ran — reached exceeds declared by %s, and this phase declares a surplus of %s. Either GSVTK_DECL_FUNCS is missing a callee, or assertions are running from somewhere this counter cannot see (a here-doc-written file that gets sourced, a renamed helper). Not a loop: this file cannot know the cause, so it refuses to guess.\n' \
+            "$_label" "$_decl" "$_ran" "$((_ran - _decl))" "$_surplus"
+        return 1
     fi
+
     printf '%s: declares %s assertion call(s); this run reached %s (nothing skipped)\n' \
         "$_label" "$_decl" "$_ran"
 }

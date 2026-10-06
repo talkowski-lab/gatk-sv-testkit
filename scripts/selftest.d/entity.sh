@@ -359,7 +359,13 @@ if [ -n "$CK" ] && [ -d "$CK/.git" ] \
     wantcount "R: nothing on that tree is reported as many-name-keys (the rule has one answer per config)" R1 \
         'state=UNRESOLVED namekeys=[2-9] ' 0
 else
-    withheld="$(grep -cE '^[[:space:]]*(wantc|wantclin|wantcount)([[:space:]]|$)' "$SELF")"
+    # How many sites this skip withholds: the declared total minus what actually ran by this point. It used to
+    # be a second `grep -cE` over the `wantc`/`wantclin`/`wantcount` aliases, which were introduced only to
+    # make that grep expressible — and it was right by coincidence, because every site matching those names
+    # happens to sit inside the skipped block (3 + 4 + 3 = 10). One such call anywhere else in the file would
+    # have silently inflated the number printed as "withheld", which is the opposite of what a withheld count
+    # is for. This file's real-tree block is its last section, so `ok + fail` here is everything that ran.
+    withheld=$((DECLARED - ok - fail))
     printf '  SKIP  entity: no gatk-sv checkout holding %s (GSVTK_GATK_SV_CHECKOUT is "%s"): the real-tree cross-check did not run, so %s of the %s assertion(s) this file declares are withheld behind this named skip (that line is what CI prints, and a withheld assertion is not a passed one)\n' \
         "$PINNED" "${CK:-unset}" "$withheld" "$DECLARED"
     skipped=$((skipped + 1))
