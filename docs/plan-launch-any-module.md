@@ -87,8 +87,14 @@ What decides instead, and it needs no credentials:
   must be a column of that table. Anything else is `UNRESOLVED`. The single-sample flavor answers this
   today: `sample.tsv.tmpl` is `entity:sample_id bam_or_cram_file bam_or_cram_index participant
   case_stripy_file`, and that config's only four `${this.*}` reads are a subset of it, while
-  `participant.tsv.tmpl` carries a name key only. This is a second source that exists for all 29 configs,
-  not five, and it is independent of the deriver.
+  `participant.tsv.tmpl` carries a name key only. **Measured after implementation, this cross-check is far
+  narrower than revision 3 assumed:** `checks/terra_entity_check.py` at `main` (`e1909d2f`) finds the shipped
+  tables answer for **3 of the 29** name-keyed configs, all `sample`-rooted; **16** configs have no shipped
+  table of their derived type (upstream ships no `sample_set_set` table at all) and **10** have a table that
+  is missing a column they read. So on the cohort flavor this check is a refusal generator, not a validator —
+  which is a finding about upstream's corpus, not a pass to be optimized away. It is still independent of the
+  deriver, and it still needs no credentials; what it is not is coverage. The claim that it "exists for all 29
+  configs, not five" was written before anyone measured it and is now false on the record.
 - before any submission, the named row must be confirmed to exist under the derived type with the
   read-only `terra.entity_sample()` that already ships. Nothing on a launch path calls it today.
 

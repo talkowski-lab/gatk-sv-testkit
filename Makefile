@@ -24,6 +24,7 @@ PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py 
 # Tools that accept --help AND are safe to invoke with no config file, no credentials, no
 # data and no network: every one of these only prints usage and exits.
 HELP_SAFE    := checks/svshell_contract_check.py checks/svshell_jq_plumbing_scan.py \
+                checks/terra_entity_check.py \
                 compare/artifact_tally.py \
                 compare/compare_batch_tables.py compare/diff_rd_states.py \
                 compare/table_diff.py compare/matrix_diff.py compare/site_set_diff.py \
@@ -247,6 +248,7 @@ selftest:
 	@$(SHELL) scripts/selftest.d/womtool.sh "$(PYTHON)"  # CI's womtool half: bindings vs rendered JSONs, own tally
 	@$(SHELL) scripts/selftest.d/reach.sh "$(PYTHON)"    # reach's image buckets on a synthetic tree, own tally
 	@$(SHELL) scripts/selftest.d/jarshape.sh "$(PYTHON)" # womtool's inputs shape, graded with and without a jar
+	@$(SHELL) scripts/selftest.d/entity.sh "$(PYTHON)" # terra launch configs: name key vs the shipped entity table, own tally
 
 lint: syntax
 
