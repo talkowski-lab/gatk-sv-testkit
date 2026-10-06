@@ -169,7 +169,9 @@ gsvtk_note_site() {
     _f=${BASH_SOURCE[1]:-${BASH_SOURCE[0]:-unknown}}
     if [ -z "$GSVTK_DECL_SITES" ] || \
        ! printf '%s:%s\n' "$(gsvtk_declared_abs "$_f")" "${1:-0}" >> "$GSVTK_DECL_SITES" 2>/dev/null; then
-        GSVTK_DECL_NOTE_ERR="${GSVTK_DECL_NOTE_ERR:-no site ledger} (first lost call site: line ${1:-0} of $_f)"
+        if [ -z "$GSVTK_DECL_NOTE_ERR" ]; then     # the FIRST lost site is the reason; appending every one of
+            GSVTK_DECL_NOTE_ERR="no site ledger (first lost call site: line ${1:-0} of $_f)"   # them would bury it
+        fi
         if [ -z "$GSVTK_DECL_NOTE_ERR_SHOWN" ]; then
             GSVTK_DECL_NOTE_ERR_SHOWN=1
             printf '  FAIL  declared/reached: cannot write the site ledger (%s) — the pair is blind from here, and a blind pair is a failing pair\n' \
@@ -416,20 +418,22 @@ gsvtk_declared_report() {
         return 1
     fi
     _want=$(printf '%s\n' $GSVTK_DECL_FUNCS | LC_ALL=C sort -u)
-    _miss=$(LC_ALL=C comm -23 <(printf '%s\n' "$_want" | sed '/^$/d') <(printf '%s\n' "$_derived" | sed '/^$/d'))
-    _extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$_want" | sed '/^$/d') <(printf '%s\n' "$_derived" | sed '/^$/d'))
-    if [ -n "$_miss" ] || [ -n "$_extra" ]; then
+    _typed_only=$(LC_ALL=C comm -23 <(printf '%s\n' "$_want" | sed '/^$/d') \
+                            <(printf '%s\n' "$_derived" | sed '/^$/d'))   # typed, derives nothing
+    _derived_only=$(LC_ALL=C comm -13 <(printf '%s\n' "$_want" | sed '/^$/d') \
+                            <(printf '%s\n' "$_derived" | sed '/^$/d'))   # derived, not typed
+    if [ -n "$_typed_only" ] || [ -n "$_derived_only" ]; then
         printf '  FAIL  %s: GSVTK_DECL_FUNCS=[%s] does not match the recorders derived from %s: derived [%s].%s%s\n' \
             "$_label" "$GSVTK_DECL_FUNCS" "$(basename "$_file")" "$(printf '%s\n' "$_derived" | tr '\n' ' ')" \
-            "${_miss:+ Absent from the list (a recorder this pair would not count): $(printf '%s ' "$_miss").}" \
-            "${_extra:+ On the list but deriving nothing: $(printf '%s ' "$_extra").}"
+            "${_typed_only:+ On the list but deriving no verdict there (a printer, a rename, a typo): $(printf '%s ' "$_typed_only").}" \
+            "${_derived_only:+ Derived from the file but MISSING from the list, so its call sites go uncounted: $(printf '%s ' "$_derived_only").}"
         printf '        Derive the list instead of editing it: gsvtk_declared_funset %s\n' "$_file"
         return 1
     fi
     _unnoted=$(gsvtk_declared_funset "$_file" | awk '$2 == "UNNOTED" { printf "%s ", $1 }')
     if [ -n "$_unnoted" ]; then
-        printf '  FAIL  %s: %s names %s, but %s never call gsvtk_note_site — every call site inside them is declared and none can be reached. Add `gsvtk_note_site "${BASH_LINENO[0]}"` as the first statement of each.\n' \
-            "$_label" "$(basename "$_file")" "$(printf '%s ' "$_unnoted")" "$(basename "$_file")"
+        printf '  FAIL  %s: %s records verdicts in %s, and that name is in GSVTK_DECL_FUNCS, but the function never calls gsvtk_note_site. Every call site inside it is declared and none can ever be reached, which would read as a phase that lost all its assertions at once. Add `gsvtk_note_site "${BASH_LINENO[0]}"` as the first statement of it.\n' \
+            "$_label" "$(basename "$_file")" "$(printf '%s ' "$_unnoted")"
         return 1
     fi
 
