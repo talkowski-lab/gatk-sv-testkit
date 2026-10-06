@@ -101,6 +101,23 @@ trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/no-config.env"                  # an empty profile: nothing from a user's config leaks in
 ok=0; fail=0; skipped=0
 
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES. That is the whole reason this exists for THIS phase: jarshape is the
+# file whose verdict total moves with the environment — 49 verdicts with WOMTOOL_JAR unset, 50 with a jar in
+# hand — so a reached count in EXECUTIONS needed a constant this file could not state honestly, and the same
+# commit would have been green on one machine and red on another. Sites tell one story in both modes,
+# measured: 31 declared; 31 reached with a jar; 30 reached without one, and the missing one is printed as a
+# line number beside the named skip rather than as a mismatch against a guessed constant. The callees are what
+# gsvtk_declared_funset derives from this file: `want`, `want_no` and `canary` — and NOT `say_ok`/`say_fail`,
+# which record the verdict but are only ever called from inside `want`, so their lines are printer lines, not
+# assertion sites. That distinction is derived, not asserted: a function called only from another function
+# never enters the set, which is what keeps a green run from failing on a `say_fail` line that only a failing
+# assertion would ever reach.
+SELF="$ROOT/scripts/selftest.d/jarshape.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="want want_no canary"
+gsvtk_declared_init "$TMP"          # the ledger is the set of reached sites (bash 3.2: no associative arrays)
+
 # --------------------------------------------------------------------------- harness
 # want DESC WANT_RC NEEDLE... -- CMD...      (as scripts/selftest.d/womtool.sh: exit code AND every
 # want_no DESC WANT_RC ABSENT... -- CMD...    needle, because a refusal and a crash share exit codes)
@@ -111,6 +128,7 @@ say_ok()   { ok=$((ok + 1)); printf '  ok    %s (exit %s)\n' "$1" "$2"; }
 say_fail() { fail=$((fail + 1)); printf '  FAIL  %s (exit %s, want %s)%s\n' "$1" "$2" "$3" "$4"; }
 
 want() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED want(); one entry per call SITE, not per loop turn
     local desc="$1" wantrc="$2"; shift 2
     local needles=() out rc miss="" n
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles=("${needles[@]-}" "$1"); shift; done
@@ -127,6 +145,7 @@ want() {
 }
 
 want_no() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local desc="$1" wantrc="$2"; shift 2
     local absent=() out rc hit="" n
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do absent=("${absent[@]-}" "$1"); shift; done
@@ -143,6 +162,7 @@ want_no() {
 }
 
 canary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local out rc
     out="$(false 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -490,5 +510,9 @@ else
 fi
 
 printf '\njarshape selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
+# The pair's line is where this phase's mode-invariance is visible: the same declared count against the same
+# reached count whether or not a jar was in hand, with the withheld sites printed by LINE NUMBER when the jar
+# block skipped. What it still cannot see is a DELETION — declared and reached drop together.
+gsvtk_declared_report "jarshape selftest" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

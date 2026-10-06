@@ -90,10 +90,26 @@ trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
 ok=0; fail=0; skipped=0
 
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES, which is what lets this phase compare them at all in a file whose
+# verdict total moves with the environment. Measured, both on this box: no WOMTOOL_JAR -> 50 passed, 2 counted
+# skips, and 50 of 54 sites reached with the other four printed by line number; a jar in hand -> 55 passed, no
+# skips, and 54 of 54. The 55 verdicts against 54 sites is not an error: the agreeing-mirrors check below
+# records its verdict at top level rather than through a recorder, and the reporter prints both totals so that
+# gap is visible instead of being smoothed into one number. The callees are what gsvtk_declared_funset derives
+# from this file, and the reporter re-derives them every run. The ledger lives in this phase's temp dir, so the
+# EXIT trap above already owns it; bash 3.2 has no associative arrays, so that file IS the set of sites this
+# run reached.
+SELF="$ROOT/scripts/selftest.d/womtool.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="want want_no canary same"
+gsvtk_declared_init "$TMP"
+
 # want DESC WANT_RC NEEDLE... -- CMD...
 # Exit code AND every needle, because a refusal and a crash can share an exit code, and a verdict you
 # cannot read is not a verdict.
 want() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED want(); one entry per call SITE, not per loop turn
     local desc="$1" wantrc="$2"; shift 2
     local needles=() out rc miss="" n
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles=("${needles[@]-}" "$1"); shift; done
@@ -115,6 +131,7 @@ want() {
 
 # canary: this file has its own tally, so it carries its own proof that the tally can go down.
 canary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local out rc
     out="$(false 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -128,6 +145,7 @@ canary() {
 # the output. Absence is the harder half of an extras check: "the bogus key was reported" is worthless
 # unless the four legal shapes were NOT, and a needle-only suite cannot say that.
 want_no() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local desc="$1" wantrc="$2"; shift 2
     local absent=() out rc hit="" n
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do absent=("${absent[@]-}" "$1"); shift; done
@@ -152,6 +170,7 @@ want_no() {
 # non-empty test is part of the assertion: two empty strings agreeing is exactly the vacuous pass this
 # suite exists to refuse.
 same() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local desc="$1" got="$2" wantv="$3"
     if [ -n "$got" ] && [ "$got" = "$wantv" ]; then
         ok=$((ok + 1)); printf '  ok    %s (%s)\n' "$desc" "$got"
@@ -683,5 +702,9 @@ want "the default set names the workflow that really regressed (PR #966), so a b
 
 printf '\nwomtool selftest: %s passed, %s failed, %s skipped (a SKIP here is not a pass in CI)\n' \
     "$ok" "$fail" "$skipped"
+# With a named skip the pair prints the line numbers of the sites that did not run and passes, because the skip
+# is the reason and it is counted; with NO skip — the jar-in-hand mode — the declared and reached sets must be
+# equal. What the pair cannot see is a DELETION: remove a call and both sets lose it together.
+gsvtk_declared_report "womtool selftest" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0
