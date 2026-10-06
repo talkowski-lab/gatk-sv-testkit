@@ -59,6 +59,22 @@ ok=0; skip=0; fail=0; skiplist=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gsvtk-cli.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"                       # the EMPTY profile every run below points at
+
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES, and the pair requires the two SETS to be equal: this file is the
+# biggest phase in the gate (117 verdicts) and the one where a block orphaned by a refactor is easiest to lose.
+# The callees are what gsvtk_declared_funset derives from this file — every function that records a verdict and
+# is called from top-level code — re-derived by the reporter on every run, so a sixth recorder that skips the
+# accounting is named instead of silently dropping the reached count. `skipped` is not among them: it counts
+# bails, not verdicts. The 117 this phase prints against 101 sites is not an error and not a loop either,
+# measured against the ledger (101 writes, 101 distinct): the terra-refusal sweep over sixteen modes records
+# sixteen verdicts inline in its loop body, outside every recorder, and the reporter prints both totals so the
+# difference is stated rather than hidden. The ledger file IS the set of reached sites, because bash 3.2
+# has no associative arrays; if it cannot be written the phase fails loudly instead of reaching nothing.
+SELF="$ROOT/scripts/selftest.d/cli.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="check expect absent line_absent count"
+gsvtk_declared_init "$TMP"
 SAVED_PATH="$PATH"
 
 # The two harness helpers are COPIED from scripts/selftest.sh, not sourced: that file IS the gate, and
@@ -66,6 +82,7 @@ SAVED_PATH="$PATH"
 # about exactly that trap, found by timing a scan at five minutes). Same rules: `expect` needs at
 # least one NEEDLE, because an assertion that names no string cannot fail for the right reason.
 check() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED check(); one entry per call SITE, not per loop turn
     local desc="$1"; shift
     local out rc
     out="$("$@" 2>&1)"; rc=$?
@@ -78,6 +95,7 @@ check() {
 }
 
 expect() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want="$2"; shift 2
     local needles=()
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles+=("$1"); shift; done
@@ -109,6 +127,7 @@ expect() {
 # "flags belong to different tools" claim that `expect` cannot make: the flag being PRESENT somewhere
 # is what proves nothing, because it is present for the tool that owns it.
 absent() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want="$2" needle="$3"; shift 3
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done   # the same `--` marker expect uses
     [ "$#" -gt 0 ] && shift
@@ -128,6 +147,7 @@ absent() {
 # line_absent DESC LINE-PATTERN NEEDLE CMD... — the tool identified by LINE-PATTERN ran, and did not
 # receive NEEDLE. Whole-output `absent` cannot express this when two tools are dispatched at once.
 line_absent() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" pat="$2" needle="$3"; shift 3
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
     [ "$#" -gt 0 ] && shift
@@ -154,6 +174,7 @@ skipped() {
 # both flags and two calls each carrying one both contain the same needles. grep -c exits 1 when it
 # finds nothing, so its status is ignored and only the printed number is read (bash 3.2, no set -e).
 count() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" pat="$2" want="$3"; shift 3
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done   # the same `--` marker expect uses
     [ "$#" -gt 0 ] && shift
@@ -743,4 +764,7 @@ check 'replay preflight exits 0 when nothing blocks it (the tally line, not pros
         PATH="$TMP/bin17:$SAVED_PATH" bash "$CLI" replay preflight train-chr20
 
 printf '\ncli selftest: %s ok, %s skipped, %s failed\n' "$ok" "$skip" "$fail"
+# Equal sets, every run; with a named skip the reporter prints which sites the skip withheld, by line. What the
+# pair cannot see is a DELETION — declared and reached drop together (see scripts/selftest.d/declared.sh).
+gsvtk_declared_report "cli selftest" "$SELF" "$((ok + fail))" "$skip" || fail=$((fail + 1))
 [ "$fail" -eq 0 ]

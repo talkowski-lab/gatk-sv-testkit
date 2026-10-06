@@ -33,12 +33,26 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
 
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES, so they can be required to be EQUAL: this phase has no jar mode, no
+# checkout mode and no per-machine constant, and the pair checks that whatever this file declares is what the
+# run actually reached — by line number when it is not. The callees are what gsvtk_declared_funset derives from
+# this file (`want`, `canary`), re-derived by the reporter on every run. Note the 23 this phase prints against
+# the 22 sites: the scratch-directory check in section 10 records its verdict in a top-level if/fi, outside any
+# recorder, so it is a verdict and not a site — which is why the reporter prints both totals side by side
+# instead of one.
+SELF="$ROOT/scripts/selftest.d/profiles.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="want canary"
+gsvtk_declared_init "$TMP"          # the ledger is the set of reached sites (bash 3.2: no associative arrays)
+
 # want DESC WANT_RC NEEDLE... -- CMD...
 #
 # Asserts the exit code AND that every needle appears in the combined output. Exit code alone cannot tell
 # "refused for the right reason" from "refused because the file was missing", which is the difference
 # between a guard and a coin flip.
 want() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED want(); one entry per call SITE, not per loop turn
     local desc="$1" wantrc="$2"; shift 2
     local needles=() out rc
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles=("${needles[@]-}" "$1"); shift; done
@@ -62,6 +76,7 @@ want() {
 # A canary for THIS file only: `selftest.sh` proves its own harness is alive, but this file is a separate
 # script with its own tally, and a tally that cannot go down certifies nothing.
 canary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
     local out rc
     out="$(false 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -785,4 +800,7 @@ want "fetch_baseline records a counted, named, PARTIAL hole for every step a wor
     "$PY" "$TMP/fetch-baseline-guard.py" "$ROOT" "$TMP/baseline-work"
 
 printf 'profiles selftest: %s ok, %s failed\n' "$ok" "$fail"
+# Equal sets, every run. What the pair cannot see is a DELETION: remove a call site and declared and reached
+# drop together, so the all-clear survives the loss — see the header of scripts/selftest.d/declared.sh.
+gsvtk_declared_report "profiles selftest" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ]

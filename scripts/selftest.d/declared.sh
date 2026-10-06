@@ -64,7 +64,11 @@
 # run under — has NO associative arrays (`declare -A` is bash 4, and an empty indexed array is an
 # unbound-variable error under `set -u` there). So the set lives in a per-run file, one `<file>:<line>` per
 # call, and `sort -u` is the set operation. That is also why an unwritable ledger is a loud failure rather
-# than a quiet 0: the file IS the mechanism, not a log next to it.
+# than a quiet 0: the file IS the mechanism, not a log next to it. A person who wants to look at the set a run
+# reached — to see which sites a loop turned into several verdicts, say — can export GSVTK_DECL_KEEP at a
+# scratch path before running one phase; the ledger is then written at `<path>.<script>` and truncated on
+# entry, so it is a scratch path they own. GSVTK_DECL_SITES itself is NOT honoured from the environment for
+# that reason: a child phase inheriting it would truncate its parent's ledger, which this file has measured.
 #
 # USAGE from a phase:
 #   . scripts/selftest.d/declared.sh
@@ -94,7 +98,12 @@
 # instead of printing "0 sites reached", which would read like a phase that lost every assertion.
 GSVTK_DECL_NOTE_ERR=""
 GSVTK_DECL_NOTE_ERR_SHOWN=""
-GSVTK_DECL_SITES=""                       # the ledger file; set by gsvtk_declared_init
+GSVTK_DECL_SITES=""                        # the ledger file; gsvtk_declared_init names it. Deliberately reset
+                                           # rather than inherited: a phase that spawns another phase must not
+                                           # write two phases' sites into one file (measured — it made the child
+                                           # truncate the parent's ledger, and the reporter answered with 54
+                                           # sites that ran without being declared). GSVTK_DECL_KEEP below is the
+                                           # one supported way to point a ledger somewhere durable.
 GSVTK_DECL_OWNED=""                       # 1 when this file made the ledger, so the reporter may remove it
 _gsvtk_decl_abs_key=""
 _gsvtk_decl_abs_val=""
@@ -121,6 +130,13 @@ gsvtk_declared_abs() {
 # phase already has removes it. With no directory, mktemp one and own it (the reporter then cleans up). A
 # ledger that cannot be created or emptied is a LOUD failure here, not a phase that quietly reaches 0 sites.
 gsvtk_declared_init() {
+    # GSVTK_DECL_KEEP=<path prefix> is a measurement knob for a HUMAN running one phase: the ledger survives at
+    # `<prefix>.<script>` after the phase's temp dir is gone, so the reached set can be inspected. The script
+    # name is appended because two phases that run in one process tree must not share one ledger.
+    if [ -n "${GSVTK_DECL_KEEP:-}" ]; then
+        _keep=${BASH_SOURCE[1]:-${BASH_SOURCE[0]:-phase}}       # the CALLING phase, not declared.sh itself
+        GSVTK_DECL_SITES="$GSVTK_DECL_KEEP.${_keep##*/}"
+    fi
     if [ -z "$GSVTK_DECL_SITES" ]; then
         if [ -n "${1:-}" ] && [ -d "$1" ]; then
             GSVTK_DECL_SITES="$1/gsvtk-decl.sites"
@@ -163,41 +179,87 @@ gsvtk_note_site() {
     fi
 }
 
-# The declared sites of $1, one `<abs file>:<line>` per line of its source, sorted for `comm`. The callee names
-# come in GSVTK_DECL_FUNCS. This is the same rule the old counter used, and the same rule
-# `gsvtk_declared_funset` uses to decide what the phase's top-level code calls: a site is a line whose FIRST
-# TOKEN is a callee, outside a here-doc body and outside a comment. A call written so that the line does not
-# start with the callee is not declared — and the reporter then reports it as a site that ran without being
-# declared, which is the loud version of "this phase writes calls in a shape the counter does not know".
-gsvtk_declared_sites() {
+# The declared SITES of $1 WITH the extent of the command each one opens: `<abs file>:<start>` then a TAB then
+# `<end>`, sorted. The callee names come in GSVTK_DECL_FUNCS. A site is a line whose FIRST TOKEN is a callee,
+# outside a here-doc body, outside a comment, and outside the text of another call (a callee named inside
+# somebody else`s argument string is data, not a call). The extent is here because bash does not report a
+# multi-line call by the line it starts on: when an argument is a double-quoted string carrying a newline — the
+# way these phases write long assertion descriptions — ${BASH_LINENO[0]} lands on a line INSIDE that call, and
+# which one is not stable (measured: `r "a<nl>b" 0` reports the closing line, `r 'x' "a<nl>b"` reports the
+# opening one, a call with two such strings reports the middle line). So a site claims every line its own
+# command occupies, and a recorded line counts as reaching the site whose extent contains it. A failure then
+# still prints the address a human should open, without pretending the parser is more predictable than it is.
+gsvtk_declared_spans() {
     _file=$1
     [ -f "$_file" ] || return 0
     _abs=$(gsvtk_declared_abs "$_file")
     awk -v funcs="$GSVTK_DECL_FUNCS" -v file="$_abs" '
-        BEGIN {
-            n = split(funcs, f, /[ \t]+/)
-            alt = ""
-            for (i = 1; i <= n; i++) if (f[i] != "") alt = (alt == "" ? f[i] : alt "|" f[i])
+        function heredoc_tag(l,   tag) {          # a here-doc opener at the end of this line, else ""
+            if (match(l, /<<-?[ \t]*[\x27"]?([A-Za-z_][A-Za-z0-9_]*)[\x27"]?[ \t]*$/)) {
+                tag = substr(l, RSTART, RLENGTH)
+                sub(/^<<-?[ \t]*/, "", tag); gsub(/[\x27"]/, "", tag)
+                return tag
+            }
+            return ""
+        }
+        function cmdend(k,   j, l, q, p, c) {     # the last line of the command that begins on line k
+            j = k; q = ""
+            while (j <= n && j <= k + 40) {       # the 40 is a fuse, not a limit anyone should reach
+                l = L[j]; p = 1
+                while (p <= length(l)) {
+                    c = substr(l, p, 1)
+                    if (q != "") {
+                        if (q == "\x22" && c == "\\") { p += 2; continue }     # \" inside a "..." string
+                        if (c == q) q = ""
+                        p++; continue
+                    }
+                    if (c == "#") break                                       # the rest of the line is a comment
+                    if (c == "\x22" || c == "\x27") { q = c; p++; continue }
+                    p++
+                }
+                if (q != "") { j++; continue }                                # quote still open: it continues
+                if (l ~ /\\[ \t]*$/) { j++; continue }                        # a backslash continuation
+                return j
+            }
+            return j - 1
+        }
+        { L[NR] = $0; n = NR }
+        END {
+            nf = split(funcs, f, /[ \t]+/); alt = ""
+            for (x = 1; x <= nf; x++) if (f[x] != "") alt = (alt == "" ? f[x] : alt "|" f[x])
             if (alt == "") exit
             pat = "^[ \t]*(" alt ")([ \t]|$)"
-        }
-        {
-            line = $0
-            if (inhere != "") {                                  # inside a here-doc body: data, not sites
-                if (line ~ ("^[ \t]*" inhere "[ \t]*$")) inhere = ""
-                next
-            }
-            if (line ~ /^[ \t]*#/) next          # a commented-out assertion cannot run, so it is not a site;
-                                                 # and a comment ending in `<<TAG` must not open a body here,
-                                                 # which is how a whole file once counted zero sites
-            if (line ~ pat) print file ":" NR
-            if (match(line, /<<-?[ \t]*[\x27"]?([A-Za-z_][A-Za-z0-9_]*)[\x27"]?[ \t]*$/)) {
-                tag = substr(line, RSTART, RLENGTH)
-                sub(/^<<-?[ \t]*/, "", tag); gsub(/[\x27"]/, "", tag)
-                inhere = tag
+            i = 1
+            while (i <= n) {
+                line = L[i]
+                if (inhere != "") {                                  # here-doc body: data, never a site
+                    if (line ~ ("^[ \t]*" inhere "[ \t]*$")) inhere = ""
+                    i++; continue
+                }
+                if (line ~ /^[ \t]*#/) { i++; continue }             # a commented-out assertion cannot run, so
+                                                                     # it is not a site, and a comment ending in
+                                                                     # `<<TAG` must not open a body here — that
+                                                                     # is how a whole file once counted zero
+                tag = heredoc_tag(line)
+                if (i <= covered) { i++; continue }                  # inside another call: argument text
+                if (line ~ pat) {
+                    j = cmdend(i)
+                    print file ":" i "\t" j
+                    covered = j
+                    if (tag != "") inhere = tag
+                    i++; continue
+                }
+                if (tag != "") inhere = tag
+                i++
             }
         }
     ' "$_file" | LC_ALL=C sort -u
+}
+
+# The declared sites as `<abs file>:<line>`, one per site, sorted for `comm`. The same list as the spans, keyed
+# by the line a reader should open.
+gsvtk_declared_sites() {
+    gsvtk_declared_spans "$1" | awk -F'\t' '{ print $1 }'
 }
 
 # How many sites. Never typed by a human, never a constant: when six assertions are deleted this number moves,
@@ -371,16 +433,41 @@ gsvtk_declared_report() {
         return 1
     fi
 
+    _decl_spans="${GSVTK_DECL_SITES}.spans"
     _decl_list="${GSVTK_DECL_SITES}.declared"
     _reach_list="${GSVTK_DECL_SITES}.reached"
-    if ! gsvtk_declared_sites "$_file" > "$_decl_list" 2>/dev/null; then
+    _undecl_list="${GSVTK_DECL_SITES}.undeclared"
+    if ! gsvtk_declared_spans "$_file" > "$_decl_spans" 2>/dev/null; then
         printf '  FAIL  %s: could not count the declared sites in %s\n' "$_label" "$_file"
         return 1
     fi
-    if ! LC_ALL=C sort -u "$GSVTK_DECL_SITES" > "$_reach_list" 2>/dev/null; then
+    if ! LC_ALL=C sort -u "$GSVTK_DECL_SITES" > "${_reach_list}.raw" 2>/dev/null; then
         printf '  FAIL  %s: could not read the site ledger %s to compare it\n' "$_label" "$GSVTK_DECL_SITES"
         return 1
     fi
+    # Project each recorded line onto the site whose command extent contains it (see gsvtk_declared_spans): a
+    # call whose argument string carries a newline is reported by bash from inside the call, and the site line
+    # stays the address. Entries that fall inside no site are kept, because they are the loud case: a call the
+    # callee list does not know about, or an assertion arriving from another file.
+    awk -F'\t' -v mf="${_reach_list}.mapped" -v uf="$_undecl_list" '
+        NR == FNR { n++; sp[n] = $1; pth[n] = $1; sub(/:[0-9]+$/, "", pth[n])          # the span file is
+                    st[n] = $1; sub(/^.*:/, "", st[n]); st[n] += 0                     # `<file>:<start>` then a
+                    en[n] = $2 + 0                                                     # TAB then `<end>`
+                    next }
+        {
+            ent = $0
+            if (ent == "") next
+            p = ent; sub(/:[0-9]+$/, "", p)
+            ln = ent; sub(/^.*:/, "", ln); ln += 0
+            hit = ""
+            for (k = 1; k <= n; k++) {
+                if (pth[k] == p && ln >= st[k] && ln <= en[k]) { print sp[k] > mf; hit = 1; break }
+            }
+            if (!hit) print ent > uf
+        }
+    ' "$_decl_spans" "${_reach_list}.raw"
+    LC_ALL=C sort -u "${_reach_list}.mapped" > "$_reach_list" 2>/dev/null || : > "$_reach_list"
+    awk -F'\t' '{ print $1 }' "$_decl_spans" | LC_ALL=C sort -u > "$_decl_list" 2>/dev/null
     _decl=$(wc -l < "$_decl_list" | tr -d ' ')
     _reach=$(wc -l < "$_reach_list" | tr -d ' ')
     if [ "${_decl:-0}" -eq 0 ]; then
@@ -389,12 +476,14 @@ gsvtk_declared_report() {
         return 1
     fi
     _never=$(LC_ALL=C comm -23 "$_decl_list" "$_reach_list")
-    _undeclared=$(LC_ALL=C comm -13 "$_decl_list" "$_reach_list")
+    _undeclared=""
+    [ -s "$_undecl_list" ] && _undeclared=$(LC_ALL=C sort -u "$_undecl_list")
     if [ -n "$GSVTK_DECL_OWNED" ]; then
         rm -f "$GSVTK_DECL_SITES" 2>/dev/null
         GSVTK_DECL_OWNED=""
     fi
-    rm -f "$_decl_list" "$_reach_list" 2>/dev/null
+    rm -f "$_decl_list" "$_decl_spans" "$_reach_list" "${_reach_list}.raw" "${_reach_list}.mapped" \
+          "$_undecl_list" 2>/dev/null
 
     if [ "${_skipped:-0}" -gt 0 ]; then
         printf '%s: declares %s assertion call site(s); this run reached %s, so %s did not run behind %s named skip(s) — %s verdict(s) recorded\n' \
@@ -418,7 +507,7 @@ gsvtk_declared_report() {
         if [ -n "$_undeclared" ]; then
             printf '  FAIL  %s: %s site(s) ran that this count does not declare: %s. Either GSVTK_DECL_FUNCS is wrong, or the call is written so that the line does not start with the callee, or an assertion arrives from outside %s.\n' \
                 "$_label" "$(printf '%s\n' "$_undeclared" | wc -l | tr -d ' ')" \
-                "$(printf '%s\n' "$_undeclared" | awk -F: '{ printf "%s ", $NF }')" "$(basename "$_file")"
+                "$(printf '%s\n' "$_undeclared" | sed "s|$_file:|line |" | tr '\n' ' ')" "$(basename "$_file")"
         fi
         printf '        This pair requires the declared set and the reached set to be EQUAL, in every mode, whenever nothing skipped.\n'
         return 1

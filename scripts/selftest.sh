@@ -37,8 +37,26 @@ trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
 printf 'GSVTK_PROJECT=profile-value-here\n' > "$TMP/prof.env"
 
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES, and the reporter requires the declared SET and the reached SET to be
+# equal whenever nothing skipped. This file is the oldest phase and the one whose harness once reported "ok" for
+# eight assertions that make had deleted — the reason a canary lives here at all — so the pair is stated in the
+# same units the canary can act on: a call site that exists and never runs is named by LINE NUMBER. The callees
+# are what gsvtk_declared_funset derives from this file (every function that records a verdict and is called from
+# top-level code), re-derived by the reporter on every run; the `skipped`-shaped counters are deliberately absent
+# because they count bails, not verdicts. Where this file records a verdict inline in a top-level if/fi instead
+# of through one of those ten functions, it is a verdict and not a site — which is why the reporter prints the
+# verdict total BESIDE the site total instead of merging them. The ledger file IS the set of reached sites: bash
+# 3.2 has no associative arrays, and an unwritable ledger fails loudly instead of looking like a run that
+# reached nothing.
+SELF="$ROOT/scripts/selftest.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="check canary expect covcheck stagecheck work_dir_check require_exits_4 doctor_exits_4 probecount auditcount"
+gsvtk_declared_init "$TMP"
+
 # check DESC CMD... — passes when CMD exits 0.
 check() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED check(); one entry per call SITE, not per loop turn
     local desc="$1"; shift
     local out rc
     out="$("$@" 2>&1)"; rc=$?
@@ -52,6 +70,7 @@ check() {
 
 # canary -- the assertion that guards the assertions.
 canary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local out rc
     out="$(/bin/false 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -69,6 +88,7 @@ canary() {
 # a pass), and the number in the output is the actual result: a tool that exits 1 having printed
 # nothing at all has not compared anything either. `check` alone cannot catch that.
 expect() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want="$2"; shift 2
     local needles=()
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles+=("$1"); shift; done
@@ -102,6 +122,7 @@ expect() {
 
 # covcheck DESC CMD... — a jq-plumbing scan whose block coverage must be complete.
 covcheck() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1"; shift
     local out rc pre exe
     out="$("$@" 2>&1)"; rc=$?
@@ -122,6 +143,7 @@ covcheck() {
 
 # stagecheck DESC WANT CMD... — a contract check that must compare WANT+ stage calls.
 stagecheck() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want="$2"; shift 2
     local out rc n
     out="$("$@" 2>&1)"; rc=$?
@@ -173,6 +195,7 @@ check "GSVTK_CONFIG replaces the profile chain instead of joining it" \
 # gsvtk_work must create the subdir under the caller's GSVTK_WORK, not under wherever the
 # checkout happens to live -- the scratch dir is where tens of GB land.
 work_dir_check() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local p
     p="$(GSVTK_CONFIG="$TMP/empty.env" GSVTK_WORK="$TMP/work" bash -c \
         '. "'"$ROOT"'/kit/config.sh" >/dev/null 2>&1; gsvtk_work runs/x' 2>/dev/null)"
@@ -187,6 +210,7 @@ work_dir_check
 
 # "required and missing" is the whole point of the config layer: exit 4, naming the key.
 require_exits_4() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local out rc
     out="$(env -u GSVTK_PROJECT -u GSVTK_TERRA_NAMESPACE GSVTK_CONFIG="$TMP/empty.env" \
         ./kit/gsvtk-config require PROJECT 2>&1)"; rc=$?
@@ -199,6 +223,7 @@ require_exits_4() {
 require_exits_4
 
 doctor_exits_4() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local out rc
     out="$(env -u GSVTK_PROJECT -u GSVTK_TERRA_NAMESPACE GSVTK_CONFIG="$TMP/empty.env" \
         ./kit/gsvtk-config doctor 2>&1)"; rc=$?
@@ -230,6 +255,7 @@ check "show names the profile file a value came from" \
 # gatk-sv checkout -- could certify a per-module gate by not running. The failure now names the
 # dependency remedy, because a SKIP without a remedy is only a smaller lie.
 probecount() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want="$2"; shift 2
     local out rc tally run_n skip_n fail_n
     out="$("$@" 2>&1)"; rc=$?
@@ -353,6 +379,7 @@ check "scripts/check_docs.py finds broken fences and dead relative links" \
 # "Exit 1" would pass on one hit and on forty; the count is the positive control that the fixtures
 # are all reachable and that no fixture is silently un-scanned.
 auditcount() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see check() above
     local desc="$1" want_h="$2" want_f="$3"; shift 3
     local out rc h f
     out="$("$@" 2>&1)"; rc=$?
@@ -759,4 +786,9 @@ if [ -n "$CLAIM" ]; then
     fi
 fi
 printf 'selftest: %s ok, %s skipped, %s failed\n' "$ok" "$skip" "$fail"
+# Equal sets whenever nothing skipped; with a named skip the reporter prints the sites it withheld by line, so a
+# counted bail cannot stand in for the assertions behind it. What the pair cannot see is a DELETION: declared and
+# reached drop together when a call site goes away (see the header of scripts/selftest.d/declared.sh and
+# docs/gap-ledger.md C10).
+gsvtk_declared_report "selftest" "$SELF" "$((ok + fail))" "$skip" || fail=$((fail + 1))
 [ "$fail" -eq 0 ]

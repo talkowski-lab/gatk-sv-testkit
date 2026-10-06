@@ -42,6 +42,19 @@ trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.env"
 mkdir -p "$TMP/no-inputs"
 
+# ------------------------------------------------- declared vs reached (docs/gap-ledger.md C10)
+# Both numbers count assertion call SITES, so they can be required to be EQUAL on every run and the phase can
+# say, by LINE NUMBER, which declared assertion never executed. The callees are what gsvtk_declared_funset
+# derives from this file (the four `want*`/`countis` recorders plus `canary`), re-derived by the reporter on
+# every run; `runsc` is deliberately absent because running a scenario records no verdict. The 30 this phase
+# prints against the 29 sites is not an error: the `--images` artifact-comparison check at the end records its
+# verdict in a top-level if/fi, outside any recorder — a verdict, not a site, which is why the reporter states
+# both totals. The ledger file IS the set of reached sites, because bash 3.2 has no associative arrays.
+SELF="$ROOT/scripts/selftest.d/reach.sh"
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="wantf wantline wantabsent countis canary"
+gsvtk_declared_init "$TMP"
+
 # runsc NAME CMD... — run once, keep the combined output and the exit status for the checks below.
 # Scenarios are run once and asserted many times: the same rule as the tree loader, N assertions
 # should never cost N runs of the tool.
@@ -55,6 +68,7 @@ runsc() {
 
 # wantf DESC NAME WANT_RC NEEDLE... — the recorded run exited WANT_RC and every needle appears.
 wantf() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED wantf(); one entry per call SITE, not per loop turn
     local desc="$1" name="$2" wantrc="$3"; shift 3
     local miss="" n rc
     rc="$(cat "$TMP/$name.rc" 2>/dev/null)"
@@ -74,6 +88,7 @@ wantf() {
 # wantline DESC NAME PATTERN — one line matches the regex, so a label can be pinned to the input that
 # carried it. "PRE-CHANGE appears somewhere" would still pass if the tool attached it to the wrong row.
 wantline() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf() above
     local desc="$1" name="$2" pat="$3"
     if grep -qE -- "$pat" "$TMP/$name.out" 2>/dev/null; then
         ok=$((ok + 1)); printf '  ok    %s\n' "$desc"
@@ -85,6 +100,7 @@ wantline() {
 # wantabsent DESC NAME PATTERN — a bucket the fixtures never produced must not be printed. Counting on
 # absence is how a misclassified value (a published tag quietly reported as a branch build) gets caught.
 wantabsent() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf() above
     local desc="$1" name="$2" pat="$3"
     if grep -qE -- "$pat" "$TMP/$name.out" 2>/dev/null; then
         fail=$((fail + 1)); printf '  FAIL  %s\n          unexpected line: %s\n' "$desc" \
@@ -97,6 +113,7 @@ wantabsent() {
 # countis DESC NAME PATTERN EXPECTED — how many lines start the pattern. This is the "one tree load"
 # assertion and the "every asked name got its own block" assertion; a substring match cannot count.
 countis() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf() above
     local desc="$1" name="$2" pat="$3" want="$4" got
     got="$(grep -cE -- "$pat" "$TMP/$name.out" 2>/dev/null)"
     if [ "$got" = "$want" ]; then
@@ -108,6 +125,7 @@ countis() {
 
 # A canary for THIS file: its own tally must be able to go down.
 canary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf() above
     local rc
     false; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -253,4 +271,7 @@ else
 fi
 
 printf 'reach selftest: %s ok, %s failed\n' "$ok" "$fail"
+# Equal sets, every run. What the pair cannot see is a DELETION: declared and reached drop together when a call
+# site is removed — see the header of scripts/selftest.d/declared.sh and docs/gap-ledger.md C10.
+gsvtk_declared_report "reach selftest" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ]
