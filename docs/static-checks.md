@@ -14,6 +14,7 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 | A shipped image whose jar predates the flags its WDL passes | the image is built from a pinned commit, not your branch | `image-check/` |
 | "what breaks if I change this file?" answered from memory | blast radius is a graph question, and neither CI nor `miniwdl check` answers reachability across imports and calls | `wdl_reach.py` |
 | A Terra method config binding an input the WDL at that ref does not declare | `wdl_gate.sh` compares call sites **inside** a WDL tree; nothing there knows about method configs, and `validate` asks Terra, which needs the ref published on Dockstore | `terra/batch_configs.py check --against <ref>` (below, and it is the pre-check of `create`/`validate`) |
+| A launch config whose entity type is a guess, or whose `${this.<attr>}` reads are not columns of any entity table the ref ships | a method config is JSON, not WDL: no validator opens it, and a wrong `entityType` is not an error — it resolves every `this.*` binding to nothing at run time, after the VMs booted | `terra_entity_check.py` |
 
 The last checker lives in `terra/` rather than `checks/` because it checks this repo's own config
 table against a WDL ref, not gatk-sv's source. It is still offline: `git archive` of `wdl/` from
@@ -28,6 +29,7 @@ branch-only key it currently reports against `main`.
 * [`wdl_reach.py`: the blast radius of a changed file](#wdl_reachpy-the-blast-radius-of-a-changed-file)
 * [`svshell_contract_check.py`: the rename that becomes `null`](#svshell_contract_checkpy-the-rename-that-becomes-null)
 * [`svshell_jq_plumbing_scan.py`: execute the plumbing instead of reading it](#svshell_jq_plumbing_scanpy-execute-the-plumbing-instead-of-reading-it)
+* [`terra_entity_check.py`: which entity row a launch config runs against](#terra_entity_checkpy-which-entity-row-a-launch-config-runs-against)
 * [`image-check/`: proof about shipped bytes, not checkout bytes](#image-check-proof-about-shipped-bytes-not-checkout-bytes)
 * [`audit_history.py`: what the object store would publish](#audit_historypy-what-the-object-store-would-publish)
 * [Using them as gates](#using-them-as-gates)
@@ -422,6 +424,62 @@ the same line) while the summary still said *every jq block executed*; blocks th
 are now counted and named instead of dropped. Each producer block gets a stub carrying the keys its
 consumers read, so a stale reader against another block's output is detectable rather than silently
 null, and `--selftest` pins both behaviours for `make selftest`.
+
+## `terra_entity_check.py`: which entity row a launch config runs against
+
+```bash
+checks/terra_entity_check.py --repo "$GSVTK_GATK_SV_CHECKOUT" --ref main   # read a ref (git archive, read-only)
+checks/terra_entity_check.py --tree scripts/selftest.d/fixtures/entity     # the offline fixture corpus
+checks/terra_entity_check.py --tree T --corpus inputs/templates/terra_workspaces   # the corpus is a path, not a guess
+```
+
+Every launch config upstream ships binds its inputs with `${this.<attr>}`, and none of them says which
+entity **type** the row is. A wrong type is not an error: as `terra/steps.py` puts it, it "resolves every
+`this.*` binding to nothing at runtime, after the VMs booted". Two derivation rules were measured and one
+is dead. The member rule (`this.<collection>.<attr>` names the type) derives `sample_sets` for
+`MergeBatchSites.json.tmpl`, whose row is a `sample_set_set`. The name-key rule — the single-component
+`${this.<etype>_id}` — answers once per config, and this tool derives it, cross-checks it, and refuses
+rather than guessing. The WDL is not a source for this at all: `git grep -l 'this\.' -- 'wdl/*.wdl'` at
+gatk-sv `e1909d2f` returns 0 files.
+
+Measured by the first command at gatk-sv `e1909d2f`, and printed by the tool itself as `== census ==`:
+**31 configs — 29 with exactly one name key, 2 with none, 0 with many** (the 2 are the
+`output_configurations/*` write-back files, which bind no entity attribute at all). Derived types:
+`sample_set_set` 16, `sample_set` 10, `sample` 3. Against the **shipped entity tables** — every TSV in the
+corpus whose first header column is `entity:<etype>_id` or `membership:<etype>_id` — **3 pass**
+(`GatherSampleEvidence`, `StripyWorkflow`, `GATKSVPipelineSingleSample`, all `sample`-rooted), **16 have no
+shipped table of the derived type** (upstream ships no `sample_set_set` table), and **10 have a table that
+lacks a column they read** (the only `sample_set` table is `sample_set_membership_1kgp.tsv.tmpl`, one
+column: `sample`). That last 10 are a finding about upstream's corpus, not a limitation of the check: the
+plan's Stage A expected the shipped tables to answer for all 29 name-keyed configs, and at this ref they
+answer for 3. The same corpus carries one `${[this.a, this.b, …]}` binding holding **five** reads
+(`PlotSVCountsPerSample.vcfs`), one key bound twice with different values
+(`GATKSVPipelineSingleSample.mei_bed` — `json.loads` is last-wins), 30 `{{ … }}` expressions across 9
+configs, and 0 reads inside nested objects; the tool counts each shape per config instead of assuming the
+common one, and `--tree scripts/selftest.d/fixtures/entity` prints a synthetic corpus holding all of them.
+
+Refusals are exit 1 and name what was looked for and where: `no-name-key` (with the reads it *did* find,
+or the count of `${workspace.*}` bindings if it found none), `many-name-keys` (both types),
+`no-shipped-table` (the type, the header pattern, and every table it did find), `columns-missing` (the
+column, and what each candidate table carries). Exit 0 means every config answered — reachable, and graded:
+the phase builds a one-config corpus that does answer cleanly. Exit 2 is a usage error, exit 3 a missing
+prerequisite (no checkout, a ref that will not archive, no corpus at it, or no `terra/batch_configs.py` to
+borrow the one `{{ … }}` expander from — this file refuses to define a second).
+
+A pass means the derived type is a shipped table's type and the read names are its columns. It does not
+mean the entity **row** exists (`terra.entity_sample()` before any submission), that the config's values
+are right (Stage B of the plan), or that Terra's own `rootEntityType` agrees — that string exists only in
+a live workspace, and is still an open decision (`docs/plan-launch-any-module.md`, "Risks not resolved").
+Member attributes read through a collection (`${this.sample_sets.ploidy_table}`) are listed and **not**
+checked: the member entity type is not derived, and plural-to-singular is the guess that binds nothing
+when wrong. One machine line per config (`GSVTK-ENTITY …`) plus one `GSVTK-ENTITY-SUMMARY` census line.
+
+Graded offline by `scripts/selftest.d/entity.sh` against a committed synthetic corpus — 20 configs, one per
+refusal shape, including the trap (a config whose member collection is a different type from its name key)
+and the bait table that makes the dead member rule look right: **54 assertions with a gatk-sv checkout
+holding `e1909d2f`, 44 passed + 1 named counted skip without one** — the skip names how many assertions it
+withheld, which is the reporting shape `docs/gap-ledger.md` C10 still asks for elsewhere. No checkout, no
+network, no credentials, no jar.
 
 ## `image-check/`: proof about shipped bytes, not checkout bytes
 
