@@ -102,14 +102,16 @@ jarshape ones the dirty tree had been hiding. `make verify-commit` grades a **re
 worktree from `REV` (default `HEAD`), the caller's interpreter passed by absolute path, the same tallies, then
 the tree is removed. `GSVTK_VERIFY_MAKE=syntax` grades one cheap target when you only need one.
 
-Cost decided the placement, rather than wishfulness: the offline gate is dominated by a single phase —
-`scripts/selftest.d/womtool.sh` alone measured **16m48s** (50 graded assertions reached, each spawning a cold
-JVM; its own site counter finds 49 call sites, and the difference between a reached count and a declared one is
-exactly the distinction the rest of this page keeps making) — and a full `make verify-commit` on the parent's
-laptop measured **2664s (44m24s)** end to end. So this target is a second full gate and is deliberately not a
-`test` phase; it belongs before a push, or as its own CI job. It prints its own `wall=<seconds>` so the next
-reader measures instead of repeating this number, and on a loaded machine expect that number to move more than
-the tallies do.
+Cost decided the placement, rather than wishfulness — and cost on this machine turned out to be a story about
+the machine. The offline gate is dominated by one phase, `scripts/selftest.d/womtool.sh`: measured **16m48s**
+while the box was under memory pressure (roughly 60 MB free, a backup daemon resident, processes being
+SIGKILLed), and the same phase inside a **148s** full `make verify-commit` once the machine was idle. An
+earlier full run measured **2664s (44m24s)**. All three numbers are real; none of them is "the" cost, and the
+tallies were identical in every run — which is the useful part. A control whose runtime moves 18× while its
+verdicts do not is a control worth having, but size the CI timeout from the slow number and the developer's
+patience from the fast one. Either way this target is a second full gate, so it is deliberately not a `test`
+phase: it belongs before a push, or as its own CI job. It prints its own `wall=<seconds>` so the next reader
+measures rather than repeating these.
 
 The teeth were demonstrated on a commit that was genuinely broken, not on a synthetic one. A commit whose
 `kit/config.py` cannot compile graded `FAIL kit/config.py … SyntaxError: invalid syntax` in the fresh tree
