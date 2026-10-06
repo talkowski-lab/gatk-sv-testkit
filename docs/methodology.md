@@ -103,10 +103,11 @@ worktree from `REV` (default `HEAD`), the caller's interpreter passed by absolut
 the tree is removed. `GSVTK_VERIFY_MAKE=syntax` grades one cheap target when you only need one.
 
 Cost decided the placement, rather than wishfulness: the offline gate is dominated by a single phase —
-`scripts/selftest.d/womtool.sh` alone measured **16m48s** (50 assertions, each spawning a cold JVM) and the
-whole gate is a 25-35 minute run on a dev laptop. So this target is a second full gate and is deliberately not
-a `test` phase; it belongs before a push, or as its own CI job. It prints its own `wall=<seconds>` so the next
-reader measures instead of repeating this number.
+`scripts/selftest.d/womtool.sh` alone measured **16m48s** (50 assertions, each spawning a cold JVM) — and a
+full `make verify-commit` on the parent's laptop measured **2664s (44m24s)** end to end. So this target is a
+second full gate and is deliberately not a `test` phase; it belongs before a push, or as its own CI job. It
+prints its own `wall=<seconds>` so the next reader measures instead of repeating this number, and on a loaded
+machine expect that number to move more than the tallies do.
 
 The teeth were demonstrated on a commit that was genuinely broken, not on a synthetic one. A commit whose
 `kit/config.py` cannot compile graded `FAIL kit/config.py … SyntaxError: invalid syntax` in the fresh tree
@@ -118,8 +119,11 @@ What a green run does NOT mean, said plainly because it is the easy overclaim: a
 uncommitted **state**, not the **machine**. The caller's Python, cloud credentials, the operator's gatk-sv
 checkout and the womtool jar all live outside the repo and stay reachable, so a verification run at `33c0358`
 found the real checkout through normal config discovery and ran the ref-pinned cross-check rather than
-printing the named skip it would print on a machine without it. Read a green `verify-commit` as "this commit
-passes with this interpreter on this machine" — which is exactly what a push decision needs, and nothing more.
+printing the named skip it would print on a machine without it. The 44-minute run quoted above was the other
+outcome, and it is the one worth reading: that tree did not find a checkout, so `entity selftest` reported
+`44 passed, 1 skipped` plus `declares 54 … so 10 did not run behind 1 named skip` and `selftest` reported
+`81 ok, 4 skipped`. Same commit, two machines, different coverage — which is exactly why the skips are named
+and counted, and why a green run means "this commit, this interpreter, this machine" and nothing more.
 
 One blind spot fell out of the counts: `make syntax` parses 79 files here and 75 at HEAD. The four are
 `docs/archive/as-run/*.py`, present on disk and gitignored, because the syntax file lists are directory globs
