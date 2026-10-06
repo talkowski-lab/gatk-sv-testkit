@@ -417,11 +417,17 @@ gsvtk_declared_report() {
             "$_label" "$_file"
         return 1
     fi
-    _want=$(printf '%s\n' $GSVTK_DECL_FUNCS | LC_ALL=C sort -u)
-    _typed_only=$(LC_ALL=C comm -23 <(printf '%s\n' "$_want" | sed '/^$/d') \
-                            <(printf '%s\n' "$_derived" | sed '/^$/d'))   # typed, derives nothing
-    _derived_only=$(LC_ALL=C comm -13 <(printf '%s\n' "$_want" | sed '/^$/d') \
-                            <(printf '%s\n' "$_derived" | sed '/^$/d'))   # derived, not typed
+    # Two temp files, not `<(...)` process substitution: under a shell that lacks it the substitution produces
+    # an EMPTY result, which here would read as "no drift" and silently disable this guard. A guard that can
+    # switch itself off is the failure mode this file exists to refuse. (Measured: `env /bin/sh
+    # scripts/selftest.d/reach.sh` printed the drift-free line while reporting a command-substitution error.)
+    _names_typed="${GSVTK_DECL_SITES}.typed.names"
+    _names_derived="${GSVTK_DECL_SITES}.derived.names"
+    printf '%s\n' $GSVTK_DECL_FUNCS | LC_ALL=C sort -u | sed '/^$/d' > "$_names_typed"
+    printf '%s\n' "$_derived" | sed '/^$/d' > "$_names_derived"
+    _typed_only=$(LC_ALL=C comm -23 "$_names_typed" "$_names_derived")     # typed, derives nothing
+    _derived_only=$(LC_ALL=C comm -13 "$_names_typed" "$_names_derived")   # derived, not typed
+    rm -f "$_names_typed" "$_names_derived" 2>/dev/null
     if [ -n "$_typed_only" ] || [ -n "$_derived_only" ]; then
         printf '  FAIL  %s: GSVTK_DECL_FUNCS=[%s] does not match the recorders derived from %s: derived [%s].%s%s\n' \
             "$_label" "$GSVTK_DECL_FUNCS" "$(basename "$_file")" "$(printf '%s\n' "$_derived" | tr '\n' ' ')" \
