@@ -95,6 +95,7 @@ runsc() {
 
 # wantf DESC NAME WANT_RC NEEDLE... — the recorded run exited WANT_RC and every needle appears.
 wantf() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED wantf; distinct per call site, once per call
     local desc="$1" name="$2" wantrc="$3"; shift 3
     local miss="" n rc
     rc="$(cat "$TMP/$name.rc" 2>/dev/null)"
@@ -113,6 +114,7 @@ wantf() {
 
 # wantline DESC NAME PATTERN — one line matches, so a label is pinned to the row that carries it.
 wantline() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf above
     local desc="$1" name="$2" pat="$3"
     if grep -qE -- "$pat" "$TMP/$name.out" 2>/dev/null; then
         ok=$((ok + 1)); printf '  ok    %s\n' "$desc"
@@ -124,6 +126,7 @@ wantline() {
 # wantabsent DESC NAME PATTERN — a verdict the fixtures never produced must not be printed. Counting on
 # absence is what catches a refusal quietly becoming a pass.
 wantabsent() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf above
     local desc="$1" name="$2" pat="$3"
     if grep -qE -- "$pat" "$TMP/$name.out" 2>/dev/null; then
         fail=$((fail + 1)); printf '  FAIL  %s\n          unexpected line: %s\n' "$desc" \
@@ -135,6 +138,7 @@ wantabsent() {
 
 # countis DESC NAME PATTERN EXPECTED — how many lines match. "one line per config" cannot be a substring.
 countis() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf above
     local desc="$1" name="$2" pat="$3" want="$4" got
     got="$(grep -cE -- "$pat" "$TMP/$name.out" 2>/dev/null)"
     if [ "$got" = "$want" ]; then
@@ -146,6 +150,7 @@ countis() {
 
 # wanteq DESC GOT WANT — a number computed outside the tool against one it printed.
 wanteq() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf above
     local desc="$1" got="$2" want="$3"
     if [ "$got" = "$want" ]; then
         ok=$((ok + 1)); printf '  ok    %s (%s)\n' "$desc" "$got"
@@ -154,14 +159,9 @@ wanteq() {
     fi
 }
 
-# wantc / wantclin / wantcount — the real-tree cross-check's own names for the three assertion helpers,
-# so the tally block below can count exactly how many assertions a named skip withheld.
-wantc() { wantf "$@"; }
-wantclin() { wantline "$@"; }
-wantcount() { countis "$@"; }
-
 # selfcanary — this file's own harness must be able to notice a failure.
 selfcanary() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see wantf above
     local rc
     false; rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -173,12 +173,17 @@ selfcanary() {
 
 echo
 echo "selftest: entity -- the name-key derivation and the shipped-table cross-check (offline, synthetic)"
-# How many assertion calls this file makes, derived FROM this file (never typed), so that a block going
+# How many assertion call SITES this file contains, derived FROM this file (never typed), so that a block going
 # missing moves the number. Used by the skip message and by the declared/reached pair at the end. The callee
-# names below are exactly the functions in this file that record a verdict, which is why the count from
-# scripts/selftest.d/declared.sh equals the ok+fail total when nothing skips.
+# names below are the ones gsvtk_declared_funset derives from this file — every function that records a verdict
+# and is called from top-level code — and the reporter re-derives them on every run, so the list cannot rot and
+# a recorder that forgot gsvtk_note_site is named instead of silently dropping this phase's reached count to 0.
+# The three aliases this file used to keep (wantc / wantclin / wantcount) are gone: their own comment said they
+# existed "only to make that grep expressible", and under site accounting they would have counted one assertion
+# twice — the alias line and the call inside it — inflating the very withheld count C10 exists to state.
 . "$ROOT/scripts/selftest.d/declared.sh"
-GSVTK_DECL_FUNCS="wantf wantc wantclin wantcount wantline wantabsent countis wanteq selfcanary"
+GSVTK_DECL_FUNCS="wantf wantline wantabsent countis wanteq selfcanary"
+gsvtk_declared_init "$TMP"          # the ledger rides in this phase's temp dir, under its existing EXIT trap
 DECLARED="$(gsvtk_declared_count "$SELF")"
 selfcanary
 
@@ -329,43 +334,44 @@ wantf "E18: --help works with an empty profile and states the four exit codes" E
 #
 # Pinned because these assertions are claims about a specific tree (the census the plan carries), and an
 # unpinned claim about somebody's checkout fails on a machine whose checkout moved instead of reporting a
-# finding. Absent checkout or absent commit => a NAMED, COUNTED skip, which is the CI case. Every
-# assertion in this block goes through `wantc`, which is how the tally block below can name how many of
-# them the skip withheld.
+# finding. Absent checkout or absent commit => a NAMED, COUNTED skip, which is the CI case. Every assertion in
+# this block is a call site of a recorder, which is how the tally block below can name how many of them the skip
+# withheld — the ledger of reached sites is written by the recorders, not by a grep over these names.
 if [ -n "$CK" ] && [ -d "$CK/.git" ] \
    && git -C "$CK" rev-parse --verify --quiet "${PINNED}^{commit}" >/dev/null 2>&1; then
     runsc R1 "${BASE[@]}" "$PY" "$TOOL" --repo "$CK" --ref "$PINNED"
-    wantc "R1: the real corpus runs (findings exist at this ref)" R1 1 \
+    wantf "R1: the real corpus runs (findings exist at this ref)" R1 1 \
         "shipped tables: 5 entity/membership TSV(s)" \
         "cohort_mode/sample_set_membership_1kgp.tsv.tmpl membership:sample_set_id  columns: sample" \
         "single_sample/sample.tsv.tmpl"
-    wantc "R1: the census upstream's plan carries, measured rather than quoted" R1 1 \
+    wantf "R1: the census upstream's plan carries, measured rather than quoted" R1 1 \
         "configs 31 | name keys: one 29, zero 2, many 0" \
         "GSVTK-ENTITY-SUMMARY configs=31 ok=3 no-name-key=2 many-name-keys=0 no-shipped-table=16 columns-missing=10 cannot-parse=0 namekeys-one=29 namekeys-zero=2 namekeys-many=0"
-    wantc "R1: the two tables that decide the single-sample answer, with their columns" R1 1 \
+    wantf "R1: the two tables that decide the single-sample answer, with their columns" R1 1 \
         "single_sample/sample.tsv.tmpl                  entity:sample_id  columns: bam_or_cram_file, bam_or_cram_index, participant, case_stripy_file" \
         "single_sample/participant.tsv.tmpl             entity:participant_id  columns: -"
-    wantclin "R: MergeBatchSites answers sample_set_set on the real tree, and refuses for want of a table" R1 \
+    wantline "R: MergeBatchSites answers sample_set_set on the real tree, and refuses for want of a table" R1 \
         'config=cohort_mode/workflow_configurations/MergeBatchSites.json.tmpl .* namekeys=1 namekey=sample_set_set collections=sample_sets .* reason=no-shipped-table'
-    wantclin "R: \${this.sample_sets.sample_set_id} is a member read, never a second name key" R1 \
+    wantline "R: \${this.sample_sets.sample_set_id} is a member read, never a second name key" R1 \
         'config=cohort_mode/workflow_configurations/CombineBatches.json.tmpl .* namekeys=1 namekey=sample_set_set'
-    wantclin "R: the single-sample config passes on sample.tsv.tmpl and reports its duplicated key" R1 \
+    wantline "R: the single-sample config passes on sample.tsv.tmpl and reports its duplicated key" R1 \
         'config=single_sample/GATKSVPipelineSingleSample.json.tmpl .* state=OK namekeys=1 namekey=sample .* table=single_sample/sample.tsv.tmpl .* dupkeys=GATKSVPipelineSingleSample.mei_bed'
-    wantclin "R: the one \${[this.a, ...]} binding in the corpus yields all five of its reads" R1 \
+    wantline "R: the one \${[this.a, ...]} binding in the corpus yields all five of its reads" R1 \
         'config=cohort_mode/workflow_configurations/PlotSVCountsPerSample.json.tmpl .* reads_direct=6'
-    wantcount "R: both write-back configs refuse on zero name keys" R1 \
+    countis "R: both write-back configs refuse on zero name keys" R1 \
         '^GSVTK-ENTITY config=cohort_mode/workflow_configurations/output_configurations/.* reason=no-name-key$' 2
-    wantcount "R: every config under the corpus at that ref earns exactly one line" R1 '^GSVTK-ENTITY config=' 31
-    wantcount "R: nothing on that tree is reported as many-name-keys (the rule has one answer per config)" R1 \
+    countis "R: every config under the corpus at that ref earns exactly one line" R1 '^GSVTK-ENTITY config=' 31
+    countis "R: nothing on that tree is reported as many-name-keys (the rule has one answer per config)" R1 \
         'state=UNRESOLVED namekeys=[2-9] ' 0
 else
-    # How many sites this skip withholds: the declared total minus what actually ran by this point. It used to
-    # be a second `grep -cE` over the `wantc`/`wantclin`/`wantcount` aliases, which were introduced only to
-    # make that grep expressible — and it was right by coincidence, because every site matching those names
-    # happens to sit inside the skipped block (3 + 4 + 3 = 10). One such call anywhere else in the file would
-    # have silently inflated the number printed as "withheld", which is the opposite of what a withheld count
-    # is for. This file's real-tree block is its last section, so `ok + fail` here is everything that ran.
-    withheld=$((DECLARED - ok - fail))
+    # How many sites this skip withholds, in the same units the pair uses: the declared total minus the DISTINCT
+    # sites this run recorded. It used to be a second `grep -cE` over the aliases this file has now dropped,
+    # and it was right by coincidence, because every site matching those names happened to sit inside the skipped
+    # block (3 + 4 + 3 = 10). One such call anywhere else in the file would have silently inflated the number
+    # printed as "withheld", which is the opposite of what a withheld count is for. Subtracting reached SITES
+    # cannot drift that way: the ledger is written by the recorders themselves, so a site that ran is a site
+    # subtracted no matter where in the file it sits.
+    withheld=$((DECLARED - $(gsvtk_reached_sites)))
     printf '  SKIP  entity: no gatk-sv checkout holding %s (GSVTK_GATK_SV_CHECKOUT is "%s"): the real-tree cross-check did not run, so %s of the %s assertion(s) this file declares are withheld behind this named skip (that line is what CI prints, and a withheld assertion is not a passed one)\n' \
         "$PINNED" "${CK:-unset}" "$withheld" "$DECLARED"
     skipped=$((skipped + 1))
@@ -373,9 +379,11 @@ fi
 
 # --- the tally, and the declared/reached pair (docs/gap-ledger.md C10) ------------------------------
 # C10's open half: a counted skip that counts the BAIL rather than the assertions it withheld. The number of
-# assertion calls this file makes is derived FROM this file, not typed, so a block going missing moves the
-# number — and when nothing skipped, declared != reached is itself a failure. One implementation, in
-# scripts/selftest.d/declared.sh, shared with the phases that can bail.
+# assertion call SITES this file contains is derived FROM this file, not typed, so a block going missing moves
+# the number — and when nothing skipped the declared set and the reached set must be EQUAL, in every mode
+# including the one where this file's optional real-tree block ran. One implementation, in
+# scripts/selftest.d/declared.sh, shared with the phases that can bail. What it still cannot see is a DELETION:
+# remove a site and both numbers fall together, so this file can lose assertions and the pair stays green.
 ran=$((ok + fail))
 printf '\nentity selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
 gsvtk_declared_report "entity selftest" "$SELF" "$ran" "$skipped" || fail=$((fail + 1))
