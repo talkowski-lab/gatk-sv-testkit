@@ -107,7 +107,10 @@ ok=0; fail=0; skipped=0
 # hand — so a reached count in EXECUTIONS needed a constant this file could not state honestly, and the same
 # commit would have been green on one machine and red on another. Sites tell one story in both modes,
 # measured: 31 declared; 31 reached with a jar; 30 reached without one, and the missing one is printed as a
-# line number beside the named skip rather than as a mismatch against a guessed constant. The callees are what
+# line number beside the named skip rather than as a mismatch against a guessed constant. What a skip is allowed
+# to withhold is DECLARED too, as the TEXT of the block it names (three regions: no firecloud, no miniwdl, no
+# jar), so a site that did not run for some other reason is a failure by line number even in a skipping mode.
+# The callees are what
 # gsvtk_declared_funset derives from this file: `want`, `want_no` and `canary` — and NOT `say_ok`/`say_fail`,
 # which record the verdict but are only ever called from inside `want`, so their lines are printer lines, not
 # assertion sites. That distinction is derived, not asserted: a function called only from another function
@@ -218,11 +221,21 @@ probe() { "$PY" "$TMP/probe.py" "$ROOT" "$@"; }
 echo
 echo "selftest: the womtool optionality predicate, graded against captured womtool-84 output"
 canary
+# Everything below this line is behind the firecloud bail: no import, no assertions, exit 0. Declared as a
+# region so the pair still runs on that path (it used to `exit 0` before reaching the reporter, which is a skip
+# that withholds the accounting too), and so an assertion written ABOVE this line — the canary — is still
+# required to have run even when the bail fires.
+gsvtk_guard_to_end "jarshape-no-firecloud"
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     printf '  SKIP  jarshape: %s cannot import firecloud, which terra/batch_check_inputs.py imports (python -m pip install -r requirements.txt)\n' "$PY"
     skipped=$((skipped + 1))
+    gsvtk_note_skip "jarshape-no-firecloud"
     printf '\njarshape selftest: %s passed, %s failed, %s skipped (a SKIP here is not a pass in CI)\n' \
         "$ok" "$fail" "$skipped"
+    # The pair runs here as everywhere else: a bail is the mode where an unreachable assertion is hardest to
+    # see, so it is the mode that must not skip the guard. What it cannot do is see a site hidden INSIDE the
+    # bailed region — see the header of scripts/selftest.d/declared.sh.
+    gsvtk_declared_report "jarshape selftest" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
     [ "$fail" -eq 0 ] || exit 1
     exit 0
 fi
@@ -385,6 +398,7 @@ msg_value="$FIX/womtool84-validate-coercion.txt"
 msg_extra="$FIX/womtool84-validate-extra-key.txt"
 
 if "$PY" -c 'import WDL' >/dev/null 2>&1; then
+    gsvtk_guard_sites "jarshape-no-miniwdl"     # every assertion in here is behind the miniwdl skip below
     cat > "$TMP/classify.py" <<'PY'
 import importlib.util
 import os
@@ -477,9 +491,11 @@ STUB
         "DISAGREES" "start there" -- run_cls "$msg_keys" 1
     want_no "and womtool passing a clean key set prints neither of those verdicts" 0 \
         "OUT-OF-LAYER" "DISAGREES" -- run_cls "$msg_keys" 0
+    gsvtk_guard_sites_end "jarshape-no-miniwdl"
 else
     printf '  SKIP  jarshape: %s cannot import miniwdl (WDL), so womtool-84 validate output was not classified (python -m pip install -r requirements-dev.txt)\n' "$PY"
     skipped=$((skipped + 1))
+    gsvtk_note_skip "jarshape-no-miniwdl"
 fi
 
 # 9. WITH A JAR IN HAND, THE CAPTURE IS A CAPTURE: re-run womtool on the shape-matrix WDL and require
@@ -489,6 +505,7 @@ fi
 jar="${WOMTOOL_JAR:-}"
 java_bin="${JAVA:-java}"
 if [ -n "$jar" ] && [ -f "$jar" ] && command -v "$java_bin" >/dev/null 2>&1; then
+    gsvtk_guard_sites "jarshape-no-jar"         # the ONE site this file withholds when no jar is in hand
     want "the shape-matrix capture reproduces with the jar in hand" 0 "MATCH 12 entries" -- \
         "$PY" -c '
 import json, os, subprocess, sys
@@ -504,15 +521,19 @@ else:
             print("DIFF %s: got %r want %r" % (key, got.get(key), want.get(key)))
     sys.exit(1)
 ' "$java_bin" "$jar" "$MATRIX_WDL" "$MATRIX"
+    gsvtk_guard_sites_end "jarshape-no-jar"
 else
     printf '  SKIP  jarshape: WOMTOOL_JAR=%s, so the shape-matrix capture was not re-derived from the jar — every graded assertion above ran without java\n' "${jar:-unset}"
     skipped=$((skipped + 1))
+    gsvtk_note_skip "jarshape-no-jar"
 fi
 
 printf '\njarshape selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
 # The pair's line is where this phase's mode-invariance is visible: the same declared count against the same
-# reached count whether or not a jar was in hand, with the withheld sites printed by LINE NUMBER when the jar
-# block skipped. What it still cannot see is a DELETION — declared and reached drop together.
+# reached count whether or not a jar was in hand, because what the jar skip withholds is ONE SITE read off this
+# file's own text (its region markers), not a constant that had to guess the mode. A site that did not run and
+# is not inside a region some skip named is a FAILURE by line number. What it still cannot see is a DELETION —
+# declared and reached drop together.
 gsvtk_declared_report "jarshape selftest" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0
