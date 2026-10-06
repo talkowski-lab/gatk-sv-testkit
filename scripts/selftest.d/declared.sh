@@ -1,5 +1,5 @@
 #!/bin/sh
-# scripts/selftest.d/declared.sh — one implementation of the declared/reached pair.
+# scripts/selftest.d/declared.sh — one implementation of the declared/reached pair, counted in SITES.
 #
 # WHY THIS EXISTS (docs/gap-ledger.md row C10)
 #
@@ -8,55 +8,177 @@
 # about the ASSERTIONS: the number that vanishes is 1, while the number that stopped running is 44. A reader
 # comparing `0 ok` across two runs sees the same thing whether the phase withheld one weak check or its whole
 # body, which is the shape where a broken block and a missing dependency look identical. This helper makes a
-# phase say both numbers: how many assertion call sites its own source contains, and how many this run
-# reached.
+# phase say both numbers: how many assertion call SITES its own source contains, and how many this run reached.
+#
+# BOTH HALVES ARE SITES. THE PREVIOUS VERSION COMPARED DIFFERENT UNITS
+#
+# Declared was a grep over the phase's source; reached was `ok + fail`, which counts EXECUTIONS. Two phases
+# whose source is the same length can then disagree, so the units did not match, and the gap was patched with
+# a per-phase `GSVTK_DECL_SURPLUS` constant that had to match exactly. That constant was the bug, two ways,
+# both measured on this box:
+#
+#   * It was MODE-DEPENDENT. `jarshape.sh` reached 49 with WOMTOOL_JAR unset and 50 with it set; `womtool.sh`
+#     reaches 50 with 2 skipped when there is no jar. One constant cannot describe both runs, so the same
+#     commit was red in one environment and green in another — a verdict depending on a file on someone's disk,
+#     which is worse than no number at all.
+#   * It described a LOOP, not a fact. `rerun.sh` needed GSVTK_DECL_SURPLUS=4 purely because one site sits
+#     inside `for s in 06 07 08 09 10`. A number that exists only to describe a loop is not measuring anything,
+#     and it silently forbids adding a second loop.
+#
+# The fix is to count the same unit on both sides. `reached` is now the number of DISTINCT call sites this run
+# recorded, collected by `gsvtk_note_site` at each recorder's own call site, so a site executed five times in
+# a loop is ONE site on both sides of the comparison, and a mode that runs 50 verdicts instead of 49 differs
+# only in WHICH sites it reached — never in what the phase declares. When nothing skipped, the declared set and
+# the reached set must be EQUAL, in every mode. GSVTK_DECL_SURPLUS is gone, and a phase that still sets it is
+# failed by name: no back-compat path, because a knob that is silently ignored is a knob set wrong.
 #
 # WHAT THE PAIR ACTUALLY PROVES, AND WHAT IT CANNOT
 #
 # It catches a site that EXISTS AND NEVER RUNS — an assertion behind a condition that cannot hold, a block
-# orphaned by a refactor, a helper renamed out of the counted set. It does NOT catch a DELETION, because
-# deleting a call site lowers `declared` and `reached` together and the pair stays satisfied. Anyone tempted
-# to read a green pair as "no assertions were lost" should read this paragraph again; docs/gap-ledger.md C10
-# words the same limit, and a claim of coverage here would be the second source telling you what you wanted
-# to hear. If deletions must ever be caught, compare this number against the value in the PREVIOUS commit
-# (which keeps the no-rot property that a pinned constant would destroy), do not pin a constant.
+# orphaned by a refactor, a helper renamed out of the counted set — and it names the LINE NUMBERS of those
+# sites, which is the whole payoff of counting sites: "a block went missing" becomes an address you can open.
 #
-# HOW, AND WHY THE NUMBER CANNOT BE A CONSTANT
+# It does NOT catch a DELETION, and this stayed true after the rewrite to sites. A deleted call site is
+# neither declared nor recorded, so declared and reached drop together and the pair still prints an all-clear:
+# measured by deleting the `run`/`run_absent`/`bytes`/`inproc` calls out of a phase and watching both numbers
+# fall. docs/gap-ledger.md C10 words the same limit, and each phase repeats it, because a claim of coverage
+# here would be the second source telling you what you wanted to hear. If deletions must ever be caught,
+# compare this number against the value in the PREVIOUS commit (which keeps the no-rot property that a pinned
+# constant would destroy), do not pin a constant.
 #
-# The count is derived from the phase's own source, never typed. A hardcoded expectation is the same mistake
-# in a different place: when someone deletes six assertions the gate goes quiet instead of complaining.
+# WHAT IS NOT ACCOUNTED, SO THAT NOTHING IS SILENT
 #
-# WHAT `DECLARED` COUNTS, PRECISELY
-#   - a call site is a line whose first token is one of the phase's assertion callees, outside a here-doc body
-#     and outside a comment. A here-doc body is data handed to another program; a commented-out assertion
-#     cannot run, so neither is a site.
-#   - `reached` counts EXECUTIONS. One site in a `for` loop over five values is one site and five executions,
-#     so `reached` can exceed `declared` legitimately — but ONLY by a surplus the phase DECLARES below. Before
-#     an adversarial review this file instead assumed any surplus was fine, and that was a hole worth two
-#     CRITICAL findings: a wrong callee list, or assertions arriving from a sourced here-doc file, both looked
-#     like a healthy surplus and printed an all-clear that blamed a loop the code cannot see.
+#   * A verdict recorded OUTSIDE the phase's recorder functions — a top-level `if …; then ok=$((ok + 1)); fi`
+#     block, which reach.sh and profiles.sh contain — is neither declared nor recorded. That is why the line
+#     this file prints states the verdict total beside the site total: if verdicts exceed sites, some verdict
+#     lives outside the accounted set and the phase should say where.
+#   * A comment line is not a site and cannot open a here-doc body — that is how a whole file once counted
+#     zero. A here-doc body is data handed to another program, not a call site.
+#   * An empty callee list, a callee list that disagrees with the derived set, a recorder that never calls
+#     `gsvtk_note_site`, a declared count of 0, a ledger that cannot be written, or a run that recorded no
+#     site while recording verdicts are FAILURES, never passes.
+#
+# THE TEMP FILE IS THE DATA STRUCTURE
+#
+# `reached` is a set of call sites, and bash 3.2 — the only bash on a stock macOS, and what these phases must
+# run under — has NO associative arrays (`declare -A` is bash 4, and an empty indexed array is an
+# unbound-variable error under `set -u` there). So the set lives in a per-run file, one `<file>:<line>` per
+# call, and `sort -u` is the set operation. That is also why an unwritable ledger is a loud failure rather
+# than a quiet 0: the file IS the mechanism, not a log next to it.
 #
 # USAGE from a phase:
 #   . scripts/selftest.d/declared.sh
-#   GSVTK_DECL_FUNCS="want want_no"          # required: the callees that record a verdict
-#   GSVTK_DECL_SURPLUS=4                     # optional: executions a loop is known to add
-#   DECLARED=$(gsvtk_declared_count "$SELF")
-#   ...  gsvtk_declared_report "womtool selftest" "$SELF" "$ran" "$skipped" || fail=$((fail + 1))
+#   GSVTK_DECL_FUNCS="$(gsvtk_declared_funset "$SELF" | awk '{print $1}' | tr '\n' ' ')"   # derived
+#   gsvtk_declared_init "$TMP"                          # the ledger, inside the phase's own temp dir
+#   inside EVERY recorder function, as its first statement:
+#       gsvtk_note_site "${BASH_LINENO[0]}"             # ${BASH_LINENO[0]} = the line that CALLED it
+#   ...  gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
+#
+# THE CALLEE LIST IS DERIVED, NOT TYPED
+#
+# `gsvtk_declared_funset` reads the phase's source and prints its verdict-recording entry points: every
+# function whose body records a verdict (directly, or by calling another function that does) AND that is
+# called from the phase's top-level code. The second clause keeps a printer out of the list: `say_ok` and
+# `say_fail` in jarshape.sh record the verdict, but they are only ever called from inside `want`, so a
+# `say_fail` line inside `want` would be a "site" that never runs in a green run — a guaranteed false alarm on
+# every healthy run. The entry points are the calls the phase itself makes, which is what C10 is about.
+# `gsvtk_declared_report` re-derives the set and FAILS if the phase's list disagrees, so the list cannot rot
+# when someone adds a recorder; a recorder in the list that never calls `gsvtk_note_site` is failed too,
+# because that is the mistake that would otherwise surface as a list of unexplained missing sites.
 #
 # A here-doc opener whose terminator never appears makes the rest of the file look like a body, so the count
 # collapses; the reporter treats `declared == 0` as a failure, and `make syntax` (`bash -n`) rejects an
 # unterminated here-doc long before this runs. Nested here-docs are not tracked — none exist in these phases.
 
-# Count assertion call sites in $1. The callee names come in GSVTK_DECL_FUNCS (space-separated).
-gsvtk_declared_count() {
+# Why the site ledger could not be written, if it could not. Sticky, so the reporter can name the reason
+# instead of printing "0 sites reached", which would read like a phase that lost every assertion.
+GSVTK_DECL_NOTE_ERR=""
+GSVTK_DECL_NOTE_ERR_SHOWN=""
+GSVTK_DECL_SITES=""                       # the ledger file; set by gsvtk_declared_init
+GSVTK_DECL_OWNED=""                       # 1 when this file made the ledger, so the reporter may remove it
+_gsvtk_decl_abs_key=""
+_gsvtk_decl_abs_val=""
+
+# Absolute path of a source file named in BASH_SOURCE, cached: it is resolved once per assertion, and a
+# subshell per assertion would cost more than the assertion does. The `cd` happens in the subshell, never here.
+gsvtk_declared_abs() {
+    case "$1" in
+        /*) printf '%s\n' "$1"; return 0 ;;
+    esac
+    if [ "$1" = "$_gsvtk_decl_abs_key" ]; then
+        printf '%s\n' "$_gsvtk_decl_abs_val"
+        return 0
+    fi
+    _gsvtk_decl_abs_key=$1
+    case "$1" in
+        */*) _gsvtk_decl_abs_val="$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}" ;;
+        *)   _gsvtk_decl_abs_val="$(pwd -P)/$1" ;;     # a bare name: CWD, which every phase pins to ROOT
+    esac
+    printf '%s\n' "$_gsvtk_decl_abs_val"
+}
+
+# Name the ledger and empty it. $1 = a directory to put it in — the phase's own temp dir, so the EXIT trap the
+# phase already has removes it. With no directory, mktemp one and own it (the reporter then cleans up). A
+# ledger that cannot be created or emptied is a LOUD failure here, not a phase that quietly reaches 0 sites.
+gsvtk_declared_init() {
+    if [ -z "$GSVTK_DECL_SITES" ]; then
+        if [ -n "${1:-}" ] && [ -d "$1" ]; then
+            GSVTK_DECL_SITES="$1/gsvtk-decl.sites"
+        else
+            GSVTK_DECL_SITES="$(mktemp "${TMPDIR:-/tmp}/gsvtk-decl.XXXXXX" 2>/dev/null)" || GSVTK_DECL_SITES=""
+            GSVTK_DECL_OWNED=1
+        fi
+    fi
+    if [ -z "$GSVTK_DECL_SITES" ]; then
+        GSVTK_DECL_NOTE_ERR="no site ledger could be created"
+    elif ! : >> "$GSVTK_DECL_SITES" 2>/dev/null; then
+        GSVTK_DECL_NOTE_ERR="cannot append to $GSVTK_DECL_SITES"
+    elif ! : > "$GSVTK_DECL_SITES" 2>/dev/null; then
+        GSVTK_DECL_NOTE_ERR="cannot empty $GSVTK_DECL_SITES"
+    fi
+    if [ -n "$GSVTK_DECL_NOTE_ERR" ]; then
+        printf '  FAIL  declared/reached: %s — a phase with no site ledger has NO accounting, and no accounting is reported as failure, never as a quiet 0\n' \
+            "$GSVTK_DECL_NOTE_ERR"
+        return 1
+    fi
+}
+
+# Record the call site of the assertion helper that is calling this. Feed it ${BASH_LINENO[0]} from inside the
+# recorder: inside a function that is the line number, IN THE CALLER, on which the recorder was called — so a
+# `for` loop over five values writes the same line five times and `sort -u` collapses it to ONE site, which is
+# what makes the pair mode-invariant where an execution count was not. The file is part of the key, so an
+# assertion arriving from a file this count cannot see (a here-doc-written script that gets sourced, say) shows
+# up as a site nobody declared instead of quietly inflating a total.
+gsvtk_note_site() {
+    _f=${BASH_SOURCE[1]:-${BASH_SOURCE[0]:-unknown}}
+    if [ -z "$GSVTK_DECL_SITES" ] || \
+       ! printf '%s:%s\n' "$(gsvtk_declared_abs "$_f")" "${1:-0}" >> "$GSVTK_DECL_SITES" 2>/dev/null; then
+        GSVTK_DECL_NOTE_ERR="${GSVTK_DECL_NOTE_ERR:-no site ledger} (first lost call site: line ${1:-0} of $_f)"
+        if [ -z "$GSVTK_DECL_NOTE_ERR_SHOWN" ]; then
+            GSVTK_DECL_NOTE_ERR_SHOWN=1
+            printf '  FAIL  declared/reached: cannot write the site ledger (%s) — the pair is blind from here, and a blind pair is a failing pair\n' \
+                "$GSVTK_DECL_NOTE_ERR"
+        fi
+        return 1
+    fi
+}
+
+# The declared sites of $1, one `<abs file>:<line>` per line of its source, sorted for `comm`. The callee names
+# come in GSVTK_DECL_FUNCS. This is the same rule the old counter used, and the same rule
+# `gsvtk_declared_funset` uses to decide what the phase's top-level code calls: a site is a line whose FIRST
+# TOKEN is a callee, outside a here-doc body and outside a comment. A call written so that the line does not
+# start with the callee is not declared — and the reporter then reports it as a site that ran without being
+# declared, which is the loud version of "this phase writes calls in a shape the counter does not know".
+gsvtk_declared_sites() {
     _file=$1
-    [ -f "$_file" ] || { echo 0; return 1; }
-    awk -v funcs="$GSVTK_DECL_FUNCS" '
+    [ -f "$_file" ] || return 0
+    _abs=$(gsvtk_declared_abs "$_file")
+    awk -v funcs="$GSVTK_DECL_FUNCS" -v file="$_abs" '
         BEGIN {
             n = split(funcs, f, /[ \t]+/)
             alt = ""
             for (i = 1; i <= n; i++) if (f[i] != "") alt = (alt == "" ? f[i] : alt "|" f[i])
-            if (alt == "") { print 0; exit }
+            if (alt == "") exit
             pat = "^[ \t]*(" alt ")([ \t]|$)"
         }
         {
@@ -66,63 +188,242 @@ gsvtk_declared_count() {
                 next
             }
             if (line ~ /^[ \t]*#/) next          # a commented-out assertion cannot run, so it is not a site;
-                                                 # and a comment ending in `<<TAG` must not start a body here,
+                                                 # and a comment ending in `<<TAG` must not open a body here,
                                                  # which is how a whole file once counted zero sites
-            if (line ~ pat) n_sites++
+            if (line ~ pat) print file ":" NR
             if (match(line, /<<-?[ \t]*[\x27"]?([A-Za-z_][A-Za-z0-9_]*)[\x27"]?[ \t]*$/)) {
                 tag = substr(line, RSTART, RLENGTH)
                 sub(/^<<-?[ \t]*/, "", tag); gsub(/[\x27"]/, "", tag)
                 inhere = tag
             }
         }
-        END { print n_sites + 0 }
-    ' "$_file"
+    ' "$_file" | LC_ALL=C sort -u
 }
 
-# Pair the count with what ran, and decide. $1 = the label the phase prints in its own summary, $2 = file to
-# count, $3 = ran (ok+fail), $4 = skipped. GSVTK_DECL_SURPLUS declares the executions a loop legitimately
-# adds. Returns 1 for anything the reader must not walk past.
+# How many sites. Never typed by a human, never a constant: when six assertions are deleted this number moves,
+# which is exactly the property a pinned expectation would destroy.
+gsvtk_declared_count() {
+    _n=$(gsvtk_declared_sites "$1" | wc -l | tr -d ' ')
+    printf '%s\n' "${_n:-0}"
+}
+
+# How many DISTINCT sites this run recorded. The temp file is the set; `sort -u` is the set operation.
+gsvtk_reached_sites() {
+    if [ -z "$GSVTK_DECL_SITES" ] || [ ! -r "$GSVTK_DECL_SITES" ]; then
+        printf '0\n'
+        return 1
+    fi
+    _n=$(LC_ALL=C sort -u "$GSVTK_DECL_SITES" 2>/dev/null | wc -l | tr -d ' ')
+    printf '%s\n' "${_n:-0}"
+}
+
+# DERIVE the verdict-recording entry points of $1 — see "THE CALLEE LIST IS DERIVED" above. Prints
+# `<name> [UNNOTED]` per entry point (UNNOTED when the function never calls gsvtk_note_site), sorted. Two
+# rules, both read off the source rather than assumed:
+#   records a verdict = its body contains `ok=$((ok + 1))`/`fail=$((fail + 1))`, or calls another function
+#                       that records one (run to a fixpoint, so a `wantc -> wantf` alias counts);
+#   entry point       = it is ALSO called from code outside every function body, i.e. by the phase itself.
+#                       A recorder only ever called from inside another recorder is a printer, and its lines
+#                       would be sites that never run in a green run.
+gsvtk_declared_funset() {
+    _file=$1
+    [ -f "$_file" ] || return 0
+    awk '
+        function strip(l) {                    # drop comments and quoted text: what remains is code
+            gsub(/\x27[^\x27]*\x27/, "Q", l)                      # single-quoted (no escapes inside those)
+            gsub(/"[^"]*"/, "Q", l)                               # double-quoted (no nested quotes in these files)
+            sub(/#.*/, "", l)
+            return l
+        }
+        function heredoc_tag(l,   tag) {       # a here-doc opener at end of line, else ""
+            if (match(l, /<<-?[ \t]*[\x27"]?([A-Za-z_][A-Za-z0-9_]*)[\x27"]?[ \t]*$/)) {
+                tag = substr(l, RSTART, RLENGTH)
+                sub(/^<<-?[ \t]*/, "", tag); gsub(/[\x27"]/, "", tag)
+                return tag
+            }
+            return ""
+        }
+        {
+            line = $0
+            if (inhere != "") {                                     # here-doc body: neither code nor a site
+                if (line ~ ("^[ \t]*" inhere "[ \t]*$")) inhere = ""
+                if (cur != "") body[cur, ++nline[cur]] = ""
+                next
+            }
+            if (line ~ /^[ \t]*#/) {                                 # a comment can be neither code nor opener
+                if (cur != "") body[cur, ++nline[cur]] = ""
+                next
+            }
+            code = strip(line)
+            if (cur == "") {
+                if (match(code, /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*\{/)) {
+                    rest = substr(code, RSTART + RLENGTH)                    # a `f() { one; }` body lives HERE,
+                    cur = code; sub(/^[ \t]*/, "", cur); sub(/\(.*/, "", cur)  # so read it before gsub moves RSTART
+                    depth = gsub(/\{/, "{", code) - gsub(/\}/, "}", code)   # depth is CUMULATIVE from here: a
+                    body[cur, ++nline[cur]] = ";" rest                      # body line with no braces does not
+                    if (depth <= 0) cur = ""                                # close the function
+                    next
+                }
+                topline[++topline_count] = code                       # top level, kept line by line so the
+                tag = heredoc_tag(line); if (tag != "") inhere = tag   # entry-point rule below is the SAME rule
+                next                                                  # gsvtk_declared_sites uses. The here-doc TAG
+                                                                      # is read from the RAW line: strip() turns
+                                                                      # a quoted tag into Q, which would then
+                                                                      # swallow the rest of the file as a body
+            }
+            body[cur, ++nline[cur]] = code
+            tag = heredoc_tag(line); if (tag != "") { inhere = tag; next }
+            depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+            if (depth <= 0) cur = ""
+        }
+        END {
+            for (f1 in nline) fname[f1] = f1
+            for (f1 in fname) {                                      # direct verdict recorders first
+                for (i = 1; i <= nline[f1]; i++) {
+                    if (body[f1, i] ~ /(^|[;&|])[ \t]*(ok|fail)=\$\(\([ \t]*(ok|fail)[ \t]*[+-][ \t]*1[ \t]*\)\)/) {
+                        rec[f1] = 1
+                    }
+                    if (body[f1, i] ~ /gsvtk_note_site/) noted[f1] = 1
+                }
+            }
+            for (pass = 0; pass < 32; pass++) {                      # then the call graph, to a fixpoint
+                changed = 0
+                for (f1 in fname) {
+                    if (rec[f1]) continue
+                    for (i = 1; i <= nline[f1] && !rec[f1]; i++) {
+                        for (g in fname) {
+                            if (!rec[g] || g == f1) continue
+                            if (body[f1, i] ~ ("(^|[;&|])[ \t]*" g "([ \t]|$)")) { rec[f1] = 1; changed = 1; break }
+                        }
+                    }
+                }
+                if (!changed) break
+            }
+            for (f1 in fname) {                                      # entry points: rec, and called by the phase
+                if (!rec[f1]) continue
+                for (i = 1; i <= topline_count; i++) {               # the SAME rule gsvtk_declared_sites uses:
+                    if (topline[i] ~ ("(^|[;&|])[ \t]*" f1 "([ \t]|$)")) {   # the callee is the first token here
+                        printf "%s %s\n", f1, (noted[f1] ? "" : "UNNOTED")
+                        break
+                    }
+                }
+            }
+        }
+    ' "$_file" | LC_ALL=C sort
+}
+
+# Pair the declared sites with the reached sites, and decide. $1 = the label the phase prints in its own
+# summary, $2 = the file to count, $3 = verdicts recorded (ok+fail), $4 = named skips. Returns 1 for anything
+# the reader must not walk past. When a phase NAMED its skips it is telling the truth about a partial run, so
+# the pair prints the addresses of the sites that did not run and passes; when nothing skipped, the declared
+# set and the reached set must be EQUAL — the sets, not merely two equal numbers, because two different sites
+# can add up to the same count.
 gsvtk_declared_report() {
     _label=$1
     _file=$2
-    _ran=$3
+    _ran=${3:-0}
     _skipped=${4:-0}
-    _surplus=${GSVTK_DECL_SURPLUS:-0}
-    _decl=$(gsvtk_declared_count "$_file")
 
+    if [ -n "${GSVTK_DECL_SURPLUS+set}" ]; then
+        printf '  FAIL  %s: GSVTK_DECL_SURPLUS is set (to "%s") and is OBSOLETE. Both halves of this pair now count distinct call SITES, so a loop adds nothing to either side and a surplus constant describes nothing. Delete the line: there is no back-compat path, because a knob this file silently ignored would be a knob set wrong.\n' \
+            "$_label" "$GSVTK_DECL_SURPLUS"
+        return 1
+    fi
     if [ -z "$GSVTK_DECL_FUNCS" ]; then
         printf '  FAIL  %s: declares no assertion callees (GSVTK_DECL_FUNCS is empty), so the declared/reached pair is vacuous\n' "$_label"
         return 1
     fi
-    if [ "$_decl" -eq 0 ]; then
+    if [ -n "$GSVTK_DECL_NOTE_ERR" ]; then
+        printf '  FAIL  %s: the site ledger is broken (%s) — reached is unknowable in this run, and unknowable is reported as failure, never as 0-and-quiet\n' \
+            "$_label" "$GSVTK_DECL_NOTE_ERR"
+        return 1
+    fi
+    if [ -z "$GSVTK_DECL_SITES" ] || [ ! -r "$GSVTK_DECL_SITES" ]; then
+        printf '  FAIL  %s: no site ledger (GSVTK_DECL_SITES="%s") — gsvtk_declared_init never ran, or its file is gone, so nothing was accounted\n' \
+            "$_label" "${GSVTK_DECL_SITES:-unset}"
+        return 1
+    fi
+
+    # The callee list, checked against the source instead of trusted. A phase can still type it (bash 3.2 has
+    # no associative arrays to hold a derived set, and the derivation costs an awk pass); what it cannot do is
+    # type it WRONG.
+    _derived=$(gsvtk_declared_funset "$_file" | awk '{print $1}')
+    if [ "$(printf '%s\n' "$_derived" | grep -c .)" -eq 0 ]; then
+        printf '  FAIL  %s: %s contains no verdict-recording function called from its own top level, so this pair is comparing an empty set — that is a defect in the pair, not a clean phase\n' \
+            "$_label" "$_file"
+        return 1
+    fi
+    _want=$(printf '%s\n' $GSVTK_DECL_FUNCS | LC_ALL=C sort -u)
+    _miss=$(LC_ALL=C comm -23 <(printf '%s\n' "$_want" | sed '/^$/d') <(printf '%s\n' "$_derived" | sed '/^$/d'))
+    _extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$_want" | sed '/^$/d') <(printf '%s\n' "$_derived" | sed '/^$/d'))
+    if [ -n "$_miss" ] || [ -n "$_extra" ]; then
+        printf '  FAIL  %s: GSVTK_DECL_FUNCS=[%s] does not match the recorders derived from %s: derived [%s].%s%s\n' \
+            "$_label" "$GSVTK_DECL_FUNCS" "$(basename "$_file")" "$(printf '%s\n' "$_derived" | tr '\n' ' ')" \
+            "${_miss:+ Absent from the list (a recorder this pair would not count): $(printf '%s ' "$_miss").}" \
+            "${_extra:+ On the list but deriving nothing: $(printf '%s ' "$_extra").}"
+        printf '        Derive the list instead of editing it: gsvtk_declared_funset %s\n' "$_file"
+        return 1
+    fi
+    _unnoted=$(gsvtk_declared_funset "$_file" | awk '$2 == "UNNOTED" { printf "%s ", $1 }')
+    if [ -n "$_unnoted" ]; then
+        printf '  FAIL  %s: %s names %s, but %s never call gsvtk_note_site — every call site inside them is declared and none can be reached. Add `gsvtk_note_site "${BASH_LINENO[0]}"` as the first statement of each.\n' \
+            "$_label" "$(basename "$_file")" "$(printf '%s ' "$_unnoted")" "$(basename "$_file")"
+        return 1
+    fi
+
+    _decl_list="${GSVTK_DECL_SITES}.declared"
+    _reach_list="${GSVTK_DECL_SITES}.reached"
+    if ! gsvtk_declared_sites "$_file" > "$_decl_list" 2>/dev/null; then
+        printf '  FAIL  %s: could not count the declared sites in %s\n' "$_label" "$_file"
+        return 1
+    fi
+    if ! LC_ALL=C sort -u "$GSVTK_DECL_SITES" > "$_reach_list" 2>/dev/null; then
+        printf '  FAIL  %s: could not read the site ledger %s to compare it\n' "$_label" "$GSVTK_DECL_SITES"
+        return 1
+    fi
+    _decl=$(wc -l < "$_decl_list" | tr -d ' ')
+    _reach=$(wc -l < "$_reach_list" | tr -d ' ')
+    if [ "${_decl:-0}" -eq 0 ]; then
         printf '  FAIL  %s: 0 assertion call sites counted for [%s] — the guard has nothing to check, which is not the same as passing\n' \
             "$_label" "$GSVTK_DECL_FUNCS"
         return 1
     fi
+    _never=$(LC_ALL=C comm -23 "$_decl_list" "$_reach_list")
+    _undeclared=$(LC_ALL=C comm -13 "$_decl_list" "$_reach_list")
+    if [ -n "$GSVTK_DECL_OWNED" ]; then
+        rm -f "$GSVTK_DECL_SITES" 2>/dev/null
+        GSVTK_DECL_OWNED=""
+    fi
+    rm -f "$_decl_list" "$_reach_list" 2>/dev/null
 
     if [ "${_skipped:-0}" -gt 0 ]; then
-        printf '%s: declares %s assertion call(s); this run reached %s, so %s did not run behind %s named skip(s)\n' \
-            "$_label" "$_decl" "$_ran" "$((_decl - _ran))" "$_skipped"
+        printf '%s: declares %s assertion call site(s); this run reached %s, so %s did not run behind %s named skip(s) — %s verdict(s) recorded\n' \
+            "$_label" "$_decl" "$_reach" "$((_decl - _reach))" "$_skipped" "$_ran"
+        if [ -n "$_never" ]; then
+            printf '        sites that did not run, by line in %s: %s\n' "$(basename "$_file")" \
+                "$(printf '%s\n' "$_never" | awk -F: '{ printf "%s ", $NF }')"
+        fi
         return 0
     fi
 
-    if [ "$_ran" -lt "$_decl" ]; then
-        printf '  FAIL  %s: %s assertion call site(s) declared, %s ran — %s site(s) became unreachable and nothing skipped\n' \
-            "$_label" "$_decl" "$_ran" "$((_decl - _ran))"
-        return 1
-    fi
-
-    if [ "$_ran" -gt "$_decl" ]; then
-        if [ "$_surplus" -gt 0 ] && [ "$((_ran - _decl))" -eq "$_surplus" ]; then
-            printf '%s: declares %s assertion call(s); this run reached %s (%s call(s) from a declared loop surplus)\n' \
-                "$_label" "$_decl" "$_ran" "$_surplus"
-            return 0
+    if [ -n "$_never" ] || [ -n "$_undeclared" ]; then
+        if [ -n "$_never" ]; then
+            printf '  FAIL  %s: %s site(s) declared, %s reached — these %s site(s) exist in %s and never ran, and nothing skipped:\n' \
+                "$_label" "$_decl" "$_reach" "$(printf '%s\n' "$_never" | wc -l | tr -d ' ')" "$(basename "$_file")"
+            printf '%s\n' "$_never" | while read -r _s; do
+                [ -n "$_s" ] || continue
+                printf '        line %s: %s\n' "${_s##*:}" "$(sed -n "${_s##*:}p" "$_file" | sed 's/^[ \t]*//' | cut -c1-92)"
+            done
         fi
-        printf '  FAIL  %s: %s site(s) declared, %s ran — reached exceeds declared by %s, and this phase declares a surplus of %s. Either GSVTK_DECL_FUNCS is missing a callee, or assertions are running from somewhere this counter cannot see (a here-doc-written file that gets sourced, a renamed helper). Not a loop: this file cannot know the cause, so it refuses to guess.\n' \
-            "$_label" "$_decl" "$_ran" "$((_ran - _decl))" "$_surplus"
+        if [ -n "$_undeclared" ]; then
+            printf '  FAIL  %s: %s site(s) ran that this count does not declare: %s. Either GSVTK_DECL_FUNCS is wrong, or the call is written so that the line does not start with the callee, or an assertion arrives from outside %s.\n' \
+                "$_label" "$(printf '%s\n' "$_undeclared" | wc -l | tr -d ' ')" \
+                "$(printf '%s\n' "$_undeclared" | awk -F: '{ printf "%s ", $NF }')" "$(basename "$_file")"
+        fi
+        printf '        This pair requires the declared set and the reached set to be EQUAL, in every mode, whenever nothing skipped.\n'
         return 1
     fi
 
-    printf '%s: declares %s assertion call(s); this run reached %s (nothing skipped)\n' \
-        "$_label" "$_decl" "$_ran"
+    printf '%s: declares %s assertion call site(s); this run reached %s distinct site(s) — %s verdict(s) recorded, nothing skipped\n' \
+        "$_label" "$_decl" "$_reach" "$_ran"
 }

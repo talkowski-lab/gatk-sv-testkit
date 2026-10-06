@@ -36,20 +36,21 @@ if ! "$PY" -c 'import firecloud' >/dev/null 2>&1 && [ -x .venv/bin/python ] \
 # this file so the count survives being invoked by relative path from the gate or standalone.
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 . "$(dirname "$SELF")/declared.sh"
+# The callees, DERIVED and then pinned so a drift is loud. Derived with
+#   gsvtk_declared_funset scripts/selftest.d/rerun.sh | awk '{print $1}'
+# which reads this file and prints every function that records a verdict AND is called from top-level code: the
+# four below, no more (`run`/`run_absent`/`bytes`/`inproc`). The reporter re-derives the set on every run and
+# fails if this line and the file disagree, so the list cannot rot when a fifth recorder is added — and it names
+# any recorder that never calls gsvtk_note_site, which is the omission that would otherwise look like a phase
+# that lost all its sites at once.
 GSVTK_DECL_FUNCS="run run_absent bytes inproc"
-# Declared, not assumed: exactly ONE site in this file runs inside a loop — the `for s in 06 07 08 09 10` step
-# sweep, five executions of one call site — so the executions exceed the sites by 4. Declaring the number is
-# what keeps the pair strict: an unexplained surplus is now a failure, and if someone adds a second loop site
-# this line goes red rather than quietly widening the blind spot. Verify with `bash scripts/selftest.d/rerun.sh
-# <python>` and read the declared/reached line.
-GSVTK_DECL_SURPLUS=4
 DECLARED=$(gsvtk_declared_count "$SELF")
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     printf 'rerun: SKIP — %s cannot import firecloud (python -m pip install -r requirements.txt)\n' "$PY"
     printf 'rerun: 0 ok, 0 failed, 1 skipped (a SKIP here is not a pass in CI)\n'
     # The counted skip counts the BAIL, so alone it reads "one thing was skipped" when in fact the whole phase
     # — every assertion below this line — did not run. Name that number, derived from this file, not typed.
-    printf 'rerun: declares %s assertion call(s); this run reached 0, so %s did not run behind this 1 named skip\n' \
+    printf 'rerun: declares %s assertion call site(s); this run reached 0, so %s did not run behind this 1 named skip\n' \
         "$DECLARED" "$DECLARED"
     exit 0
 fi
@@ -58,6 +59,10 @@ FIX=scripts/selftest.d/fixtures/rerun.profile.env
 GOLD=scripts/selftest.d/golden
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# The site ledger lives in this phase's own temp dir, so the EXIT trap above already owns its whole life. See
+# the header of scripts/selftest.d/declared.sh: the file IS the set of reached sites (bash 3.2 has no
+# associative arrays), so a ledger that cannot be written is a failing run, not a run that reached 0 sites.
+gsvtk_declared_init "$TMP"
 
 export GSVTK_CONFIG="$FIX"
 export GSVTK_WORK="$TMP/work"
@@ -77,6 +82,7 @@ ok=0; fail=0; QUIET=
 # run DESC WANT_RC NEEDLE CMD... — exit code AND a line of output, because a refusal that exits 1
 # having printed nothing has refused nothing.
 run() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED run(); once per call, distinct per call site
     local desc="$1" want="$2" needle="$3"; shift 3
     local out rc
     out="$("$@" 2>&1)"; rc=$?
@@ -96,6 +102,7 @@ run() {
 
 # run_absent DESC WANT_RC ABSENT CMD... — the assertion that a path DID NOT fire.
 run_absent() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see run() above: the same one line of accounting per recorder
     local desc="$1" want="$2" absent="$3"; shift 3
     local out rc
     out="$("$@" 2>&1)"; rc=$?
@@ -112,6 +119,7 @@ run_absent() {
 
 # bytes DESC FILE_A FILE_B — the byte-identity claim, not "looks the same".
 bytes() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see run() above
     local desc="$1" a="$2" b="$3"
     if cmp -s "$a" "$b"; then
         ok=$((ok + 1)); printf '  ok    %s (%s bytes, byte-identical)\n' "$desc" "$(wc -c < "$a" | tr -d ' ')"
@@ -124,6 +132,7 @@ bytes() {
 
 # inproc DESC WANT_RC PYFILE [ARG...] — a case that must print PASS itself.
 inproc() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see run() above
     local desc="$1" want="$2"; shift 2
     local out rc
     out="$("$PY" "$@" 2>&1)"; rc=$?
@@ -551,19 +560,25 @@ run "a step fed by the freeze loop says so, naming the frozen file count not a c
 
 printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
 # What this pair does and does not prove, stated exactly, because an earlier version of this comment
-# understated its own blindness. `reached` exceeds `declared` by the DECLARED surplus of 4 (one site inside the
-# `for s in 06 07 08 09 10` sweep), and the surplus has to match EXACTLY — measured: declaring 3 fails,
-# declaring 6 fails, declaring 4 passes. Consequences:
-#   - Hiding an assertion behind a condition that never holds is caught from the FIRST one, because 43 against
-#     40 is a surplus of 3, which this file does not declare. An adversarial review measured 4 hideable under
-#     the previous rule (any surplus tolerated); exact matching is what closed that.
-#   - DELETING a call site is still NEVER caught, because declared and reached drop together and the surplus
-#     stays 4. All 40 sites in this file can be deleted and the pair still prints an all-clear. The pair's
-#     teeth are against sites that exist and do not run — see the header of scripts/selftest.d/declared.sh and
-#     docs/gap-ledger.md C10.
+# understated its own blindness. BOTH numbers count call SITES now, so the `for s in 06 07 08 09 10` sweep below
+# — one call site, five executions — counts ONE site on each side, and the constant this file used to carry
+# (GSVTK_DECL_SURPLUS=4) is gone. Measured here: 40 sites declared, 40 sites reached, 44 verdicts — and 44 is
+# exactly 40 plus the four extra executions of that one loop site. Consequences:
+#   - Hiding an assertion behind a condition that cannot hold is caught by the FIRST one, by line number: the
+#     reporter prints the site lines that never ran. Under the old execution count this file could hide four of
+#     them (an adversarial review measured that many), because four missing sites looked like the declared loop
+#     surplus. Exact set equality is now the only tolerance, in every mode.
+#   - DELETING a call site is STILL not caught, and that limit survived the rewrite to sites: declared and
+#     reached drop together, so every site in this file can be deleted and the pair still prints an all-clear.
+#     Re-measured after the rewrite, not assumed. The pair's teeth are against sites that exist and do not run —
+#     see the header of scripts/selftest.d/declared.sh and docs/gap-ledger.md C10. If deletion-detection is ever
+#     wanted, diff this number against the value in the PREVIOUS commit; do not pin a constant.
+#   - 44 verdicts against 40 sites is itself the honest statement of a third gap: the two canary blocks above
+#     record verdicts at top level rather than through a recorder, so they are verdicts and not sites. That is
+#     why the line the reporter prints states both totals side by side instead of one number.
 # The whole-phase bail further up also exits 0, deliberately: a machine without `firecloud` must still be able
 # to run the offline gate. That is why the bail line itself says a SKIP is not a pass in CI, and why the
-# declared/reached line beside it names all 40.
+# declared/reached line beside it names all 40 sites.
 gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0
