@@ -32,9 +32,19 @@ if [ ! -x "$PY" ] && [ -x .venv/bin/python ]; then PY=.venv/bin/python; fi
 # no firecloud while ./.venv has it is a phase that reported nothing. Only skip when there is no venv.
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1 && [ -x .venv/bin/python ] \
    && .venv/bin/python -c 'import firecloud' >/dev/null 2>&1; then PY=.venv/bin/python; fi
+# Declared-vs-reached, one implementation for every phase that can bail (docs/gap-ledger.md C10). SELF is
+# this file so the count survives being invoked by relative path from the gate or standalone.
+SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+. "$(dirname "$SELF")/declared.sh"
+GSVTK_DECL_FUNCS="run run_absent bytes inproc"
+DECLARED=$(gsvtk_declared_count "$SELF")
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     printf 'rerun: SKIP — %s cannot import firecloud (python -m pip install -r requirements.txt)\n' "$PY"
     printf 'rerun: 0 ok, 0 failed, 1 skipped (a SKIP here is not a pass in CI)\n'
+    # The counted skip counts the BAIL, so alone it reads "one thing was skipped" when in fact the whole phase
+    # — every assertion below this line — did not run. Name that number, derived from this file, not typed.
+    printf 'rerun: declares %s assertion call(s); this run reached 0, so %s did not run behind this 1 named skip\n' \
+        "$DECLARED" "$DECLARED"
     exit 0
 fi
 
@@ -534,5 +544,10 @@ run "a step fed by the freeze loop says so, naming the frozen file count not a c
     "$PY" terra/batch_rerun_step.py --step 10 show $PIN10
 
 printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
+# `reached` can legitimately exceed `declared` here (a call site inside a loop is counted once and runs many
+# times), so this phase reports the pair and fails only when FEWER sites ran than the file contains. That is
+# weaker than entity.sh's strict equality: a disappearance smaller than the loop surplus would still be
+# invisible. Pinning it needs this file's call sites out of loops, which is not this lane's scope.
+gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

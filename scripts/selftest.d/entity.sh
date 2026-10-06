@@ -174,8 +174,12 @@ selfcanary() {
 echo
 echo "selftest: entity -- the name-key derivation and the shipped-table cross-check (offline, synthetic)"
 # How many assertion calls this file makes, derived FROM this file (never typed), so that a block going
-# missing moves the number. Used by the skip message and by the declared/reached pair at the end.
-DECLARED="$(grep -cE '^[[:space:]]*(wantf|wantc|wantclin|wantcount|wantline|wantabsent|countis|wanteq|selfcanary)([[:space:]]|$)' "$SELF")"
+# missing moves the number. Used by the skip message and by the declared/reached pair at the end. The callee
+# names below are exactly the functions in this file that record a verdict, which is why the count from
+# scripts/selftest.d/declared.sh equals the ok+fail total when nothing skips.
+. "$ROOT/scripts/selftest.d/declared.sh"
+GSVTK_DECL_FUNCS="wantf wantc wantclin wantcount wantline wantabsent countis wanteq selfcanary"
+DECLARED="$(gsvtk_declared_count "$SELF")"
 selfcanary
 
 BASE=(env GSVTK_CONFIG="$TMP/empty.env" GSVTK_GATK_SV_CHECKOUT= GSVTK_GATK_SV_REF=)
@@ -364,21 +368,10 @@ fi
 # --- the tally, and the declared/reached pair (docs/gap-ledger.md C10) ------------------------------
 # C10's open half: a counted skip that counts the BAIL rather than the assertions it withheld. The number of
 # assertion calls this file makes is derived FROM this file, not typed, so a block going missing moves the
-# number — and when nothing skipped, declared != reached is itself a failure.
-declared="$DECLARED"
+# number — and when nothing skipped, declared != reached is itself a failure. One implementation, in
+# scripts/selftest.d/declared.sh, shared with the phases that can bail.
 ran=$((ok + fail))
 printf '\nentity selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
-if [ "$skipped" -gt 0 ]; then
-    printf 'entity selftest: declares %s assertion call(s); this run reached %s, so %s did not run behind %s named skip(s)\n' \
-        "$declared" "$ran" "$((declared - ran))" "$skipped"
-else
-    printf 'entity selftest: declares %s assertion call(s); this run reached %s (nothing skipped)\n' \
-        "$declared" "$ran"
-fi
-if [ "$skipped" -eq 0 ] && [ "$declared" -ne "$ran" ]; then
-    printf '  FAIL  entity: %s assertion(s) declared, %s ran — a block went missing and nothing skipped\n' \
-        "$declared" "$ran"
-    fail=$((fail + 1))
-fi
+gsvtk_declared_report "entity selftest" "$SELF" "$ran" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0
