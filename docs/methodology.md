@@ -92,6 +92,41 @@ So treat quoted git SHAs in these docs (including the handoffs) as **pre-rewrite
 longer resolve** on `main`. Anything a document claims about a commit should be re-derived from the
 tree or from your own `git log`.
 
+## Green in my directory is not green in the commit
+
+`make test` grades the working tree, so its verdict can only ever be as true as what is committed. On one day
+of this project that distinction cost two bad pushes: a commit silently reverted a finished lane's shell
+change, every gate run afterwards printed `make test: PASS` — true about the directory, false about HEAD — and
+two of those runs were pushed before a clean checkout of HEAD failed 15 womtool assertions and lost 48
+jarshape ones the dirty tree had been hiding. `make verify-commit` grades a **revision** instead: a detached
+worktree from `REV` (default `HEAD`), the caller's interpreter passed by absolute path, the same tallies, then
+the tree is removed. `GSVTK_VERIFY_MAKE=syntax` grades one cheap target when you only need one.
+
+Cost decided the placement, rather than wishfulness: the offline gate is dominated by a single phase —
+`scripts/selftest.d/womtool.sh` alone measured **16m48s** (50 assertions, each spawning a cold JVM) and the
+whole gate is a 25-35 minute run on a dev laptop. So this target is a second full gate and is deliberately not
+a `test` phase; it belongs before a push, or as its own CI job. It prints its own `wall=<seconds>` so the next
+reader measures instead of repeating this number.
+
+The teeth were demonstrated on a commit that was genuinely broken, not on a synthetic one. A commit whose
+`kit/config.py` cannot compile graded `FAIL kit/config.py … SyntaxError: invalid syntax` in the fresh tree
+while, in the same minute on the same machine, `make syntax` in the working tree said
+`syntax: 79 files parsed, 0 failed` with rc 0. Opposite verdicts from one box, and only one of them describes
+what would ship — which is the entire argument for the target.
+
+What a green run does NOT mean, said plainly because it is the easy overclaim: a fresh tree removes
+uncommitted **state**, not the **machine**. The caller's Python, cloud credentials, the operator's gatk-sv
+checkout and the womtool jar all live outside the repo and stay reachable, so a verification run at `33c0358`
+found the real checkout through normal config discovery and ran the ref-pinned cross-check rather than
+printing the named skip it would print on a machine without it. Read a green `verify-commit` as "this commit
+passes with this interpreter on this machine" — which is exactly what a push decision needs, and nothing more.
+
+One blind spot fell out of the counts: `make syntax` parses 79 files here and 75 at HEAD. The four are
+`docs/archive/as-run/*.py`, present on disk and gitignored, because the syntax file lists are directory globs
+while the publish audit already scans the git-tracked set. A green `syntax` can therefore include files no
+commit ships — harmless when they pass, but the 79-vs-75 difference is the honest tell that two targets answer
+slightly different questions.
+
 ## Disagreeing with any of this
 
 The cheapest useful objection is a reproduction. Most claims here are checkable in minutes offline:

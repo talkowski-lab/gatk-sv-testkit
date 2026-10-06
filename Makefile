@@ -8,7 +8,7 @@
 SHELL      := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 .DEFAULT_GOAL := help
-.PHONY: help setup test syntax helpsweep undefmods flake smoke selftest lint audit audit-history clean-work
+.PHONY: help setup test verify-commit syntax helpsweep undefmods flake smoke selftest lint audit audit-history clean-work
 
 PYTHON ?= python3
 GSVTK  := ./kit/gsvtk-config
@@ -66,6 +66,13 @@ help:
 	@echo "              A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
 	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
+	@echo "  verify-commit  run the gate against a COMMIT (REV=HEAD) in a throwaway detached worktree, so a"
+	@echo "              green run describes the commit rather than whatever my working directory happens to"
+	@echo "              hold. Costs another full gate (womtool alone is ~17 min on a dev machine), so it is"
+	@echo "              deliberately NOT a 'test' phase. GSVTK_VERIFY_MAKE picks the inner target (syntax,"
+	@echo "              flake, test). It proves uncommitted edits cannot leak; it does NOT prove machine"
+	@echo "              independence — the caller's interpreter, credentials, gatk-sv checkout and womtool"
+	@echo "              jar all stay reachable from the fresh tree (docs/methodology.md)."
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
 	@echo "  lint        alias of syntax: no STYLE checker on purpose (no whitespace opinions)"
 	@echo "  flake       pyflakes bug sweep (undefined names, dead values); SKIPs if flake8 absent"
@@ -115,6 +122,40 @@ test:
 	if [ $$rc -eq 0 ]; then echo "make test: PASS (offline gate)"; \
 	else echo "make test: FAIL — see the FAIL lines above"; fi; \
 	exit $$rc
+
+# Verify a COMMIT instead of a working directory. Twice in one day a green `make test` was a true statement
+# about this directory and a FALSE statement about HEAD: a commit silently reverted a finished lane's shell
+# change, every gate run afterwards said PASS, two of them were pushed, and a clean checkout of HEAD then
+# failed 15 womtool assertions the dirty tree had been hiding. This target cannot report that way, because the
+# tree it grades is created from a revision and holds nothing I forgot to commit.
+#
+# What it does NOT prove, so that nobody reads a green run as "works on a clean machine": the caller's
+# interpreter, cloud credentials, gatk-sv checkout and womtool jar all live OUTSIDE the repo and stay
+# reachable from the fresh tree. A verification run at 33c0358 found the operator's real gatk-sv checkout by
+# normal config discovery and ran the ref-pinned cross-check instead of skipping it. This removes uncommitted
+# STATE, not the MACHINE.
+#
+#   make verify-commit                                              # REV=HEAD, inner target `test`
+#   make verify-commit REV=<sha> GSVTK_VERIFY_MAKE=syntax           # one cheap target, one commit
+#
+# It is not a `test` phase: it costs a whole extra gate (womtool.sh alone measured 16m48s on the parent's
+# machine). Every git call here reads /dev/null: the first run of this target hung for ten minutes inside
+# `git worktree remove` during cleanup, with the graded result already printed, because a git command given no
+# stdin will wait for one. Ctrl-C between the worktree add and its removal still leaves the tree behind;
+# `git worktree prune` plus `rm -rf $${TMPDIR:-/tmp}/gsvtk-verify.*` clears it.
+verify-commit:
+	@rev=$${REV:-HEAD}; what=$${GSVTK_VERIFY_MAKE:-test}; \
+	py='$(PYTHON)'; case "$$py" in /*) : ;; */*) py="$$PWD/$$py" ;; esac; \
+	echo "verify-commit: grading $$rev with '$$what' in a fresh tree, PYTHON=$$py"; \
+	wt=$$(mktemp -d "$${TMPDIR:-/tmp}/gsvtk-verify.XXXXXX"); rmdir "$$wt"; \
+	git worktree add --detach "$$wt" "$$rev" >/dev/null 2>&1 </dev/null || { echo "  FAIL  cannot make a detached worktree at $$rev"; exit 1; }; \
+	st=0; start=$$(date +%s); \
+	$(MAKE) -C "$$wt" --no-print-directory $$what PYTHON="$$py" || st=1; \
+	end=$$(date +%s); \
+	git worktree remove -f "$$wt" >/dev/null 2>&1 </dev/null || rm -rf "$$wt"; \
+	git worktree prune >/dev/null 2>&1 </dev/null; \
+	printf 'verify-commit: rev=%s inner=%s rc=%s wall=%ss  (fresh tree = no uncommitted state, NOT a different machine)\n' "$$rev" "$$what" "$$st" "$$((end - start))"; \
+	exit $$st
 
 syntax:
 	@fail=0; n=0; \
