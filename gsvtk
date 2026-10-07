@@ -1017,6 +1017,12 @@ gsvtk <command> — the gatk-sv-testkit command line
   check image <run_in_image|svshell_image_check|jar_flag_probe> ...
                             ask a PUBLISHED image a question — boots a VM, so --dry-run is free
                             and the real probe needs --confirm
+  entity [--ref REV | --tree DIR] [--corpus PATH]
+                            which entity row each launch config runs against
+                            (checks/terra_entity_check.py): the type derived from the config's own
+                            ${this.<etype>_id}, cross-checked against the entity tables that ref ships,
+                            plus a census of what the tool did NOT check. Read-only either way — it reads
+                            a ref with `git archive` or a directory you name, never a workspace
   build <branch> [image ...] [--confirm]
                             no flags but --confirm: the default IS the free preview (--check then
                             --dry-run); --confirm does the real build. Other gatk-sv-build.sh flags
@@ -1043,6 +1049,74 @@ its flags. docs/cli.md is the command-to-tool map and the read-only contract; RE
 lists the scripts. Exit codes: 0 clean, 1 findings or failure, 2 usage / refused, 3 missing
 dependency, 4 missing required config.
 USAGE
+}
+
+# ---------------- entity: which entity row a launch config runs against
+# Dispatches checks/terra_entity_check.py. Read-only by construction: it reads a ref with `git archive`
+# or a directory you name, and never opens a workspace, so it takes no --confirm and --read-only changes
+# nothing about it.
+cmd_entity() {
+  local ref="" tree="" repo="" corpus="" pyargs=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        printf '%s\n' \
+'usage: gsvtk entity [--ref REV | --tree DIR] [--corpus PATH] [-- <extra tool flags>]' \
+'' \
+'Which entity type each launch config in the corpus runs against, derived from the config"s own' \
+'single-component name key ${this.<etype>_id}, then cross-checked against the entity/membership' \
+'TSVs that same ref ships. Refuses (exit 1) rather than guessing: zero name keys, more than one,' \
+'no table of the derived type, or a read that is not a column of one it found. Every run also prints' \
+'GSVTK-ENTITY-UNCHECKED — what the tool deliberately did NOT evaluate (member attributes,' \
+'${workspace.*} bindings, Terra"s own rootEntityType) — because "no refusal printed" and "nothing' \
+'left unexamined" are different facts.' \
+'' \
+'  --ref REV     read a revision with git archive (default: whatever checks/terra_entity_check.py' \
+'                resolves, which is GSVTK_GATK_SV_CHECKOUT via kit/gsvtk-config, then its own default)' \
+'  --repo DIR    the gatk-sv checkout to read the revision from (with --ref)' \
+'  --tree DIR    grade a directory you already have instead of a ref' \
+'  --corpus PATH the corpus inside the tree (default inputs/templates/terra_workspaces)' \
+'' \
+'Exit codes are the tool"s: 0 every config answered, 1 findings, 2 usage, 3 missing prerequisite.' \
+'checks/terra_entity_check.py --help stays authoritative for its own flags.'
+        return 0;;
+      --ref)     ref="${2:?entity --ref needs a revision (main, a branch, a sha)}"; shift 2;;
+      --repo)    repo="${2:?entity --repo needs a checkout directory}"; shift 2;;
+      --tree)    tree="${2:?entity --tree needs a directory}"; shift 2;;
+      --corpus)  corpus="${2:?entity --corpus needs a path, e.g. inputs/templates/terra_workspaces}"; shift 2;;
+      --)        shift; while [ $# -gt 0 ]; do pyargs+=("$1"); shift; done;;
+      -*)        die "entity: unknown flag $1 (flags: --repo DIR --ref REV --tree DIR --corpus PATH; run: gsvtk entity --help)";;
+      *)         die "entity: unexpected argument '$1' — this command takes flags, not positions (run: gsvtk entity --help)";;
+    esac
+  done
+  cd "$ROOT" || die "cd failed"
+  # Two answers to "which tree" is a usage error, not a precedence: the census numbers are claims about ONE
+  # tree, and silently letting --ref win would print a census of a commit nobody asked for.
+  if [ -n "$tree" ] && { [ -n "$ref" ] || [ -n "$repo" ]; }; then
+    die "entity: --tree already fixes the tree, so --ref/--repo would be a second answer to the same question.
+  Pass one of:
+    ./gsvtk entity --repo DIR --ref main   # a revision, read with git archive (read-only)
+    ./gsvtk entity --tree DIR              # a checkout you already have"
+  fi
+  # No default tree is injected here, and that is a difference from `check --semantics` rather than an
+  # oversight: `check` asks the resolver because a semantics scan is meaningless with no tree at all. This
+  # tool already asks that same resolver itself and prints a NAMED exit-3 prerequisite when nothing answers
+  # (CONTRIBUTING: one resolver, one precedence chain). Inventing a default here would print a census about
+  # somebody's checkout that nobody chose.
+  if   [ -n "$repo" ];   then pyargs+=(--repo "$repo"); fi
+  if   [ -n "$tree" ];   then pyargs+=(--tree "$tree"); fi
+  if   [ -n "$ref" ];    then pyargs+=(--ref "$ref"); fi
+  if   [ -n "$corpus" ]; then pyargs+=(--corpus "$corpus"); fi
+  printf '=== terra_entity_check.py — which entity row each launch config runs against ===\n'
+  "$PY" checks/terra_entity_check.py ${pyargs[@]+"${pyargs[@]}"}
+  local rc=$?
+  if [ "$rc" = 0 ]; then
+    # Say the limits where a user will actually see them. Exit 0 is "every config answered", which is not
+    # the same claim as "the row exists" or "the values are right".
+    printf '  (exit 0 = every config ANSWERED. Not: the entity row exists, the values are right, or that\n'
+    printf '   the live rootEntityType agrees. UNCHECKED above counts what was never evaluated.)\n'
+  fi
+  return $rc
 }
 
 # ------------------------------------------------------------------ dispatch
@@ -1073,6 +1147,7 @@ case "$cmd" in
   tools)    shift; cmd_tools "$@";;
   check)    shift; if [ "${1:-}" = "image" ]; then shift; cmd_check_image "$@"; fi; cmd_check "$@";;
   gate)     shift; cmd_check "$@";;        # the name the released skill (<=0.5.0) used; kept working
+  entity)   shift; cmd_entity "$@";;
   build)    shift; cmd_build "$@";;
   terra)    shift; cmd_terra "$@";;
   compare)  shift; cmd_compare "$@";;

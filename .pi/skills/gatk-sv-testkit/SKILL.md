@@ -72,6 +72,7 @@ that line is absent from your transcript, you did not run them.
 | "Is my WDL actually launchable?" | `scripts/gsvtk check <ref> --wf SVShell` | seconds |
 | "Did that rename break SVShell?" | `scripts/gsvtk check <base-ref>` | seconds |
 | "What would my configs bind?" | `scripts/gsvtk terra show` | free, offline |
+| "Which entity row would that config actually run against?" | `scripts/gsvtk entity --repo <checkout> --ref <ref>` | seconds, offline; every run also prints what it did **not** check |
 | "Do those keys even exist in the WDL I am pointing at?" | `scripts/gsvtk terra check --against <ref>` | free, offline, needs a gatk-sv clone |
 | "Are the baseline inputs still the bytes I compared?" | `scripts/gsvtk terra verify` | free, re-crc32cs |
 | "Did my change alter the output?" | [references/workflows.md](references/workflows.md) §3, then `scripts/gsvtk compare <name>` for the differ (`compare --list` for the names; `terra fetch-compare table` runs the shipped batch-table diff over fetched outputs). Leave one variable: same WDL ref, same inputs, one image differing | one step's VMs |

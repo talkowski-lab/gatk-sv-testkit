@@ -64,6 +64,7 @@ scripts that echo the resolved command line.
 | `gsvtk locate` / `tools` / `doctor [--redact]` / `repo` / `version` | the config layer and `command -v`, nothing else | free |
 | `gsvtk check [<ref>] [--wf NAME]... [--strict] [--repo DIR] [--compare-to REF] [--semantics] [--reach] [--images]` | `checks/wdl_gate.sh` — which now also runs `checks/wdl_inputs_check.py`, the required-input half CI asks, so an exported `WOMTOOL_JAR` is honoured by the gate and not only by terra tooling — `checks/svshell_contract_check.py`, `checks/svshell_jq_plumbing_scan.py`, and with the two opt-in flags `checks/wdl_semantics.py` and `checks/wdl_reach.py` | free, offline. `--reach` needs at least one `--wf NAME`, which IS the target: `wdl_reach` has no default target, so `--reach` alone is refused as a usage error before any checker runs. Every name goes to `checks/wdl_reach.py` as one repeated `--target` in ONE run, because the tree load (~35 s on a gatk-sv tree) is the whole cost and one process per name paid it N times: you get one `tree:` provenance line and one answer block per name, in the order you listed them. A name the tree does not know is reported by name with its own closest matches, and the run exits nonzero without swallowing the names that did answer. With no `--repo`, the tree both opt-in checkers scan is `GSVTK_GATK_SV_CHECKOUT` from the resolver -- the same source `svshell_contract_check.py` already used |
 | `gsvtk check image <run_in_image\|svshell_image_check\|jar_flag_probe> ...` | `checks/image-check/*.sh` | **boots a GCE VM**: `--dry-run` is free, the probe needs `--confirm` |
+| `gsvtk entity [--repo DIR --ref REV \| --tree DIR] [--corpus PATH]` | `checks/terra_entity_check.py` — which entity row each launch config runs against, derived from the config's own `${this.<etype>_id}` and cross-checked against the entity tables that ref ships. Every run also prints `GSVTK-ENTITY-UNCHECKED`: the member attributes, `${workspace.*}` bindings and live `rootEntityType` it deliberately did not evaluate | read-only — it reads a ref with `git archive`, or a directory you name. It never opens a workspace, so `--read-only` changes nothing about it |
 | `gsvtk build <branch> [image ...]` | `docker/gatk-sv-build.sh --check` then `--dry-run` | free — this default *is* the preview |
 | `gsvtk build <branch> [image ...] --confirm` | `docker/gatk-sv-build.sh <branch> [image ...]` | **VM + registry push** |
 | `gsvtk terra recon\|show\|check\|plan\|verify\|status\|cost\|peek\|inputs\|save-metadata\|rerun-show` | `terra/recon.py`, `batch_configs.py show/check`, `batch_freeze.py plan/verify`, `batch_status.py`, `batch_cost.py`, `batch_peek.py`, `batch_check_inputs.py`, `batch_save_metadata.py`, `batch_rerun_step.py show` | read-only |
@@ -76,7 +77,7 @@ scripts that echo the resolved command line.
 | `gsvtk replay train-chr20\|train-full\|train-definitive\|rd-population-probe\|reference-run\|het-population` | the matching `examples/` driver, after the preflight below | free, local |
 | `gsvtk replay preflight [mode]` | measures java major, the GATK jar, `bcftools`, and free disk | free |
 
-Two name rules, both deliberate:
+Three name rules, all deliberate:
 
 * **Flags are dispatched, not forwarded.** `--wf`/`--strict` belong to `wdl_gate.sh`, `--repo` to the
   python checkers, `--compare-to` to the jq plumbing scan; handing one tool another tool's flag is an
@@ -86,6 +87,12 @@ Two name rules, both deliberate:
   config POSTed by the other tool is read by the wrong submission. `copy`, `submit` and `attrs` are
   unambiguous, so they are accepted as short forms of `freeze-copy`, `rerun-submit` and
   `freeze-attrs`.
+* **A command that could point at two trees points at one.** `entity --tree DIR --ref REV` is refused as a usage
+  error rather than resolved by precedence. Its output is a census — counts claimed *about one tree* — and a
+  silently winning `--ref` would print confident numbers about a commit nobody asked to grade. Nor does the CLI
+  invent a tree when you pass neither: `check --semantics` asks the resolver because a scan with no tree answers
+  nothing, while `entity` lets the tool ask that same resolver itself and print a named exit-3 prerequisite. One
+  precedence chain (`kit/gsvtk-config`), one place that owns it.
 
 ## What the pre-flight print looks like
 

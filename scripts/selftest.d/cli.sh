@@ -218,6 +218,7 @@ for f in terra/recon.py terra/batch_configs.py terra/batch_freeze.py terra/batch
          terra/batch_status.py terra/batch_cost.py terra/batch_peek.py terra/batch_check_inputs.py \
          terra/batch_save_metadata.py terra/fetch_outputs.py checks/svshell_contract_check.py \
          checks/svshell_jq_plumbing_scan.py checks/wdl_semantics.py checks/wdl_reach.py \
+         checks/terra_entity_check.py \
          compare/table_diff.py compare/compare_batch_tables.py compare/artifact_tally.py \
          replay/build_inputs.py examples/recompute_het_population.py; do stub_py "$f"; done
 for f in docker/gatk-sv-build.sh terra/batch_fetch_compare.sh checks/wdl_gate.sh \
@@ -481,6 +482,33 @@ else
     expect 'no ref given: wdl_gate is skipped and the CLI SAYS so (never a silent pass)' 0 \
         'no ref given: skipping wdl_gate' -- run check
 fi
+
+# ------------------------------------------------------------------ entity
+# `gsvtk entity` is the one command that reaches checks/terra_entity_check.py from the entry point. What is
+# under test here is the DISPATCH (right file, right flags, right exit code), not the derivation — that has its
+# own phase, scripts/selftest.d/entity.sh, graded against a committed fixture corpus. These runs use the stub, so
+# a needle like `--repo /repo --ref main` is the CLI's own argv, not an assertion about any checkout.
+expect 'entity --help works with an empty profile and names the tool it dispatches' 0 \
+    'usage: gsvtk entity' 'terra_entity_check.py' -- run entity --help
+expect 'entity --help states the exit codes it passes through, including the prerequisite one' 0 \
+    '3 missing prerequisite' -- run entity --help
+expect 'entity dispatches checks/terra_entity_check.py with --repo and --ref and nothing invented' 0 \
+    'STUB checks/terra_entity_check.py --repo /repo --ref main' -- run entity --repo /repo --ref main
+expect 'entity forwards --corpus rather than assuming where the configs live' 0 \
+    'STUB checks/terra_entity_check.py --corpus inputs/x' -- run entity --corpus inputs/x
+expect 'entity --tree sends --tree alone (one tree, one answer)' 0 \
+    'STUB checks/terra_entity_check.py --tree /tree' -- run entity --tree /tree
+expect 'entity refuses --tree together with --ref: two answers to "which tree"' 2 \
+    'second answer' -- run entity --tree /tree --ref main
+expect 'entity refuses an unknown flag by name instead of forwarding it' 2 \
+    'entity: unknown flag --nope' -- run entity --nope
+expect 'entity refuses a bare positional instead of guessing what it meant' 2 \
+    "unexpected argument 'genotype'" -- run entity genotype
+expect "a checker's findings come back as exit 1 through entity too (findings are not a verdict)" 1 \
+    'STUB checks/terra_entity_check.py' -- env STUB_RC=1 GSVTK_CONFIG="$TMP/empty.env" \
+    GSVTK_WORK="$TMP/work" GSVTK_TERRA_PY="$PYABS" bash "$CLI" entity --tree /tree
+expect 'the read-only stamp does not disable a check that only reads' 0 \
+    'STUB checks/terra_entity_check.py --tree /tree' -- run_bare_ro entity --tree /tree
 
 # ------------------------------------------------------------------ check --reach / --semantics
 # This section exists because of a real bug: `check --reach` could never answer. wdl_reach.py requires
