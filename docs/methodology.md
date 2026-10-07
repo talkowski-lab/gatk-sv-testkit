@@ -110,7 +110,17 @@ earlier full run measured **2664s (44m24s)**. All three numbers are real; none o
 tallies were identical in every run — which is the useful part. A control whose runtime moves 18× while its
 verdicts do not is a control worth having, but size the CI timeout from the slow number and the developer's
 patience from the fast one. Either way this target is a second full gate, so it is deliberately not a `test`
-phase: it belongs before a push, or as its own CI job. It prints its own `wall=<seconds>` so the next reader
+phase — and it is not a CI job either, which is a decision rather than an oversight. CI's `actions/checkout`
+grades a *commit* in a tree that cannot be dirty, which is the whole defect this target exists to catch; a
+`verify-commit` job there would re-grade a revision CI has already graded, at double the cost, and the only case
+it adds is somebody passing their own `REV`. What CI cannot do is fire for a side branch at all:
+`.github/workflows/ci.yml` triggers on `push` to `main`, on `pull_request`, and on `workflow_dispatch`, so
+pushing a feature branch runs nothing. The target therefore stays a local pre-push gate, and the consequence is
+stated instead of assumed away: on a branch, the only clean-tree grader is a person remembering to run it. That
+memory is not theoretical — a clean-tree red (`aded402`: three assertion sites that `GSVTK_GATK_SV_CHECKOUT=`
+makes unreachable, with no skip region claiming them) passed every local `make test` until a hand-run
+no-checkout invocation named it, on a box that then failed to finish a full gate twice in one day. It prints its
+own `wall=<seconds>` so the next reader
 measures rather than repeating these.
 
 The teeth were demonstrated on a commit that was genuinely broken, not on a synthetic one. A commit whose
