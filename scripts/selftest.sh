@@ -316,16 +316,24 @@ if [ ! -d "$CK" ]; then
     # machine without the clone added up to 77 against a claim of 78 and the gate never noticed --
     # which is exactly the drift the claim check below now does arithmetic about.
     skip=$((skip + 4)); skiplist="$skiplist clone-backed(x4)"
+    # The SKIP above withholds THREE assertion call sites (covcheck, stagecheck, check), and naming them is not
+    # this file's opinion — the region below is read off this file's text, so an assertion added inside that
+    # block is claimed by this skip automatically and one added outside it stays required to run even here.
+    gsvtk_note_skip "clone-backed"
 else
+    gsvtk_guard_sites "clone-backed"          # first statement of the block the SKIP withholds
     printf '  (clone: %s)\n' "$CK"
     if command -v jq >/dev/null 2>&1; then
+        gsvtk_guard_sites "no-jq"             # nested: jq missing withholds covcheck ALONE, clone or no clone
         covcheck "svshell_jq_plumbing_scan exercises every jq block in real gatk-sv" \
             "$PY" checks/svshell_jq_plumbing_scan.py --repo "$CK"
+        gsvtk_guard_sites_end "no-jq"
         printf '        (nulls it reports upstream are pre-existing by design; gate a change\n'
         printf '        with --compare-to <ref> -- docs/static-checks.md)\n'
     else
         echo "  SKIP  jq not on PATH: svshell_jq_plumbing_scan cannot execute the jq blocks"
         skip=$((skip + 1)); skiplist="$skiplist jq-plumbing-scan(no-jq)"
+        gsvtk_note_skip "no-jq"
     fi
     stagecheck "svshell_contract_check compares the stage calls of real gatk-sv" 12 \
         "$PY" checks/svshell_contract_check.py --repo "$CK"
@@ -352,6 +360,7 @@ else
         echo "  SKIP  wdl_semantics against the clone: no WDL module for this interpreter"
         skip=$((skip + 1)); skiplist="$skiplist wdl-semantics-clone(no-WDL)"
     fi
+    gsvtk_guard_sites_end "clone-backed"      # last statement of the block; the extent is now this range
 fi
 
 echo
