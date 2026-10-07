@@ -109,7 +109,10 @@ Machine lines
 -------------
 One `GSVTK-ENTITY` line per config, key=value, so a caller can read verdicts while the human table beside
 it stays readable; plus one `GSVTK-ENTITY-SUMMARY` line with the census counters, so a phase can assert
-that the per-config lines add up.
+that the per-config lines add up, plus one `GSVTK-ENTITY-UNCHECKED` line counting what this tool deliberately
+did NOT evaluate (member attributes, `${workspace.*}` bindings, Terra's own `rootEntityType`). That line prints
+on a clean run too: no refusal found is not the same fact as nothing left unexamined, and a reader must be able
+to tell the two apart without reading this file.
 
     GSVTK-ENTITY config=<relpath> flavor=<f> wf=<workflow> filestem=<s> namematch=yes|no
       state=OK|UNRESOLVED namekeys=<n> namekey=<etype|-> collections=<a,b|-> reads_direct=<n>
@@ -602,7 +605,8 @@ def main(argv=None) -> int:
         v = grade(cfg, tables)
         v.update(config=rel, filestem=os.path.basename(full)[:-len(CONFIG_SUFFIX)],
                  flavor=rel.split("/")[0] if "/" in rel else "(root)",
-                 wf=prefixes[0] if len(prefixes) == 1 else ",".join(prefixes) or "?")
+                 wf=prefixes[0] if len(prefixes) == 1 else ",".join(prefixes) or "?",
+                 workspace_reads=workspace_reads(cfg) if cfg["ok"] else 0)
         rows.append(v)
 
     width = max([len(r["config"]) for r in rows] + [6])
@@ -649,6 +653,24 @@ def main(argv=None) -> int:
           % (len(rows), counts["ok"], counts["no-name-key"], counts["many-name-keys"],
              counts["no-shipped-table"], counts["columns-missing"], counts["cannot-parse"],
              one, zero, many))
+    # The scope statement, printed every run whether or not anything refused. Everything above answers "did the
+    # entity a config names hold the columns it reads"; it does NOT answer whether the values are right, and a
+    # reader who only looks for UNRESOLVED lines will not notice the difference. So the things this tool
+    # deliberately does not evaluate get a census of their own, with counts, on every run — including a clean
+    # one. An absent line here would mean the corpus holds none of these reads, which is a fact about the
+    # corpus and never a pass.
+    member_cfg = sum(1 for r in rows if r["member_attrs"])
+    member_reads = sum(len(r["member_attrs"]) for r in rows)
+    ws_cfg = sum(1 for r in rows if r.get("workspace_reads"))
+    ws_reads = sum(r.get("workspace_reads", 0) for r in rows)
+    print("GSVTK-ENTITY-UNCHECKED configs=%d member-attr-reads=%d configs-with-member-attrs=%d "
+          "workspace-binding-reads=%d configs-with-workspace-reads=%d root-entity-type=never-read"
+          % (len(rows), member_reads, member_cfg, ws_reads, ws_cfg))
+    print("  (the three counts above are SCOPE, not verdicts: member attributes are counted and listed but "
+          "never checked against a table, because plural-to-singular is a guess; ${workspace.*} bindings are "
+          "counted but not resolved, which is a later stage's job and resolving them from a test sample would "
+          "be a lie; and Terra's own rootEntityType is never asked, because that is a credentialed read this "
+          "tool must not make.)")
     return 1 if findings else 0
 
 

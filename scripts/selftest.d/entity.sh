@@ -329,6 +329,24 @@ runsc E18 env GSVTK_CONFIG="$TMP/empty.env" "$PY" "$TOOL" --help
 wantf "E18: --help works with an empty profile and states the four exit codes" E18 0 \
     "Exit codes" "3  prerequisite missing" "GSVTK-ENTITY-SUMMARY"
 
+# The SCOPE CENSUS: what this tool did not evaluate, printed on every run including a clean one. Asserted
+# against the committed fixture corpus, so it costs nothing and needs no checkout. The counts are pinned because
+# the corpus is committed — change a fixture and this moves with it, which is the whole point of pinning it here
+# rather than describing it in prose. The row A22 records claimed coverage the tool did not have; these
+# assertions are what stop the next reader having to re-derive that by reading 656 lines.
+wantf "the unchecked census prints with counts on a run that also has findings" E1 1 \
+    "GSVTK-ENTITY-UNCHECKED configs=20 member-attr-reads=7 configs-with-member-attrs=3 " \
+    "workspace-binding-reads=8 configs-with-workspace-reads=7 root-entity-type=never-read"
+countis "the census is one machine-readable line, not a paragraph" E1 "^GSVTK-ENTITY-UNCHECKED " 1
+countis "and exactly one line says what those counts mean" E1 "SCOPE, not verdicts" 1
+wantline "it names member attributes as counted-but-not-checked" E1 "member attributes are counted and listed but"
+wantline "it names the workspace bindings as counted, and refuses to resolve them" E1 "counted but not resolved"
+wantline "it says Terra's own rootEntityType is never asked" E1 "rootEntityType is never asked"
+wantf "a CLEAN run (exit 0) still prints the census, so a gap is never signalled only by silence" E16 0 \
+    "GSVTK-ENTITY-UNCHECKED"
+wantabsent "and the census carries no verdict word, so it cannot be read as a pass or a fail of the unchecked thing" \
+    E16 "^GSVTK-ENTITY-UNCHECKED.*(PASS|FAIL|ok=|UNRESOLVED)"
+
 # ===============================================================================================
 # The optional cross-check against a real gatk-sv checkout, at a PINNED ref.
 #

@@ -472,7 +472,23 @@ are right (Stage B of the plan), or that Terra's own `rootEntityType` agrees —
 a live workspace, and is still an open decision (`docs/plan-launch-any-module.md`, "Risks not resolved").
 Member attributes read through a collection (`${this.sample_sets.ploidy_table}`) are listed and **not**
 checked: the member entity type is not derived, and plural-to-singular is the guess that binds nothing
-when wrong. One machine line per config (`GSVTK-ENTITY …`) plus one `GSVTK-ENTITY-SUMMARY` census line.
+when wrong. One machine line per config (`GSVTK-ENTITY …`), one `GSVTK-ENTITY-SUMMARY` census line, and one
+`GSVTK-ENTITY-UNCHECKED` line that counts the three gaps above instead of leaving them to be inferred — because
+"no refusal printed" and "nothing left unexamined" are different facts, and the first run of this tool was read
+as covering the second.
+
+    checks/terra_entity_check.py --repo "$GSVTK_GATK_SV_CHECKOUT" --ref main | grep UNCHECKED
+
+At `e1909d2f` that prints `configs=31 member-attr-reads=64 configs-with-member-attrs=14
+workspace-binding-reads=304 configs-with-workspace-reads=30 root-entity-type=never-read`: the 64 is the
+member-attribute count the plan carries, and 30 of 31 configs bind at least one `${workspace.*}` value, which is
+Stage B's job — counted here, deliberately not resolved, since resolving it from a test sample would report a
+value for a production config that came from a test. `root-entity-type=never-read` is not a limitation to be
+fixed here: that string lives only in a live workspace. The same line on the fixture corpus reads
+`configs=20 member-attr-reads=7 configs-with-member-attrs=3 workspace-binding-reads=8
+configs-with-workspace-reads=7`, and `scripts/selftest.d/entity.sh` asserts those fixture numbers exactly — the
+corpus is committed, so a fixture that changes shape has to move the assertion with it. The line prints on exit 0
+too, and carries no verdict word: it says what was not looked at, never whether it was fine.
 
 Graded offline by `scripts/selftest.d/entity.sh` against a committed synthetic corpus — 20 configs, one per
 refusal shape, including the trap (a config whose member collection is a different type from its name key)
