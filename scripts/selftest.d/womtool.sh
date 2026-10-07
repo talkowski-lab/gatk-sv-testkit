@@ -656,6 +656,7 @@ same "pair C: the real render's captured key is one this layer names, once" "$ou
 
 jar="${WOMTOOL_JAR:-}"; java_bin="${JAVA:-java}"
 if [ -n "$jar" ] && [ -f "$jar" ] && command -v "$java_bin" >/dev/null 2>&1; then
+    gsvtk_guard_sites "womtool-no-jar"          # everything the no-jar SKIP below withholds, and nothing else
     cross_jar_out=$(env "${cfgenv[@]-}" WOMTOOL_JAR="$jar" JAVA="$java_bin" "$PY" "$CHECK" \
         --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in" --wf CrossCheck 2>&1); ccrc=$?
     cc_live=$(printf '%s\n' "$cross_jar_out" \
@@ -686,9 +687,14 @@ if [ -n "$jar" ] && [ -f "$jar" ] && command -v "$java_bin" >/dev/null 2>&1; the
         "EXTRA-KEY ShapeProbe.struct_opt.label" -- \
         env "${cfgenv[@]-}" WOMTOOL_JAR="$jar" JAVA="$java_bin" "$PY" "$CHECK" \
             --wdl-dir "$TMP/cross/tree" --inputs-root "$TMP/cross/in2" --wf ShapeProbe
+    gsvtk_guard_sites_end "womtool-no-jar"
 else
     printf '  SKIP  womtool: WOMTOOL_JAR=%s, so the cross-check was not re-derived from the jar — both pinned pairs (the agreeing one and the diverging one) were graded against the captured words instead, and nothing above needed java\n' "${jar:-unset}"
     skipped=$((skipped + 2))
+    # ONE region for TWO counted skips: the count is this file's business (the pair only requires that fewer
+    # regions fire than it counted), and the region is the unit the guard prices — it names the sites this
+    # branch withholds, which are four call sites, not two, and were last printed as "4 did not run".
+    gsvtk_note_skip "womtool-no-jar"
 fi
 
 # The default --wf list is the only thing between "gsvtk check <ref>" and "gsvtk check --wf <the one
@@ -702,9 +708,10 @@ want "the default set names the workflow that really regressed (PR #966), so a b
 
 printf '\nwomtool selftest: %s passed, %s failed, %s skipped (a SKIP here is not a pass in CI)\n' \
     "$ok" "$fail" "$skipped"
-# With a named skip the pair prints the line numbers of the sites that did not run and passes, because the skip
-# is the reason and it is counted; with NO skip — the jar-in-hand mode — the declared and reached sets must be
-# equal. What the pair cannot see is a DELETION: remove a call and both sets lose it together.
+# The jar region is the whole story of this phase's two modes: with a named skip the pair prints the sites that
+# did not run, and each of them must be INSIDE womtool-no-jar or the phase fails by line number; with no skip —
+# the jar-in-hand mode — the declared and reached sets must be equal. What the pair cannot see is a DELETION:
+# remove a call and both sets lose it together.
 gsvtk_declared_report "womtool selftest" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

@@ -44,14 +44,21 @@ SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}
 # any recorder that never calls gsvtk_note_site, which is the omission that would otherwise look like a phase
 # that lost all its sites at once.
 GSVTK_DECL_FUNCS="run run_absent bytes inproc"
-DECLARED=$(gsvtk_declared_count "$SELF")
+# The whole-phase bail below withholds EVERYTHING after this line, so it declares itself as a region instead of
+# printing a hand-counted sentence about it: the extent is this file's text, and the guard then requires the
+# sites this run did not reach to be exactly the sites inside that region. A site added ABOVE this marker stays
+# required to run even when the bail fires — which is where a canary would go to hide.
+gsvtk_guard_to_end "rerun-no-firecloud"
 if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
     printf 'rerun: SKIP — %s cannot import firecloud (python -m pip install -r requirements.txt)\n' "$PY"
     printf 'rerun: 0 ok, 0 failed, 1 skipped (a SKIP here is not a pass in CI)\n'
-    # The counted skip counts the BAIL, so alone it reads "one thing was skipped" when in fact the whole phase
-    # — every assertion below this line — did not run. Name that number, derived from this file, not typed.
-    printf 'rerun: declares %s assertion call site(s); this run reached 0, so %s did not run behind this 1 named skip\n' \
-        "$DECLARED" "$DECLARED"
+    # The pair runs here, not just on the path that reaches the end of the file: a bail is the mode where an
+    # orphaned assertion is easiest to lose, so it is the mode that must not skip the guard. No temp dir exists
+    # yet at this point, so init mktemps one and owns it — gsvtk_declared_report removes it. Verdict totals are
+    # literal 0s because `ok`/`fail` are not initialised until further down, and nothing above has recorded one.
+    gsvtk_declared_init
+    gsvtk_note_skip "rerun-no-firecloud"
+    gsvtk_declared_report "rerun" "$SELF" 0 1 || exit 1
     exit 0
 fi
 
@@ -578,7 +585,8 @@ printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
 #     why the line the reporter prints states both totals side by side instead of one number.
 # The whole-phase bail further up also exits 0, deliberately: a machine without `firecloud` must still be able
 # to run the offline gate. That is why the bail line itself says a SKIP is not a pass in CI, and why the
-# declared/reached line beside it names all 40 sites.
+# declared/reached line beside it is the SAME guard as this one, run over the rerun-no-firecloud region that
+# covers the rest of this file.
 gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

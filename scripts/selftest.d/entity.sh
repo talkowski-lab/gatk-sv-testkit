@@ -339,6 +339,7 @@ wantf "E18: --help works with an empty profile and states the four exit codes" E
 # withheld — the ledger of reached sites is written by the recorders, not by a grep over these names.
 if [ -n "$CK" ] && [ -d "$CK/.git" ] \
    && git -C "$CK" rev-parse --verify --quiet "${PINNED}^{commit}" >/dev/null 2>&1; then
+    gsvtk_guard_sites "entity-no-checkout"      # the real-tree block the SKIP below withholds
     runsc R1 "${BASE[@]}" "$PY" "$TOOL" --repo "$CK" --ref "$PINNED"
     wantf "R1: the real corpus runs (findings exist at this ref)" R1 1 \
         "shipped tables: 5 entity/membership TSV(s)" \
@@ -363,6 +364,7 @@ if [ -n "$CK" ] && [ -d "$CK/.git" ] \
     countis "R: every config under the corpus at that ref earns exactly one line" R1 '^GSVTK-ENTITY config=' 31
     countis "R: nothing on that tree is reported as many-name-keys (the rule has one answer per config)" R1 \
         'state=UNRESOLVED namekeys=[2-9] ' 0
+    gsvtk_guard_sites_end "entity-no-checkout"
 else
     # How many sites this skip withholds, in the same units the pair uses: the declared total minus the DISTINCT
     # sites this run recorded. It used to be a second `grep -cE` over the aliases this file has now dropped,
@@ -375,13 +377,18 @@ else
     printf '  SKIP  entity: no gatk-sv checkout holding %s (GSVTK_GATK_SV_CHECKOUT is "%s"): the real-tree cross-check did not run, so %s of the %s assertion(s) this file declares are withheld behind this named skip (that line is what CI prints, and a withheld assertion is not a passed one)\n' \
         "$PINNED" "${CK:-unset}" "$withheld" "$DECLARED"
     skipped=$((skipped + 1))
+    # The same number from the other side: the region is the block, read off this file, and the guard requires
+    # every site that did not run to be inside it. `withheld` above is what this run subtracted from the
+    # declared total; the region is what the skip is ALLOWED to subtract, and the pair compares the two.
+    gsvtk_note_skip "entity-no-checkout"
 fi
 
 # --- the tally, and the declared/reached pair (docs/gap-ledger.md C10) ------------------------------
 # C10's open half: a counted skip that counts the BAIL rather than the assertions it withheld. The number of
 # assertion call SITES this file contains is derived FROM this file, not typed, so a block going missing moves
 # the number — and when nothing skipped the declared set and the reached set must be EQUAL, in every mode
-# including the one where this file's optional real-tree block ran. One implementation, in
+# including the one where this file's optional real-tree block ran — and every site that did NOT run has to be
+# inside the entity-no-checkout region, which is the block that skipped and nothing else. One implementation, in
 # scripts/selftest.d/declared.sh, shared with the phases that can bail. What it still cannot see is a DELETION:
 # remove a site and both numbers fall together, so this file can lose assertions and the pair stays green.
 ran=$((ok + fail))
