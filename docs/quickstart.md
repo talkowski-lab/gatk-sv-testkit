@@ -191,7 +191,9 @@ exit nonzero. An empty table that reads like "no differences" is the failure thi
 once.
 
 Recon → freeze → configs → gate → run → fetch → compare, with what each step costs and which are
-write-once, is in [terra-head-to-head.md](terra-head-to-head.md).
+write-once, is in [terra-head-to-head.md](terra-head-to-head.md). For that same sequence as one screen
+— the order, one command per step, and which section of the guide answers each — see
+[test-a-branch.md](test-a-branch.md).
 
 ## 5. Loop: "the numbers moved, do they match?"
 
