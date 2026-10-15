@@ -1865,6 +1865,47 @@ for c in current stale stale-override absent refused refused-flag real-capture n
     inproc "publish check on the POST path: $c" 0 "$TMP/publish_pre.py" "$c"
 done
 
+# =============================================================================================
+# 10. THE ONE-PAGE DOC KEEPS THE PROMISES ISSUE #7 ASKED FOR.
+#
+# `docs/test-a-branch.md` is the route page for "run step NN of my branch in my sandbox", and its intro
+# insists it is a route and not a third copy. So these legs grade the ROUTE and nothing else: that the
+# page names the knob deciding whether your outputs are found at all, that its rerun sequence actually
+# reaches `validate` before `submit`, and that the two things which read as tool breakage on 2026-10-13
+# are stated as intended behaviour. Each leg hangs on ONE phrase so that deleting that sentence turns
+# exactly one leg red (measured in the commit message, not claimed here).
+#
+# Command existence is a different grader's job and is not duplicated here: `scripts/check_doc_flags.py`
+# proves every flag the page documents exists in the tool's own --help, and `scripts/check_docs.py`
+# proves the three pointers into the page resolve.
+page() { sed -n '1,$p' "$ROOT/docs/test-a-branch.md"; }
+
+run "the page names the output suffix a sandbox writes under (issue #7 item 2)" 0 \
+    "GSVTK_NEW_SUFFIX" page
+run "and says a wrong suffix is a suffix mismatch, not a missing input (what #4 made visible)" 0 \
+    "suffix mismatch" page
+run "the rerun sequence reaches validate BEFORE submit, in table order (issue #7 item 5)" 0 \
+    "ORDER-OK" sh -c "p='$ROOT/docs/test-a-branch.md'
+a=\$(grep -n 'rc1 show' \"\$p\" | cut -d: -f1 | head -1)
+b=\$(grep -n 'rc1 create' \"\$p\" | cut -d: -f1 | head -1)
+c=\$(grep -n 'rc1 validate' \"\$p\" | cut -d: -f1 | head -1)
+d=\$(grep -n 'rc1 submit' \"\$p\" | cut -d: -f1 | head -1)
+[ -n \"\$a\" ] && [ -n \"\$b\" ] && [ -n \"\$c\" ] && [ -n \"\$d\" ] || exit 9
+[ \"\$a\" -lt \"\$b\" ] && [ \"\$b\" -lt \"\$c\" ] && [ \"\$c\" -lt \"\$d\" ] && echo ORDER-OK"
+run "the page says a read-only refusal is the gate working, not a broken tool (issue #7's first 'also state')" 0 \
+    "not a broken binary" page
+run "and where the mutating steps belong: the checkout, not the read-only shim" 0 \
+    "in the live checkout" page
+run "that a frozen copy is the deliberate exception -- naming the bug that cost the day" 0 \
+    "methodConfigVersion" page
+run "the check row carries the --wf form the issue asked for, not a bare ref" 0 \
+    "check origin/main --wf GenotypeBatch" page
+run "the publish row offers the live one-liner as well as the offline capture" 0 \
+    "publish-check" page
+run "and the Dockstore cure is on the page: throwaway <branch>_terra plus the filter commit (item 3)" 0 \
+    "filters.branches" page
+
+
 if [ "$skipped" -gt 0 ]; then
     # The skipped count is printed when it is non-zero and omitted when it is not, so the string every
     # ledger row and handoff quotes for a full run stays byte-identical on a machine that skipped nothing.

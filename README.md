@@ -117,7 +117,9 @@ names one run of one stage: it moves the config name (`08-FilterBatchSamples-rc1
 beside the first instead of overwriting it. The
 single-sample stages are not on that list: the freeze loop cannot write a participant entity at all, so
 there is nothing frozen to rerun against (see [module profiles](docs/module-profiles.md)). The [Terra
-head-to-head](docs/terra-head-to-head.md) guide covers the full sequence.
+head-to-head](docs/terra-head-to-head.md) guide covers the full sequence, and
+[Test a branch on Terra](docs/test-a-branch.md) is that sequence as one screen: the order to ask things
+in, one command per step, and a link to the section of the guide that explains each.
 
 ### Run a stage locally
 
@@ -215,6 +217,8 @@ kit/
 
 - [Quickstart](docs/quickstart.md): a walkthrough of the main tasks, with real output at every step. None
   of it costs anything.
+- [Test a branch on Terra](docs/test-a-branch.md): one screen for "will my branch work on Terra" — the
+  decision order, one command per step, and the section of the head-to-head guide that explains each.
 - [Setup](docs/setup.md): dependencies, cloud login, and the agent skill.
 - [Configuration](docs/config.md): every setting, including the two without defaults.
 - [The `gsvtk` command line](docs/cli.md): the command-to-tool map and the read-only contract.
