@@ -1,0 +1,38 @@
+{
+  "_about": [
+    "HAND-AUTHORED SYNTHETIC FIXTURE for GSVTK_ENTITY_JSON: the same row/workspace as",
+    "checkinputs-GenotypeBatch-entity-capture.json with EVERY referenced attribute present and",
+    "non-empty -- the state a healthy sandbox is in. It exists for the one leg that has to see check 2b",
+    "print PASS and exit 0, because a check whose only graded outcome is a FAIL cannot be shown to",
+    "distinguish 'clean' from 'not run'. The member reads are still in the config variant that carries",
+    "them, so even here the withheld line has to survive: PASS is reachable only when nothing at all was",
+    "withheld."
+  ],
+  "entities": [
+    {
+      "entityName": "EXAMPLE_SET_A",
+      "entityType": "sample_set",
+      "attributes": {
+        "sample_set_id": "EXAMPLE-PLACEHOLDER",
+        "outlier_filtered_pesr_vcf_new": "EXAMPLE-PLACEHOLDER",
+        "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+        "cutoffs_new": "EXAMPLE-PLACEHOLDER",
+        "median_cov_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_SR_frz": "EXAMPLE-PLACEHOLDER"
+      }
+    }
+  ],
+  "workspace": {
+    "namespace": "your-namespace",
+    "name": "your-workspace",
+    "attributes": {
+      "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+      "reference_dict": "EXAMPLE-PLACEHOLDER",
+      "depth_exclusion_intervals_unused": "EXAMPLE-PLACEHOLDER",
+      "bin_exclude": "EXAMPLE-PLACEHOLDER",
+      "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+    }
+  }
+}

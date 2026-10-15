@@ -62,6 +62,48 @@
 # with `JAVA=/usr/bin/false` and an empty `PATH` to prove that claim rather than assert it. The
 # refusals run the real tool end to end and must name what they want. bash 3.2 compatible; owns its
 # own tally.
+#
+# Sections 10-12 (GitHub issue #5) grade the other two things that file does, with the same
+# no-network rule and a SECOND seam, `GSVTK_ENTITY_JSON`:
+#
+#   10. womtool is a COUNTED SKIP, not a death. `womtool_spec()` used to `SystemExit` with neither a
+#       jar nor a capture, which made checks 2, 2b, 3 and 4 unreachable — the tool answered none of its
+#       questions on a machine without java. It now returns `(None, reason)` and the line printed names
+#       the withheld thing, its extent and the checks that depended on it (the standard
+#       `withheld by the declared skip region …` sets in scripts/selftest.d/entity.sh). One dependent
+#       was a silent pass waiting to happen: check 3 scans `inputsResolutions` for the required names,
+#       and with no required set it printed "PASS every required input resolved to a value" over
+#       nothing. It prints SKIPPED now — and so does check 1 when a capture answers ZERO required
+#       inputs, because a womtool JSON of another workflow reads exactly like a WDL needing nothing.
+#   11. CHECK 2b: do the attributes this config binds actually exist? The check the issue asked for and
+#       the tool never had — it has no entity read anywhere, and its `inputsResolutions` check answers
+#       "did a previous run resolve these", not "do these sit on my row now". Three states
+#       (PRESENT / PRESENT-EMPTY / ABSENT) plus UNKNOWN and UNGRADED; one line per reference printing
+#       type/row/attr/suffix; one count line a leg asserts literally. Suffix INFERENCE is NOT built
+#       here (the next lane's line, coupled to these). `this.<collection>.<attr>` member reads are
+#       UNGRADED with their reason: looking a member attribute up on a cohort row is the mistake
+#       terra/steps.py names for 09-MergeBatchSites.
+#   12. The LIVE row read, graded offline: one point lookup per row, through the attribute-level
+#       reader this repo did not have when the section was written (`terra.entity_attributes()`). The
+#       five ways `GET …/entities/<type>/<name>` can answer are five scenarios, and the rules the legs
+#       hold are unchanged in kind: 404 is the only answer allowed to mean absence, and anything that
+#       cannot answer (a 500, a 200 with no `attributes` member, an unreadable capture) is UNKNOWN and
+#       never ABSENT. The listing call stays faked ONLY as a tripwire: the CALLS leg goes red if the
+#       tool ever goes back to walking pages. The 500 and the odd body are fixtures, not measured
+#       Terra failures; the fiss handle here is a fixture-backed stand-in, and the raw
+#       REST client of terra/terra.py is stubbed to FAIL, which is that file's documented fallback path.
+#
+# Fixtures for 10-12, all HAND-AUTHORED (real shapes and names, placeholder values: attribute values on
+# these rows are object paths, and a sanitised live dump is still a coordinate leak):
+#
+#   checkinputs-GenotypeBatch-config.json                the get_workspace_config answer, 12 references
+#   checkinputs-GenotypeBatch-config-member-read.json    the same + 2 `this.sample_sets.<attr>` reads
+#   checkinputs-GenotypeBatch-synthetic-womtool-inputs.json  SYNTHETIC shape-match: 12 required, 3 not
+#   checkinputs-GenotypeBatch-run-and-workspace.json     submissions, the submission, workspace attributes
+#   checkinputs-GenotypeBatch-entity-capture.json        GSVTK_ENTITY_JSON: 8 present, 1 empty, 3 absent
+#   checkinputs-GenotypeBatch-entity-capture-complete.json   the all-clean state, for the PASS leg
+#   checkinputs-GenotypeBatch-entity-lookup.json         6 live scenarios: the five ways the point
+#                                                        row 404, row on page 25 against a 20-page budget
 
 set -uo pipefail
 
@@ -94,6 +136,16 @@ REQ_01="$FIX/womtool84-IntegrateGDVcf-01107996.inputs.json"
 STRUCT_FIX="$FIX/womtool84-BenchmarkGqFilter-7fbf1171.inputs.json"
 MATRIX="$FIX/womtool84-shapematrix.inputs.json"
 MATRIX_WDL="$FIX/womtool84-shapematrix.wdl"
+# The Terra-side fixtures (all HAND-AUTHORED: real shapes and names, placeholder values, never a
+# sanitised live dump — `make -s audit` flags coordinates in tracked files, and attribute values on
+# these rows are object paths). Together they let checks 2b/3/4 be graded with no network:
+CI_CFG="$FIX/checkinputs-GenotypeBatch-config.json"            # the method config payload
+CI_CFG_MEMBER="$FIX/checkinputs-GenotypeBatch-config-member-read.json"   # + 2 member reads
+CI_WT="$FIX/checkinputs-GenotypeBatch-synthetic-womtool-inputs.json"     # synthetic, says so in the name
+CI_RUN="$FIX/checkinputs-GenotypeBatch-run-and-workspace.json"  # submissions + workspace attributes
+CI_CAPTURE="$FIX/checkinputs-GenotypeBatch-entity-capture.json"          # GSVTK_ENTITY_JSON: 3 states
+CI_CAPTURE_FULL="$FIX/checkinputs-GenotypeBatch-entity-capture-complete.json"
+CI_PAGES="$FIX/checkinputs-GenotypeBatch-entity-lookup.json"     # the live point lookup's 6 scenarios
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gsvtk-jarshape.XXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
@@ -211,11 +263,157 @@ elif mode == "shape":
 elif mode == "value":
     value = json.loads(sys.argv[3])
     print("SHAPE=%s" % ("optional" if bci.is_optional_input(value) else "required"))
+elif mode == "run":
+    # run <pages-fixture> <scenario> [tool args...] -- call the REAL main(), with a fixture-backed
+    # stand-in for the fiss handle and nothing else. No check is re-implemented here: the stand-in
+    # answers HTTP and the tool decides. Three things it enforces rather than claims:
+    #   * while GSVTK_ENTITY_JSON is set, no entity/workspace endpoint may be touched at all -- a tool
+    #     that read the seam variable and then went to Terra anyway would print SEAM-WAS-IGNORED;
+    #   * every endpoint call is counted, so the row read being memoised per (type, row) is graded
+    #     (`CALLS=get_entity:1,...`) rather than promised;
+    #   * the raw REST client of terra/terra.py is stubbed to FAIL, which is that file's documented
+    #     fallback path (docs/terra-head-to-head.md §8), so nothing in a leg can reach a network and the
+    #     notice it prints is part of the output a leg reads.
+    pages_path, scenario_name = sys.argv[3], sys.argv[4]
+    argv = sys.argv[5:]
+    seam_set = bool(os.environ.get("GSVTK_ENTITY_JSON"))
+    fixture_dir = os.path.join(ROOT, "scripts", "selftest.d", "fixtures", "jar")
+    run_doc = json.load(open(os.path.join(fixture_dir,
+                                         "checkinputs-GenotypeBatch-run-and-workspace.json")))
+    pages = json.load(open(pages_path))["scenarios"].get(scenario_name)
+    if pages is None and not seam_set:
+        sys.exit("probe.py run: no scenario %r in %s" % (scenario_name, pages_path))
+    if pages is None:                                 # `unused`: with the capture in hand no page of any
+        pages = {"entities": [], "row_exists": True}   # seam in play: no scenario is reachable
+    config_path = os.environ.get("GSVTK_TEST_CONFIG") \
+        or os.path.join(fixture_dir, "checkinputs-GenotypeBatch-config.json")
+    config_doc = json.load(open(config_path))
+    calls = []
+    terra_mod = sys.modules["terra"]
+
+    class Resp:
+        def __init__(self, payload, code=200):
+            self._p, self.status_code = payload, code
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._p
+
+    class FakeApi:
+        def get_workspace_config(self, ns, name, cns, cname):
+            calls.append("get_workspace_config")
+            return Resp(config_doc)
+
+        def list_submissions(self, ns, name, *a, **kw):
+            calls.append("list_submissions")
+            return Resp(run_doc["submissions"])
+
+        def get_submission(self, ns, name, sid):
+            calls.append("get_submission")
+            return Resp(run_doc["submission"])
+
+        def _refuse_seam(self, what):
+            raise AssertionError("SEAM-WAS-IGNORED: %s ran while GSVTK_ENTITY_JSON=%s was set"
+                                 % (what, os.environ.get("GSVTK_ENTITY_JSON")))
+
+        def get_entity(self, ns, name, etype, ename):
+            # The point lookup, answered five ways -- see the fixture's `_about`. This is the ONLY seam
+            # the live row read uses now; `get_entities_query` below stays as a tripwire, because a tool
+            # that went back to walking listings would be caught by the CALLS leg rather than by review.
+            calls.append("get_entity")
+            if seam_set:
+                self._refuse_seam("get_entity")
+            if pages.get("http"):
+                return Resp({"message": pages.get("message", "upstream refused")}, pages["http"])
+            if not pages.get("row_exists"):
+                return Resp({"message": "no such row"}, 404)   # the only answer allowed to mean absence
+            for e in pages.get("entities", []):
+                if e.get("entityName") != ename:
+                    continue
+                attrs = e.get("attributes", {})
+                if pages.get("body") == "no-attributes":
+                    return Resp({"entityName": ename, "entityType": etype})
+                if pages.get("nested"):                        # the envelope shape (terra.py's rule)
+                    return Resp({"entity": {"name": ename, "attributes": attrs}})
+                return Resp({"entityName": ename, "entityType": etype, "attributes": attrs})
+            return Resp({"message": "no such row"}, 404)
+
+        def get_entities_query(self, ns, name, etype, page=1, page_size=50, **kw):
+            calls.append("get_entities_query")
+            if seam_set:
+                self._refuse_seam("the entity listing")
+            items = [e for e in pages["entities"] if e.get("page") == page]
+            fill = pages.get("fill_full") or []
+            if fill == "*" or str(page) in fill:
+                n = 0
+                while len(items) < page_size:
+                    n += 1
+                    items.append({"entityName": "EXAMPLE_FILLER_%s_%s" % (page, n),
+                                  "entityType": etype, "attributes": {}})
+            return Resp({"entities": items,
+                         "resultMetadata": {"totalPages": 999, "total": 99999}})
+
+        def get_workspace(self, ns, name, fields=None):
+            calls.append("get_workspace")
+            if seam_set:
+                self._refuse_seam("the workspace read")
+            return Resp(run_doc["workspace"])
+
+    fake = FakeApi()
+    bci.fapi = fake
+    terra_mod.fapi = fake
+
+    def no_rest(*a, **kw):
+        raise terra_mod.TerraError("offline leg: the raw REST client is stubbed out")
+
+    terra_mod.rest_get = no_rest
+    sys.argv = ["batch_check_inputs.py"] + list(argv)
+    rc = bci.main()
+    tally = {}
+    for name in calls:
+        tally[name] = tally.get(name, 0) + 1
+    print("CALLS=" + ",".join("%s:%s" % (k, tally[k]) for k in sorted(tally)))
+    print("RC=%s" % rc)
+    sys.exit(rc)
 else:
     sys.exit("probe.py: unknown mode %r" % mode)
 PY
 
 probe() { "$PY" "$TMP/probe.py" "$ROOT" "$@"; }
+
+# ci [EXTRA=ENV ...] <womtool-seam|none> <entity-capture|none> <config-fixture|default> <scenario> [args]
+#
+# Run the REAL `main()` against the fixture-backed fiss stand-in in probe.py's `run` mode. Every leg
+# states its own seams, because the difference between them is what is being graded: `none` for the
+# entity capture means "this run read the live page fixture", and `unused` as the scenario then means
+# exactly that -- no page scenario is reachable while the capture answers.
+# `GSVTK_CONFIG` points at a profile holding placeholder coordinates, so `tc.NS`/`tc.WS`/`tc.BATCH`
+# resolve to names this file can print without printing anybody's workspace.
+ci() {
+    local -a extra=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in *=*) extra+=("$1"); shift ;; *) break ;; esac
+    done
+    local wt="$1" ent="$2" cfg="$3" scen="$4"; shift 4
+    local -a unsets=() assigns=()
+    # `env` stops option-parsing at the first VAR=value, so every -u goes before every assignment.
+    unsets+=(-u WOMTOOL_JAR)
+    if [ "$wt" = none ]; then unsets+=(-u GSVTK_WOMTOOL_INPUTS_JSON); else assigns+=("GSVTK_WOMTOOL_INPUTS_JSON=$wt"); fi
+    if [ "$ent" = none ]; then unsets+=(-u GSVTK_ENTITY_JSON); else assigns+=("GSVTK_ENTITY_JSON=$ent"); fi
+    if [ "$cfg" = default ]; then unsets+=(-u GSVTK_TEST_CONFIG); else assigns+=("GSVTK_TEST_CONFIG=$cfg"); fi
+    assigns+=("GSVTK_CONFIG=$TMP/checkinputs.env")
+    env ${unsets[@]+"${unsets[@]}"} ${assigns[@]+"${assigns[@]}"} ${extra[@]+"${extra[@]}"} \
+        "$PY" "$TMP/probe.py" "$ROOT" run "$CI_PAGES" "$scen" --step 10 --no-sidecars "$@"
+}
+
+# The placeholder coordinates the legs print. Deliberately the `your-*` convention
+# scripts/selftest.d/golden/ already uses, so nothing here is a machine coordinate.
+cat > "$TMP/checkinputs.env" <<EOF
+GSVTK_TERRA_NAMESPACE=your-namespace
+GSVTK_TERRA_WORKSPACE=your-workspace
+GSVTK_BATCH=EXAMPLE_SET_A
+GSVTK_BRANCH=your-branch-under-test
+EOF
 
 # --------------------------------------------------------------------------- the phase
 echo
@@ -241,7 +439,8 @@ if ! "$PY" -c 'import firecloud' >/dev/null 2>&1; then
 fi
 for f in "$REQ_7F" "$REQ_01" "$STRUCT_FIX" "$MATRIX" "$MATRIX_WDL" \
          "$FIX/womtool84-validate-not-specified.txt" "$FIX/womtool84-validate-coercion.txt" \
-         "$FIX/womtool84-validate-extra-key.txt" "$FIX/womtool84-validate-value-and-missing.txt"; do
+         "$FIX/womtool84-validate-extra-key.txt" "$FIX/womtool84-validate-value-and-missing.txt" \
+         "$CI_CFG" "$CI_CFG_MEMBER" "$CI_WT" "$CI_RUN" "$CI_CAPTURE" "$CI_CAPTURE_FULL" "$CI_PAGES"; do
     if [ ! -f "$f" ]; then
         printf '  FAIL  the fixture %s is missing; nothing below this line can be graded\n' "${f#"$ROOT"/}"
         printf '\njarshape selftest: 0 passed, 1 failed, 0 skipped\n'
@@ -358,15 +557,14 @@ want "captured JSON is graded with no jar, no java, no PATH and no checkout" 0 \
 #    from, it stops at check 1 and names what it wants — never answering with a guessed set, and
 #    never reaching Terra to find out. The seam is not a way to guess either: pointed at a file that
 #    is not there, or at JSON that is not a womtool object, it refuses and names the variable.
-want "no jar, no seam: refuses by name, naming WOMTOOL_JAR, the download and the seam" 1 \
-    "womtool jar not found (WOMTOOL_JAR='')" "Download the womtool jar" \
-    "GSVTK_WOMTOOL_INPUTS_JSON" -- \
-    env -u WOMTOOL_JAR -u GSVTK_WOMTOOL_INPUTS_JSON -u GSVTK_WORK \
-        GSVTK_CONFIG="$TMP/no-config.env" "$PY" "$TOOL" --step 10
-want "a WOMTOOL_JAR that is not a file is the same refusal, with the path quoted" 1 \
-    "womtool jar not found (WOMTOOL_JAR='" "Download the womtool jar" -- \
-    env -u GSVTK_WOMTOOL_INPUTS_JSON GSVTK_CONFIG="$TMP/no-config.env" \
-        WOMTOOL_JAR="$TMP/no-such-dir/womtool.jar" "$PY" "$TOOL" --step 10
+want "no jar, no seam: check 1 no longer kills the run — it names the skip, and the Terra-side checks run" 0 \
+    "# SKIP womtool (check 1): no womtool jar (WOMTOOL_JAR=unset)" "GSVTK_WOMTOOL_INPUTS_JSON" \
+    "CALLS=get_submission:1,get_workspace_config:1,list_submissions:1" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want "a WOMTOOL_JAR that is not a file is the same named skip, quoting the path it tried" 0 \
+    "no womtool jar (WOMTOOL_JAR='" "is not a file" \
+    'and no captured `womtool inputs` JSON (GSVTK_WOMTOOL_INPUTS_JSON unset)' -- \
+    ci WOMTOOL_JAR="$TMP/no-such-dir/womtool.jar" none "$CI_CAPTURE_FULL" default unused
 want "the seam pointed at a missing file refuses instead of guessing" 1 \
     "GSVTK_WOMTOOL_INPUTS_JSON" "is not a file" "no required-input set is being guessed" -- \
     env -u WOMTOOL_JAR GSVTK_CONFIG="$TMP/no-config.env" \
@@ -527,6 +725,198 @@ else
     skipped=$((skipped + 1))
     gsvtk_note_skip "jarshape-no-jar"
 fi
+
+# =============================================================================================
+# 10. WOMTOOL IS A COUNTED SKIP, NOT A DEATH (GitHub issue #5, the half of it that was right).
+#
+# `womtool_spec()` used to `raise SystemExit` when WOMTOOL_JAR was empty and no capture was named, so
+# every later check in terra/batch_check_inputs.py was unreachable on a machine without a jar --
+# including check 2b below, which needs no jar at all. A missing optional TOOL is a withheld input, and
+# this repo's standard for one is `withheld by the declared skip region …` (scripts/selftest.d/entity.sh):
+# name the withheld thing, name its extent, name what depended on it. The dependents are the part that
+# used to be invisible in a NEW way: with the required set gone, check 1's "every required input is
+# bound" and check 3's "every required input resolved to a value" were both true of NOTHING, so the skip
+# line names check 3 and check 3 prints SKIPPED instead of a PASS over an empty list.
+#
+# What did NOT move: a seam that is CONFIGURED AND BROKEN still refuses (section 7 above), and no
+# required set is ever invented. These legs drive the tool's own main() through the fixture-backed fiss
+# stand-in in probe.py's `run` mode; the real HTTP path is not exercised by any leg here (offline gate),
+# and says so.
+
+ci_values_leak() {          # rc 0 only when the run printed no attribute VALUE anywhere
+    local out
+    out="$(ci "$@")"
+    if printf '%s\n' "$out" | grep -qF 'EXAMPLE-PLACEHOLDER'; then
+        printf '%s\n' "$out" | grep -F 'EXAMPLE-PLACEHOLDER' | head -3
+        return 1
+    fi
+    printf 'NO-VALUES-PRINTED\n'
+}
+
+want "no jar, no seam: the skip names what was withheld and its extent" 0 \
+    "# SKIP womtool (check 1): no womtool jar (WOMTOOL_JAR=unset)" \
+    "Withheld: the REQUIRED set of wdl/GenotypeBatch.wdl" \
+    "14 bound input(s) were NOT cross-checked for a missing required binding" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want "and names the check that depended on it, rather than passing over an empty required set" 0 \
+    "check 3's unresolved scan has no required set to scan" \
+    "SKIP womtool's required set is withheld (check 1 above)" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want_no "a withheld required set prints no PASS in check 1" 0 \
+    "  PASS every required input is bound" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want_no "and no PASS in check 3 either (a scan of nothing is the silent pass this file exists against)" 0 \
+    "  PASS every required input resolved to a value" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want "the skip names both cures by variable" 0 \
+    "WOMTOOL_JAR=/path/to/womtool-" "GSVTK_WOMTOOL_INPUTS_JSON=<captured" -- \
+    ci none "$CI_CAPTURE_FULL" default unused
+want "with a capture, check 1 still prints where its JSON came from" 0 \
+    "[source: captured womtool JSON $CI_WT (GSVTK_WOMTOOL_INPUTS_JSON)]" \
+    "required by WOM: 12" "  PASS every required input is bound" \
+    "  PASS every required input resolved to a value" -- \
+    ci "$CI_WT" "$CI_CAPTURE_FULL" default unused
+want "a capture whose prefix matches nothing is refused a PASS, and prints the file it read" 0 \
+    "SKIP womtool answered, but reports NO required input for GenotypeBatch" \
+    "[source: captured womtool JSON $REQ_01" \
+    "  SKIP womtool's required set is empty (check 1 above)" -- \
+    ci "$REQ_01" "$CI_CAPTURE_FULL" default unused
+want_no "an empty required set does not print PASS in check 1 (a vacuous PASS is the point of this file)" 0 \
+    "  PASS every required input is bound" -- \
+    ci "$REQ_01" "$CI_CAPTURE_FULL" default unused
+want "the new knob is documented in the tool's own --help, with its never-a-live-run promise" 0 \
+    "GSVTK_ENTITY_JSON=<file>" "never mistaken for a live one" "Values are never printed" -- \
+    env -u WOMTOOL_JAR -u GSVTK_ENTITY_JSON "$PY" "$TOOL" --help
+
+# =============================================================================================
+# 11. CHECK 2b: DO THE ATTRIBUTES THIS CONFIG BINDS ACTUALLY EXIST?
+#
+# The check the tool never had. `womtool inputs` answers what the WDL needs; `inputsResolutions` answers
+# what a PAST submission resolved -- which is "did a previous run resolve these", not "do these
+# attributes exist on my row now". There was no entity read anywhere in the file (verified: the only
+# `fapi.get_entity(` in the repo sits behind terra.entity_exists(), with no caller reading attributes),
+# and the absence of this check is what produced issue #4. Three states, three counts, printed on every
+# run, with the entity type / row name / suffix on each reference line.
+#
+# Graded through GSVTK_ENTITY_JSON (the captured-read seam, same precedent as
+# GSVTK_WOMTOOL_INPUTS_JSON) and, in section 12, through the live readers. No leg prints a value: the
+# placeholder below is what a leaked value would look like, and one leg's whole job is its absence.
+
+want "the three states are three counts, and the count line is a literal" 1 \
+    "# attribute existence: refs=12 graded=12 present=8 present-empty=1 absent=3 unknown=0 ungraded=0" \
+    "RC=1" -- \
+    ci none "$CI_CAPTURE" default unused
+want "an ABSENT line names the type, the row and the suffix in play" 1 \
+    "type=sample_set row=EXAMPLE_SET_A attr=this.cutoffs_new suffix=_new" \
+    "attr=this.outlier_filtered_pesr_vcf_new suffix=_new" -- \
+    ci none "$CI_CAPTURE" default unused
+want "PRESENT-BUT-EMPTY is its own word, its own count and its own FAIL" 1 \
+    "state=PRESENT-EMPTY" "attr=this.median_cov_frz suffix=_frz" \
+    "PRESENT BUT EMPTY there" -- \
+    ci none "$CI_CAPTURE" default unused
+want "ABSENT from the WORKSPACE is graded too, on the workspace row" 1 \
+    "type=workspace row=your-workspace attr=workspace.bin_exclude suffix=-" -- \
+    ci none "$CI_CAPTURE" default unused
+want "the FAIL lines name the attributes, so a reader can act without reading 12 lines" 1 \
+    "FAIL 3 bound attribute(s) are ABSENT from the row/workspace that answers them" \
+    "this.cutoffs_new, this.outlier_filtered_pesr_vcf_new, workspace.bin_exclude" -- \
+    ci none "$CI_CAPTURE" default unused
+want "a captured run prints the capture as its source (never readable as a live answer)" 1 \
+    "#   attribute source: captured Terra read $CI_CAPTURE (GSVTK_ENTITY_JSON)" \
+    "NOT a live read" -- \
+    ci none "$CI_CAPTURE" default unused
+want "and the captured run touched NO entity endpoint: the seam was read, not ignored" 0 \
+    "CALLS=get_submission:1,get_workspace_config:1,list_submissions:1" -- \
+    ci "$CI_WT" "$CI_CAPTURE_FULL" default unused
+want "no attribute VALUE is printed on a captured run (they are object paths; the audit flags them)" 0 \
+    "NO-VALUES-PRINTED" -- \
+    ci_values_leak "$CI_WT" "$CI_CAPTURE_FULL" default unused
+want "a healthy row prints PASS and exits 0 -- the check can distinguish clean from not-run" 0 \
+    "PASS every one of the 12 graded reference(s) resolves to a non-empty value" \
+    "absent=0 unknown=0" "RC=0" -- \
+    ci "$CI_WT" "$CI_CAPTURE_FULL" default unused
+want "the ROW NAME is load-bearing: the same config on the other row is absent=1, not absent=3" 1 \
+    "# attribute existence: refs=12 graded=12 present=11 present-empty=0 absent=1 unknown=0 ungraded=0" \
+    "row=EXAMPLE_SET_B" -- \
+    ci none "$CI_CAPTURE" default unused --entity EXAMPLE_SET_B
+want "a row the capture says nothing about is UNKNOWN, and no PASS is claimed" 1 \
+    "unknown=8" "the capture says nothing about this row" \
+    "attribute existence does not claim PASS: 8 of 12" -- \
+    ci none "$CI_CAPTURE" default unused --entity EXAMPLE_SET_ZED
+want_no "a withheld reference is never counted as a pass" 1 \
+    "  PASS every one of the 12 graded reference(s) resolves to a non-empty value on the row/workspace it is read from" -- \
+    ci none "$CI_CAPTURE" default unused --entity EXAMPLE_SET_ZED
+want "a MEMBER READ (this.sample_sets.<attr>) is UNGRADED with its reason, not looked up on the wrong row" 0 \
+    "type=sample_sets row=members of EXAMPLE_SET_A attr=this.sample_sets.cutoffs_frz" \
+    "member read: the value sits on each row of the collection, not on this row" \
+    "ungraded=2" -- \
+    ci "$CI_WT" "$CI_CAPTURE_FULL" "$CI_CFG_MEMBER" unused
+want_no "and 2 member reads keep the PASS off the line even when all 12 graded ones are clean" 0 \
+    "  PASS every one of the 12 graded reference(s) resolves to a non-empty value on the row/workspace it is read from" -- \
+    ci "$CI_WT" "$CI_CAPTURE_FULL" "$CI_CFG_MEMBER" unused
+want "a step whose profile names no row source says so and guesses nothing (09 is a COHORT row)" 1 \
+    "row type=sample_set_set" \
+    "no row name: --entity did not name one and this step's profile names no row source at all" \
+    "no submission found for 09-MergeBatchSites" -- \
+    ci "$CI_WT" "$CI_CAPTURE" default unused --step 09
+want "and check 2b ran BEFORE that refusal: it answers a question about the row, not about a past run" 1 \
+    "# check 2b: do the attributes 10-GenotypeBatch binds actually exist" \
+    "no submission found for 09-MergeBatchSites" -- \
+    ci "$CI_WT" "$CI_CAPTURE" default unused --step 09
+
+# =============================================================================================
+# 12. THE LIVE ROW READ, GRADED OFFLINE: what a lookup that cannot answer refuses to say.
+#
+# The LIVE row read: one point lookup, and the five ways its endpoint can answer.
+#
+# `row_attributes_live()` calls `terra.entity_attributes()`, which wraps `GET .../entities/<type>/<name>`
+# -- one request, the row's attributes, `None` for a 404, and a raise for anything else. It replaced a
+# walk of `terra.entity_sample()` pages, which existed only because terra/terra.py had no attribute-level
+# reader at the time; the walk is gone rather than tuned, and the CALLS leg below is the proof rather
+# than this sentence (a tool that went back to listings would go red there, and `get_entities_query`
+# remains faked only as the tripwire that makes that leg mean something).
+#
+# What the legs hold, in the order the ladder runs:
+#   * a row that EXISTS answers for itself: 8 present, 1 present-but-empty, 3 absent. ABSENT is only
+#     ever said about a name on a row that was read;
+#   * the same bytes nested under `entity` must tally IDENTICALLY. That is `a21cb3b`'s lesson enforced in
+#     code, not remembered in prose: a report of "no attributes" is usually someone reading one level
+#     too shallow, so both shapes are read, and a 200 with neither raises instead of returning `{}`;
+#   * 404, HTTP 500, and a 200 with no `attributes` member all land on UNKNOWN with the SAME tally and
+#     three DIFFERENT sentences. Collapsing them is how a check starts manufacturing missing-input
+#     reports -- issue #4 verbatim -- which is why there are three legs and not one.
+# The 500 and the odd body are fixtures, not measured Terra failures: no offline leg can make the real
+# API refuse, and neither claim is presented as if it were.
+
+TALLY_FOUND="# attribute existence: refs=12 graded=12 present=8 present-empty=1 absent=3 unknown=0 ungraded=0"
+TALLY_BLIND="# attribute existence: refs=12 graded=4 present=3 present-empty=0 absent=1 unknown=8 ungraded=0"
+SOURCE_LIVE="attribute source: live Terra reads: terra.entity_attributes() -- one point lookup per row"
+
+want "the live read grades the SAME tally the capture graded, from one row read" 1 \
+    "$TALLY_FOUND" "$SOURCE_LIVE" -- \
+    ci none none default row-found
+want "the row is read ONCE and the entity listing is never touched -- the page walk is gone, by CALLS" 1 \
+    "CALLS=get_entity:1,get_submission:1,get_workspace:1,get_workspace_config:1,list_submissions:1" -- \
+    ci none none default row-found
+want 'the same row nested under entity tallies IDENTICALLY (the a21cb3b envelope trap, enforced)' 1 \
+    "$TALLY_FOUND" "$SOURCE_LIVE" -- \
+    ci none none default row-found-nested
+want "a row that exists but binds NOTHING is nine ABSENTs, not an unread row" 1 \
+    "# attribute existence: refs=12 graded=12 present=3 present-empty=0 absent=9 unknown=0 ungraded=0" \
+    "$SOURCE_LIVE" -- \
+    ci none none default present-empty
+want "a row the API does not have says so, tallies it as UNKNOWN, and does not call it ABSENT" 1 \
+    "terra.entity_attributes() answered 404: no sample_set row named 'EXAMPLE_SET_A'" "$TALLY_BLIND" -- \
+    ci none none default row-gone
+want "a lookup that FAILS (HTTP 500) is UNKNOWN with a different sentence, never absence" 1 \
+    "terra.entity_attributes() could not answer (TerraError" "existence is not being guessed" "$TALLY_BLIND" -- \
+    ci none none default lookup-500
+want 'a 200 with no attributes member is UNKNOWN too, and is never read as binds-nothing' 1 \
+    'no `attributes` object' "existence is not being guessed" "$TALLY_BLIND" -- \
+    ci none none default body-no-attributes
+want "and no live-path leg leaks an attribute value either" 0 \
+    "NO-VALUES-PRINTED" -- \
+    ci_values_leak none none default row-found
 
 printf '\njarshape selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
 # The pair's line is where this phase's mode-invariance is visible: the same declared count against the same

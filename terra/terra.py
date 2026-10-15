@@ -271,6 +271,44 @@ def entity_exists(ns: str, name: str, etype: str, entity_name: str) -> bool:
                      f"{str(getattr(resp, 'text', ''))[:140]}")
 
 
+def entity_attributes(ns: str, name: str, etype: str, entity_name: str) -> dict | None:
+    """One row's attributes, from the ONE request that can answer it. `{}`, a dict, or `None` for no row.
+
+    Why this exists when `entity_sample` and `entity_exists` already do: the attributes a submission will
+    bind live on the row, and asking for them through the listing costs a page walk of an unbounded table
+    (`batch_check_inputs.py` did exactly that until this helper landed) while the point lookup costs one
+    GET. `entity_exists` reads the same endpoint and throws the body away, which is the right trade for a
+    yes/no question and useless for this one.
+
+    The three answers are the API's, not an interpretation of it:
+      * HTTP 200 with an `attributes` object -> that object. An EMPTY one means the row exists and binds
+        nothing, which is a different report from "no such row" and gets different text downstream.
+      * HTTP 404 -> `None`. This is the only answer allowed to mean absence -- the same rule
+        `entity_exists` states, for the same reason: a truthy listing page is not evidence.
+      * anything else -> raises. "Could not look" is not absence and not a row, and a check that guesses
+        here is the one that bills for a rerun whose inputs were never there.
+
+    Both body shapes are read, and neither is assumed: the workspace reader taught this repo
+    (`a21cb3b`) that a report of "no attributes" is usually a one-level-shallow read of an envelope, so a
+    200 whose `attributes` sits at the top level and one that nests it under `entity` are both honoured.
+    A 200 with neither raises rather than returning `{}` -- that is an unknown shape, not an empty row.
+    """
+    resp = fapi.get_entity(ns, name, etype, entity_name)
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise TerraError(f"get_entity {etype}/{entity_name}: HTTP {resp.status_code} "
+                         f"{str(getattr(resp, 'text', ''))[:140]}")
+    body = _j(resp, f"get_entity {etype}/{entity_name}")
+    nested = body.get("entity") if isinstance(body, dict) else None
+    for obj in (body, nested):
+        if isinstance(obj, dict) and isinstance(obj.get("attributes"), dict):
+            return obj["attributes"]
+    raise TerraError(f"get_entity {etype}/{entity_name} answered 200 with no `attributes` object "
+                     f"(top-level keys: {sorted(body)[:6] if isinstance(body, dict) else type(body).__name__}). "
+                     "Refusing to read an unrecognised body as 'the row binds nothing'.")
+
+
 def workspace_configs(ns: str, name: str) -> list:
     """Method configs in a workspace. See `_read_both` for why fiss is not trusted alone."""
     return _read_both(f"workspaces/{ns}/{name}/methodconfigs", f"method configs in {ns}/{name}",

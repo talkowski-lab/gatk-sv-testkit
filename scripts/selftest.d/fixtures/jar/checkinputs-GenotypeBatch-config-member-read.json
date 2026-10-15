@@ -1,0 +1,49 @@
+{
+  "_about": [
+    "HAND-AUTHORED SYNTHETIC FIXTURE, same shape as checkinputs-GenotypeBatch-config.json, with TWO",
+    "MEMBER READS added: `this.sample_sets.<attr>`. 09-MergeBatchSites really is built this way (it",
+    "reads `this.sample_sets.<attr>` and `this.sample_set_set_id`, and its root row is a COHORT -- see",
+    "terra/steps.py::_require_derived_entity, which refuses if a member read is mistaken for the row's",
+    "own attribute). These two legs of the fixture are what grade check 2b reporting them UNGRADED",
+    "with the reason, instead of looking a member attribute up on a cohort row and printing a confident",
+    "ABSENT about nothing. 14 references: 8 row + 4 workspace + 2 member."
+  ],
+  "namespace": "your-namespace",
+  "name": "10-GenotypeBatch",
+  "rootEntityType": "sample_set",
+  "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/GenotypeBatch",
+    "methodVersion": "your-branch-under-test",
+    "methodUri": "dockstore://github.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch/your-branch-under-test"
+  },
+  "methodConfigVersion": 7,
+  "deleted": false,
+  "inputs": {
+    "GenotypeBatch.batch": "this.sample_set_id",
+    "GenotypeBatch.vcf": "this.outlier_filtered_pesr_vcf_new",
+    "GenotypeBatch.training_vcf": "this.merged_pesr_vcf_frz",
+    "GenotypeBatch.rf_cutoffs": "this.cutoffs_new",
+    "GenotypeBatch.median_coverage": "this.median_cov_frz",
+    "GenotypeBatch.rd_file": "this.merged_bincov_frz",
+    "GenotypeBatch.pe_file": "this.merged_PE_frz",
+    "GenotypeBatch.sr_file": "this.merged_SR_frz",
+    "GenotypeBatch.contig_list": "workspace.primary_contigs_list",
+    "GenotypeBatch.reference_dict": "workspace.reference_dict",
+    "GenotypeBatch.depth_exclusion_intervals": "workspace.bin_exclude",
+    "GenotypeBatch.gatk_docker": "workspace.gatk_docker",
+    "GenotypeBatch.sv_base_mini_docker": "\"EXAMPLE-PLACEHOLDER\"",
+    "GenotypeBatch.ploidy_table": "\"EXAMPLE-PLACEHOLDER\"",
+    "GenotypeBatch.member_cutoffs": "this.sample_sets.cutoffs_frz",
+    "GenotypeBatch.member_median": "this.sample_sets.median_cov_frz"
+  },
+  "outputs": {
+    "GenotypeBatch.genotyped_depth_vcf": "this.genotyped_depth_vcf_new",
+    "GenotypeBatch.genotyped_pesr_vcf": "this.genotyped_pesr_vcf_new",
+    "GenotypeBatch.genotyping_rd_depth_table": "this.genotyping_rd_depth_table_new"
+  },
+  "prerequisites": {},
+  "deleteIntermediateOutputFiles": false,
+  "useCallCache": false,
+  "maxMessageSize": null
+}

@@ -1,0 +1,28 @@
+{
+  "_about": [
+    "SYNTHETIC, and named `synthetic` so nobody mistakes it for the verbatim captures beside it. The",
+    "VERBATIM womtool-84 captures in this directory are IntegrateGDVcf / BenchmarkGqFilter / ShapeProbe;",
+    "none of them describes GenotypeBatch, which is the step these legs run. This file reproduces the",
+    "SHAPE womtool-84 prints (measured, see womtool84-shapematrix.inputs.json and the header of",
+    "scripts/selftest.d/jarshape.sh): required = a bare type string, optional = a trailing",
+    "` (optional)` / ` (optional, default = ...)` marker. 12 entries carry no marker and are therefore",
+    "required, 3 carry it. It exists so check 1 has a real required set to grade against these bindings",
+    "with no jar; it is NOT evidence about what womtool says about the real GenotypeBatch WDL, and no",
+    "claim in this repo is built on it."
+  ],
+  "GenotypeBatch.batch": "String",
+  "GenotypeBatch.vcf": "File",
+  "GenotypeBatch.training_vcf": "File",
+  "GenotypeBatch.rf_cutoffs": "File",
+  "GenotypeBatch.median_coverage": "File",
+  "GenotypeBatch.rd_file": "File",
+  "GenotypeBatch.pe_file": "File",
+  "GenotypeBatch.sr_file": "File",
+  "GenotypeBatch.contig_list": "File",
+  "GenotypeBatch.reference_dict": "File",
+  "GenotypeBatch.depth_exclusion_intervals": "File",
+  "GenotypeBatch.gatk_docker": "String",
+  "GenotypeBatch.sv_base_mini_docker": "String (optional)",
+  "GenotypeBatch.ploidy_table": "File? (optional)",
+  "GenotypeBatch.runtime_attr_override": "Map[String, String]? (optional, default = {})"
+}
