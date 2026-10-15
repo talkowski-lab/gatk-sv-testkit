@@ -94,7 +94,15 @@ grants (point `dockers.json`/workspace configs at the full
 on failure the VM self-shuts-down and is kept: full builder log at
 `/var/log/gsv-build.log` on its disk, plus GCP's serial ring (~1 MB tail).
 Ctrl-C detaches the watcher only; the build continues and self-shuts-down;
-re-attach commands are also printed on failure/timeout paths. An in-VM
+re-attach commands are also printed on failure/timeout paths. That is Ctrl-C
+*while watching*: from the moment the VM exists until the poll loop takes
+cleanup over, an EXIT/INT/TERM guard stops the instance, because `die 'SSH
+never came up'`, an unguarded `gcloud compute scp` (silent under `set -e`, no
+message at all) and `die 'builder failed to start'` each used to exit with a
+brand-new e2-standard-8 and 150 GB pd-ssd **RUNNING** and only a laptop to pay
+for it. The guard prints the start-and-`tail` commands for the postmortem
+before stopping it, and stands down for `--keep-running`, which is an explicit
+request rather than an accident (`bea4a6a`). An in-VM
 watchdog additionally bounds a *hung* builder: at `--timeout + 1 h` it prints
 a FAILURE marker and powers the VM off, so no e2-standard-8 can ever idle
 unbounded after the driver gave up.
@@ -112,8 +120,21 @@ once, at the end of a fully *successful* build, so failures keep the cache
 anyway). Each run rotates the log to `/var/log/gsv-build.prev.log` so a
 stale SUCCESS marker can never false-positive the watcher, and the builder
 holds `flock /tmp/gsv-build.lock`: a concurrent second run fails fast
-instead of interleaving on the shared clone. Liveness probes read the
-builder's pidfile, and a transient ssh failure never stops a live build.
+instead of interleaving on the shared clone. It fails fast **before** any of
+that shared state is touched: the launcher checks the pidfile first and, if a
+builder is alive, prints `GSV_BUSY pid=…` plus the last lines of the running
+build and exits 1 — the log rotation and the `rm -f /tmp/gsv-build.pid` came
+*before* the lock, so a second `--persistent` invocation on a busy VM took the
+running build's log, deleted the pidfile the driver tests liveness with (and so
+made a build that was still pushing layers read as dead, which is how the next
+poll stops its VM), and then raced the first build for the shared clone. The
+refusal names the watch command instead (`bea4a6a`). Liveness
+probes read the builder's pidfile, a transient ssh failure never stops a live
+build, and **only the builder that wrote the pidfile may remove it**:
+`remote-build.sh`'s `finish()` used to clear it unconditionally, including on a
+successor the lock refused, and since liveness is `kill -0 $(cat
+/tmp/gsv-build.pid)`, a healthy build that was still pushing layers read as dead
+and the next poll stopped the VM out from under it (`d6b3c0b`).
 Persistent mode has **no in-VM watchdog**: on exit code 2 (gave up
 watching) the VM stays RUNNING and you must check/stop it yourself.
 

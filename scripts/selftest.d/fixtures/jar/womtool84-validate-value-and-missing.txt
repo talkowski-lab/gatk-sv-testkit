@@ -1,0 +1,3 @@
+Failed to evaluate input 'gd_output_tarballs' (reason 1 of 1): No coercion defined from '"${this.sample_sets.gd_output_tarball}"' of type 'spray.json.JsString' to 'Array[File]'.
+Required workflow input 'IntegrateGDVcf.contig_list' not specified
+Failed to evaluate input 'ploidy_tables' (reason 1 of 1): No coercion defined from '"${this.sample_sets.ploidy_table}"' of type 'spray.json.JsString' to 'Array[File]'.

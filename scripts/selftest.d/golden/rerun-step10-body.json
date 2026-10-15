@@ -1,0 +1,48 @@
+{
+ "namespace": "your-namespace",
+ "name": "10-GenotypeBatch-rerun",
+ "rootEntityType": "sample_set",
+ "methodRepoMethod": {
+  "sourceRepo": "dockstore",
+  "methodPath": "github.com/broadinstitute/gatk-sv/GenotypeBatch",
+  "methodVersion": "your-branch-under-test",
+  "methodUri": "dockstore://github.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch/your-branch-under-test"
+ },
+ "methodConfigVersion": 1,
+ "deleted": false,
+ "inputs": {
+  "GenotypeBatch.batch": "this.sample_set_id",
+  "GenotypeBatch.vcf": "workspace.merge_batch_sites_vcf_new",
+  "GenotypeBatch.training_vcf": "this.outlier_filtered_pesr_vcf_new",
+  "GenotypeBatch.rf_cutoffs": "this.cutoffs_new",
+  "GenotypeBatch.median_coverage": "this.median_cov_frz",
+  "GenotypeBatch.rd_file": "this.merged_bincov_frz",
+  "GenotypeBatch.pe_file": "this.merged_PE_frz",
+  "GenotypeBatch.sr_file": "this.merged_SR_frz",
+  "GenotypeBatch.reference_dict": "workspace.reference_dict",
+  "GenotypeBatch.training_intervals": "workspace.depth_training_bed",
+  "GenotypeBatch.ploidy_table": "this.ploidy_table_new",
+  "GenotypeBatch.depth_exclusion_intervals": "workspace.bin_exclude",
+  "GenotypeBatch.pesr_exclusion_intervals": "workspace.pesr_exclude_list",
+  "GenotypeBatch.contig_list": "workspace.primary_contigs_list",
+  "GenotypeBatch.gatk_docker": "\"us.gcr.io/your-dev-project/test/gatk:YOUR_TAG\"",
+  "GenotypeBatch.sv_base_mini_docker": "\"us.gcr.io/your-dev-project/test/sv-base-mini:YOUR_TAG\"",
+  "GenotypeBatch.sv_pipeline_docker": "\"us.gcr.io/your-dev-project/test/sv-pipeline:YOUR_TAG\""
+ },
+ "outputs": {
+  "GenotypeBatch.genotyped_depth_vcf": "this.genotyped_depth_vcf_new",
+  "GenotypeBatch.genotyped_depth_vcf_index": "this.genotyped_depth_vcf_index_new",
+  "GenotypeBatch.genotyped_pesr_vcf": "this.genotyped_pesr_vcf_new",
+  "GenotypeBatch.genotyped_pesr_vcf_index": "this.genotyped_pesr_vcf_index_new",
+  "GenotypeBatch.genotyping_rd_depth_table": "this.genotyping_rd_depth_table_new",
+  "GenotypeBatch.genotyping_rd_pesr_table": "this.genotyping_rd_pesr_table_new",
+  "GenotypeBatch.genotyping_pe_table": "this.genotyping_pe_table_new",
+  "GenotypeBatch.genotyping_sr_table": "this.genotyping_sr_table_new",
+  "GenotypeBatch.genotyping_sr_cutoff_diagnostics": "this.genotyping_sr_cutoff_diagnostics_new",
+  "GenotypeBatch.regeno_coverage_medians": "this.regeno_coverage_medians_new"
+ },
+ "prerequisites": {},
+ "deleteIntermediateOutputFiles": false,
+ "useCallCache": false,
+ "maxMessageSize": null
+}

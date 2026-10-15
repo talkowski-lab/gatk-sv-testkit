@@ -34,21 +34,30 @@ $18.87 and 20 wall-clock hours. `check` now compares BOTH maps against one WDL l
 the workflow does not declare is a nonzero exit there rather than a purchase. Three states that used
 to be conflated get three reports: a key the workflow does not declare, a workflow that declares no
 workflow-level outputs to bind, and a config that binds no outputs at all.
+
+`check` also reads upstream's `.json.tmpl` for each step, and a launch config template that binds the
+same key twice used to be invisible to it: `json.loads` keeps the LAST value, so the parse was right
+about what a submission binds and silent about the line above it saying something else. Each duplicate
+is now named per step (`DUPLICATE-KEY`, with the value that survived and the one that was dropped) and
+totalled once per run, non-fatal and counted. See docs/module-profiles.md §9 step 3.
 """
 from __future__ import annotations
 
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
 sys.path.insert(0, HERE)
 import config  # noqa: E402
+import module_profile  # noqa: E402  (the reader of profiles/<MODULE>.json; kit/ is on sys.path)
 import terra  # noqa: E402
 from terra import fapi  # noqa: E402  # via terra: one friendly missing-dependency message
 
@@ -78,29 +87,37 @@ def require_target(writes=False):
                                     allow="--allow-shared-target" in sys.argv)
     return NS, WS, BRANCH
 
-# Attribute suffixes: baseline inputs in, this chain's outputs out.
-FZ = "_" + config.get("FROZEN_SUFFIX", "frz")
-NW = "_" + config.get("NEW_SUFFIX", "new")
+# Attribute suffixes are read by the profile loader (`kit/module_profile.py`), which is the one place
+# that turns a profile's `{frz}`/`{new}` tokens into `_frz`/`_new`; this file used to interpolate them
+# into 100 binding strings by hand, which is the same two config keys parsed in two places.
+#
+# The INTERPOLATION moved; the NAMES did not. `FZ`/`NW` have been public attributes of this module for
+# as long as they existed, and readers still resolve them as attributes rather than re-deriving them:
+# `batch_rerun_step.announce()` classifies every binding of the step it is about to submit as a chain
+# output or a frozen input by testing its suffix against these two, and `scripts/probe_fixes.py` pins
+# that. So they are answers THIS module owes, and they are taken from the loader's own answer rather
+# than from `config.get` a second time -- one place per key is the whole reason the interpolation moved.
+_SUFFIXES = module_profile.suffixes()
+FZ = _SUFFIXES["frz"]
+NW = _SUFFIXES["new"]
 # A path, not a directory: `show` and `--help` import this module and must create nothing.
 # create() makes the directory when it actually writes.
 DUMP = str(config.work_path("manifests") / "batch_configs.json")
 
-
-# Inputs that exist only on the branch under test. Data, not prose, so `check` can distinguish
-# "known branch-only input" from "this key is news to us", and so the fix is written next to the key:
+# The three tables below are DATA, and the data now lives in `profiles/<MODULE>.json`
+# (`GSVTK_MODULE`, `GSVTK_MODULE_DIR`; docs/module-profiles.md §3). What used to sit here was 64 input
+# and 36 output bindings, the caller list, the branch-only key set, and a 12-line rationale for one of
+# those keys -- all of it a hand-copy of upstream facts, which is what §1 calls the cost of
+# transcription. That cost is paid once now, in the profile, and the rationale travels with the key it
+# explains as a `_why_*` sibling instead of being stranded here as a comment.
 #
-#   GenotypeBatch.training_vcf   from "Train PE/SR genotyping on a separate batch-level VCF". main's
-#                                GenotypeBatch declares 21 inputs (18 + 3 dockers) and trains PE/SR
-#                                from `vcf` itself; the branch declares 26, adding training_vcf,
-#                                genotype_args, training_args, n_RD_genotype_bins and
-#                                fail_on_degenerate_sr_cutoffs. This map binds only training_vcf --
-#                                the other four have WDL defaults -- so it is the single key a
-#                                main-shaped run has to drop. It was posted against a main-derived
-#                                ref and rejected as an extra input; that is what happened, and this
-#                                table is why `check` can name it instead of just failing.
-BRANCH_ONLY_INPUTS: dict[str, set[str]] = {
-    "10-GenotypeBatch": {"GenotypeBatch.training_vcf"},
-}
+# `BRANCH_ONLY_INPUTS` keeps the shape this file has always offered: a dict keyed by config name whose
+# values are sets of FULL binding keys ("GenotypeBatch.training_vcf"), so `check` can still distinguish
+# "known branch-only input" from "this key is news to us", and `--drop-branch-only-inputs` still finds
+# the same keys. The rationale for the one key this module carries is in the profile beside it.
+BRANCH_ONLY_INPUTS: dict[str, set[str]] = {}
+
+
 
 
 def dockstore(workflow: str) -> dict:
@@ -111,153 +128,39 @@ def dockstore(workflow: str) -> dict:
             "methodUri": f"dockstore://{path.replace('/', '%2F')}/{BRANCH}"}
 
 
-# --------------------------------------------------------------------------------------
-# Input maps follow inputs/templates/terra_workspaces/cohort_mode/workflow_configurations/*
-# on the branch, with frozen inputs read from *_frz and chain outputs from *_new.
-# Optional (File?) inputs with no value are simply omitted.
-# --------------------------------------------------------------------------------------
-CALLERS = ["manta", "wham", "scramble"]  # dragen/melt produced nothing in this cohort
 
-CONFIGS = {
-    "06-GenerateBatchMetrics": {
-        "workflow": "GenerateBatchMetrics",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "GenerateBatchMetrics.batch": "this.sample_set_id",
-            "GenerateBatchMetrics.pe_file": f"this.merged_PE{FZ}",
-            "GenerateBatchMetrics.sr_file": f"this.merged_SR{FZ}",
-            "GenerateBatchMetrics.baf_file": f"this.merged_BAF{FZ}",
-            "GenerateBatchMetrics.rd_file": f"this.merged_bincov{FZ}",
-            "GenerateBatchMetrics.median_file": f"this.median_cov{FZ}",
-            "GenerateBatchMetrics.ped_file": "workspace.cohort_ped_file",
-            "GenerateBatchMetrics.depth_vcf": f"this.clustered_depth_vcf{FZ}",
-            **{f"GenerateBatchMetrics.{c}_vcf": f"this.clustered_{c}_vcf{FZ}" for c in CALLERS},
-            "GenerateBatchMetrics.primary_contigs_list": "workspace.primary_contigs_list",
-            "GenerateBatchMetrics.chr_x": "workspace.chr_x",
-            "GenerateBatchMetrics.chr_y": "workspace.chr_y",
-            "GenerateBatchMetrics.rmsk": "workspace.rmsk",
-            "GenerateBatchMetrics.segdups": "workspace.segdups",
-            "GenerateBatchMetrics.reference_dict": "workspace.reference_dict",
-            "GenerateBatchMetrics.gatk_docker": "workspace.gatk_docker",
-            "GenerateBatchMetrics.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "GenerateBatchMetrics.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-        },
-        "outputs": {
-            "GenerateBatchMetrics.metrics": f"this.metrics{NW}",
-            "GenerateBatchMetrics.metrics_file_batchmetrics": f"this.metrics_file_batchmetrics{NW}",
-            "GenerateBatchMetrics.ploidy_table": f"this.ploidy_table{NW}",
-        },
-    },
-    "07-FilterBatchSites": {
-        "workflow": "FilterBatchSites",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "FilterBatchSites.batch": "this.sample_set_id",
-            "FilterBatchSites.evidence_metrics": f"this.metrics{NW}",
-            "FilterBatchSites.depth_vcf": f"this.clustered_depth_vcf{FZ}",
-            **{f"FilterBatchSites.{c}_vcf": f"this.clustered_{c}_vcf{FZ}" for c in CALLERS},
-            "FilterBatchSites.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "FilterBatchSites.N_IQR_cutoff_plotting": "6",
-        },
-        "outputs": {
-            "FilterBatchSites.sites_filtered_depth_vcf": f"this.sites_filtered_depth_vcf{NW}",
-            "FilterBatchSites.sites_filtered_manta_vcf": f"this.sites_filtered_manta_vcf{NW}",
-            "FilterBatchSites.sites_filtered_scramble_vcf": f"this.sites_filtered_scramble_vcf{NW}",
-            "FilterBatchSites.sites_filtered_wham_vcf": f"this.sites_filtered_wham_vcf{NW}",
-            "FilterBatchSites.cutoffs": f"this.cutoffs{NW}",
-            "FilterBatchSites.scores": f"this.scores{NW}",
-            "FilterBatchSites.RF_intermediate_files": f"this.RF_intermediate_files{NW}",
-            "FilterBatchSites.sites_filtered_sv_counts": f"this.sites_filtered_sv_counts{NW}",
-            "FilterBatchSites.sites_filtered_sv_count_plots": f"this.sites_filtered_sv_count_plots{NW}",
-            "FilterBatchSites.sites_filtered_outlier_samples_preview": f"this.sites_filtered_outlier_samples_preview{NW}",
-            "FilterBatchSites.sites_filtered_outlier_samples_with_reason": f"this.sites_filtered_outlier_samples_with_reason{NW}",
-            "FilterBatchSites.sites_filtered_num_outlier_samples": f"this.sites_filtered_num_outlier_samples{NW}",
-        },
-    },
-    "08-FilterBatchSamples": {
-        "workflow": "FilterBatchSamples",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "FilterBatchSamples.batch": "this.sample_set_id",
-            "FilterBatchSamples.N_IQR_cutoff": "10000",
-            "FilterBatchSamples.depth_vcf": f"this.sites_filtered_depth_vcf{NW}",
-            **{f"FilterBatchSamples.{c}_vcf": f"this.sites_filtered_{c}_vcf{NW}" for c in CALLERS},
-            "FilterBatchSamples.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "FilterBatchSamples.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "FilterBatchSamples.linux_docker": "workspace.linux_docker",
-        },
-        "outputs": {
-            "FilterBatchSamples.outlier_filtered_depth_vcf": f"this.outlier_filtered_depth_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_depth_vcf_index": f"this.outlier_filtered_depth_vcf_index{NW}",
-            "FilterBatchSamples.outlier_filtered_manta_vcf": f"this.outlier_filtered_manta_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_scramble_vcf": f"this.outlier_filtered_scramble_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_wham_vcf": f"this.outlier_filtered_wham_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_pesr_vcf": f"this.outlier_filtered_pesr_vcf{NW}",
-            "FilterBatchSamples.outlier_filtered_pesr_vcf_index": f"this.outlier_filtered_pesr_vcf_index{NW}",
-            "FilterBatchSamples.filtered_batch_samples_file": f"this.filtered_batch_samples_file{NW}",
-            "FilterBatchSamples.outlier_samples_excluded_file": f"this.outlier_samples_excluded_file{NW}",
-        },
-    },
-    "09-MergeBatchSites": {
-        "workflow": "MergeBatchSites",
-        "rootEntityType": "sample_set_set",
-        "inputs": {
-            "MergeBatchSites.cohort": "this.sample_set_set_id",
-            "MergeBatchSites.pesr_vcfs": f"this.sample_sets.outlier_filtered_pesr_vcf{NW}",
-            "MergeBatchSites.depth_vcfs": f"this.sample_sets.outlier_filtered_depth_vcf{NW}",
-            "MergeBatchSites.ploidy_tables": f"this.sample_sets.ploidy_table{NW}",
-            "MergeBatchSites.reference_fasta": "workspace.reference_fasta",
-            "MergeBatchSites.reference_fasta_fai": "workspace.reference_index",
-            "MergeBatchSites.reference_dict": "workspace.reference_dict",
-            "MergeBatchSites.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "MergeBatchSites.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            "MergeBatchSites.gatk_docker": "workspace.gatk_docker",
-        },
-        "outputs": {
-            "MergeBatchSites.merge_batch_sites_vcf": f"workspace.merge_batch_sites_vcf{NW}",
-            "MergeBatchSites.merge_batch_sites_vcf_index": f"workspace.merge_batch_sites_vcf_index{NW}",
-        },
-    },
-    "10-GenotypeBatch": {
-        "workflow": "GenotypeBatch",
-        "rootEntityType": "sample_set",
-        "inputs": {
-            "GenotypeBatch.batch": "this.sample_set_id",
-            # sites to genotype = PESR+depth merged by step 09 (production wiring);
-            # PE/SR *training* sites = this batch's own filtered PESR VCF from step 08
-            "GenotypeBatch.vcf": f"workspace.merge_batch_sites_vcf{NW}",
-            "GenotypeBatch.training_vcf": f"this.outlier_filtered_pesr_vcf{NW}",
-            "GenotypeBatch.rf_cutoffs": f"this.cutoffs{NW}",
-            "GenotypeBatch.median_coverage": f"this.median_cov{FZ}",
-            "GenotypeBatch.rd_file": f"this.merged_bincov{FZ}",
-            "GenotypeBatch.pe_file": f"this.merged_PE{FZ}",
-            "GenotypeBatch.sr_file": f"this.merged_SR{FZ}",
-            "GenotypeBatch.reference_dict": "workspace.reference_dict",
-            "GenotypeBatch.training_intervals": "workspace.depth_training_bed",
-            "GenotypeBatch.ploidy_table": f"this.ploidy_table{NW}",
-            "GenotypeBatch.depth_exclusion_intervals": "workspace.bin_exclude",
-            "GenotypeBatch.pesr_exclusion_intervals": "workspace.pesr_exclude_list",
-            "GenotypeBatch.contig_list": "workspace.primary_contigs_list",
-            "GenotypeBatch.gatk_docker": "workspace.gatk_docker",
-            "GenotypeBatch.sv_base_mini_docker": "workspace.sv_base_mini_docker",
-            "GenotypeBatch.sv_pipeline_docker": "workspace.sv_pipeline_docker",
-            # n_RD_genotype_bins (100000) and fail_on_degenerate_sr_cutoffs (true) come from
-            # the WDL defaults - the point of the branch is that these are now correct by default.
-        },
-        "outputs": {
-            "GenotypeBatch.genotyped_depth_vcf": f"this.genotyped_depth_vcf{NW}",
-            "GenotypeBatch.genotyped_depth_vcf_index": f"this.genotyped_depth_vcf_index{NW}",
-            "GenotypeBatch.genotyped_pesr_vcf": f"this.genotyped_pesr_vcf{NW}",
-            "GenotypeBatch.genotyped_pesr_vcf_index": f"this.genotyped_pesr_vcf_index{NW}",
-            "GenotypeBatch.genotyping_rd_depth_table": f"this.genotyping_rd_depth_table{NW}",
-            "GenotypeBatch.genotyping_rd_pesr_table": f"this.genotyping_rd_pesr_table{NW}",
-            "GenotypeBatch.genotyping_pe_table": f"this.genotyping_pe_table{NW}",
-            "GenotypeBatch.genotyping_sr_table": f"this.genotyping_sr_table{NW}",
-            "GenotypeBatch.genotyping_sr_cutoff_diagnostics": f"this.genotyping_sr_cutoff_diagnostics{NW}",
-            "GenotypeBatch.regeno_coverage_medians": f"this.regeno_coverage_medians{NW}",
-        },
-    },
-}
+# ---------------------------------------------------------------------------------------------
+# The maps: read from the module profile, then held as module-level dicts.
+#
+# Input maps follow inputs/templates/terra_workspaces/cohort_mode/workflow_configurations/* on the
+# branch, with frozen inputs read from the `{frz}` suffix and chain outputs from the `{new}` one --
+# both suffix tokens expand from GSVTK_FROZEN_SUFFIX / GSVTK_NEW_SUFFIX, in ONE place
+# (`kit/module_profile.py`), and `@` fans out over the profile's caller list. The profile lists the
+# keys upstream produced nothing for (dragen/melt in this cohort) rather than binding them.
+#
+# Why these are still plain dicts at module level, populated here rather than fetched per call:
+# five probes and `terra/batch_rerun_step.py` read `CONFIGS` as an attribute, and `docs/module-
+# profiles.md` §7's zero-config rule says `--help` must not depend on repo data. So the load happens
+# once, through a loader that never raises and never creates a file, and a profile that cannot be used
+# shows up as EMPTY tables plus a `PROFILE` full of findings -- which the commands that need a table
+# report with `require_module()` (exit 4, naming the file and every field). An empty `CONFIGS` is
+# therefore never a pass: `show` prints nothing, `check` refuses 0 configs, and `body()` refuses.
+PROFILE = module_profile.load()
+CONFIGS: dict = PROFILE.configs
+CALLERS: list = PROFILE.callers
+BRANCH_ONLY_INPUTS.update(PROFILE.branch_only_inputs)
+
+
+def require_module(tag: str = "") -> None:
+    """Refuse, by name and in full, when this run has no usable module profile.
+
+    Called by the commands that build or compare a config, never at import: `--help` and `--selftest`
+    answer with zero configuration, and `helpsweep` proves it. An unusable profile exits 4 naming the
+    file, what is wrong with it, and every field a working profile carries -- not a subset, because the
+    first error text here named 5 of the fields a profile needed and following it produced a file that
+    could not drive a chain (docs/module-profiles.md §6).
+    """
+    PROFILE.require(tag or "batch_configs")
 
 
 # `--drop-branch-only-inputs`: build a ref-shaped config by removing bindings the ref does not
@@ -354,6 +257,7 @@ def call_cache(tag: str = "") -> bool:
 
 
 def body(name: str) -> dict:
+    require_module("body")
     spec = CONFIGS[name]
     # dict(): spec["inputs"] IS the module-level table. Pruning without copying would delete the key
     # from CONFIGS for the rest of the process -- so `show` after one adapted `create` would report a
@@ -361,7 +265,10 @@ def body(name: str) -> dict:
     # the map it sits beside.
     inputs = _adapt_inputs(name, spec, dict(spec["inputs"]))
     return {"namespace": NS, "name": name, "rootEntityType": spec["rootEntityType"],
-            "methodRepoMethod": dockstore(spec["workflow"]),
+            # `wdl`, not `workflow`: the Dockstore path is the WDL FILE basename, and the declared
+            # workflow name is a separate fact (they differ for 12 of the 109 workflow-bearing WDLs at
+            # main -- DepthClustering/ClusterDepth, Genotype_2/Regenotype). docs/module-profiles.md §3.
+            "methodRepoMethod": dockstore(spec["wdl"]),
             # Rawls rejects the body without it (400 "missing required member
             # 'methodConfigVersion'"); the server bumps it on every overwrite.
             "methodConfigVersion": 1,
@@ -383,6 +290,7 @@ def call_cache_line() -> str:
 
 
 def show():
+    require_module("show")
     print(call_cache_line())
     for name in CONFIGS:
         b = body(name)
@@ -433,6 +341,158 @@ def _wdl_dir_from_ref(ref: str) -> str:
 class CannotCheck(Exception):
     """This one config could not be compared. Reported as a finding, never as a pass -- a checker
     that skips a workflow and still says 'clean' is the failure mode this repo keeps meeting."""
+
+
+# ------------------------------------------------------------------ template read (§9 step 3)
+# Where production says what it binds. `wdl/*.wdl` answers what an input IS; the `.json.tmpl` answers
+# which attribute or literal FEEDS it, and nothing else in the repo holds that wiring: 196 of the 473
+# bindings across the cohort templates point at an attribute whose leaf name differs from the input
+# name (`median_coverage<-this.median_cov`, `rd_file<-this.merged_bincov`).
+TEMPLATE_SUBPATH = "inputs/templates"
+TEMPLATE_PREFERRED = "terra_workspaces/cohort_mode/workflow_configurations"
+
+# The one substitution §4 of docs/module-profiles.md measured: 28 of 28 templates parse with `json.loads`
+# once the Jinja braces are neutralised to `null`. Rendered, they would need `jinja2` AND upstream's
+# `inputs/values/` bundle (their renderer skips a whole template when a referenced value is undefined and
+# defaults `ref_panel -> ref_panel_empty`), which would answer "what did that values profile bind" rather
+# than "what does this ref bind". So: neutralise, parse strictly, never render.
+JINJA_RE = re.compile(r"\{\{.*?\}\}", re.S)
+
+_TREES: dict = {}     # (ref, subpath) -> the unpacked directory, so one `git archive` per pair
+
+
+def _tree_from_ref(ref: str, subpath: str) -> str:
+    """Materialize one subdirectory of <checkout> at <ref> into a temp dir. Read-only by construction.
+
+    `_wdl_dir_from_ref()` is this with subpath `wdl`; the templates need the same discipline, because
+    the only difference between reading a ref and disturbing someone's checkout is `git archive`. It
+    cannot touch the working tree, the index or HEAD, which is the rule `scripts/fetch_wdl.py` keeps.
+    """
+    key = (ref, subpath)
+    if key in _TREES:
+        return _TREES[key]
+    ck = config.get("GATK_SV_CHECKOUT")
+    if not ck or not os.path.isdir(ck):
+        raise CannotCheck("no GSVTK_GATK_SV_CHECKOUT checkout to read it from")
+    tmp = tempfile.mkdtemp(prefix="gsvtk-tree-")
+    atexit.register(shutil.rmtree, tmp, True)
+    r = subprocess.run(["git", "-C", ck, "archive", ref, subpath], capture_output=True)
+    if r.returncode:
+        why = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        raise CannotCheck(f"git -C {ck} archive {ref} {subpath}: {(why or ['?'])[:1][0]}")
+    if subprocess.run(["tar", "-x", "-C", tmp], input=r.stdout).returncode:
+        raise CannotCheck(f"failed to unpack {subpath} from git archive")
+    _TREES[key] = os.path.join(tmp, subpath.split("/")[0])
+    return _TREES[key]
+
+
+def find_template(tmpl_dir: str, workflow: str) -> str:
+    """The `.json.tmpl` for one workflow, preferring the cohort deployment.
+
+    Upstream keeps several templates per workflow name (`cohort_mode/workflow_configurations/`,
+    `test/<W>/`, `single_sample/`), and the cohort one is what the chain in this repo runs. Preferring
+    it is a lookup rule, not a guess: the path is printed with the verdict, so "which file did you
+    read" is answerable from the output rather than from this function's source.
+    """
+    if not tmpl_dir:
+        return ""
+    want = f"{workflow}.json.tmpl"
+    hits = sorted(p for p in Path(tmpl_dir).rglob(want))
+    if not hits:
+        return ""
+    pref = [p for p in hits if TEMPLATE_PREFERRED in str(p.relative_to(tmpl_dir)).replace(os.sep, "/")]
+    return str((pref or hits)[0])
+
+
+def _dup_key_hook(pairs: list, dups: list) -> dict:
+    """`object_pairs_hook` that NAMES a key bound more than once instead of letting `dict` drop it.
+
+    `dict(pairs)` is `json.loads`' own last-wins rule and this does not fight it: the document that
+    reaches a submission still binds the LAST value. What used to be lost was the FACT. A template that
+    binds `X.mei_bed` twice is one document whose two lines disagree, and every reader that PARSES
+    rather than greps sees one binding -- so `check` printed "16 key(s) bound by production" and a
+    value for that key, and nothing on the page said the file says something else on an earlier line.
+    `checks/terra_entity_check.py::read_config` records the same thing on the corpus side (its
+    `keep_pairs`, printed as `dupkeys=`), and
+    `scripts/selftest.d/profiles.sh` runs BOTH readers over one file rather than trusting this comment,
+    because a rule two files implement separately is two rules until a leg says otherwise.
+
+    The name recorded is the name the pair list carries. Inside a nested object
+    (`runtime_override_*: {"mem_gb": ...}`) that is the leaf and not a dotted path, because a pair hook
+    never sees its own parent: stated in the census, not papered over by inventing a path nobody wrote.
+    """
+    names = [k for k, _ in pairs]
+    for k in names:
+        if names.count(k) > 1 and k not in [d["key"] for d in dups]:
+            vals = [v for kk, v in pairs if kk == k]
+            dups.append({"key": k, "count": len(vals), "kept": vals[-1], "dropped": vals[:-1]})
+    return dict(pairs)
+
+
+def _tpl_value(value) -> str:
+    """One template value as honestly as this file can say it: a neutralised `{{ ... }}` is None."""
+    return "a Jinja value, unread without rendering" if value is None else repr(value)
+
+
+def read_template(path: str) -> dict:
+    """One template read STRUCTURALLY: {state, keys, neutralised, dupkeys, error}.
+
+    `state` is what `check` prints per step: DERIVED (strict parse, no Jinja), JINJA-NEUTRALISED (the
+    braces were replaced by `null` first, and the count of them is stated), NO TEMPLATE (no such file at
+    this ref), CANNOT PARSE (a strict `json.loads` refused it after the one substitution -- a finding
+    about the document, not a licence to say nothing).
+
+    `keys` maps each top-level binding to its value as read, and a value that was Jinja becomes None --
+    which is honest: neutralising is lossy about the VALUE, and this file never pretends to render.
+    Keys are counted, never scraped with a regex: `_declared_inputs()` refuses regex for a documented
+    reason (a nested object like `runtime_override_plot_qc_per_family: {"mem_gb": 15}` was once
+    miscounted that way, 12 reported where the template binds 10), and this is the same class of
+    document.
+
+    `dupkeys` is what that careful counting used to swallow: `["{key, count, kept, dropped}"]` for
+    every key the document binds more than once, in document order, `kept` being the value `json.loads`
+    survived on (the LAST) and `dropped` the earlier ones. Empty list means every key is bound once in
+    every document this read -- a real zero, from the same hook that produced the nonzeros.
+    """
+    if not path:
+        return {"state": "NO TEMPLATE", "keys": {}, "neutralised": 0, "dupkeys": [], "error": ""}
+    try:
+        text = open(path).read()
+    except OSError as e:
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": 0, "dupkeys": [], "error": str(e)}
+    n = len(JINJA_RE.findall(text))
+    dups: list = []
+
+    def hook(pairs):
+        return _dup_key_hook(pairs, dups)
+
+    try:
+        obj = json.loads(JINJA_RE.sub("null", text), object_pairs_hook=hook)
+    except ValueError as e:
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": n, "dupkeys": [], "error": str(e)}
+    if not isinstance(obj, dict):
+        return {"state": "CANNOT PARSE", "keys": {}, "neutralised": n, "dupkeys": [],
+                "error": f"top level is a {type(obj).__name__}"}
+    keys = {str(k): v for k, v in obj.items()}
+    return {"state": "JINJA-NEUTRALISED" if n else "DERIVED", "keys": keys,
+            "neutralised": n, "dupkeys": dups, "error": ""}
+
+
+def templates_for_ref(ref: str) -> str:
+    """The templates tree at `ref`, or '' when this command has no readable ref to read one from.
+
+    '' is a stated state, not a silent one: `check --wdl-dir <dir>` points at a dirty tree with no ref
+    at all, so the per-step line prints NO TEMPLATE with the reason. A source that could not be read is
+    never reported as a comparison that passed.
+    """
+    if not ref:
+        return ""
+    try:
+        return _tree_from_ref(ref, TEMPLATE_SUBPATH)
+    except CannotCheck as e:
+        print(f"  templates NOT READ: {e} -- the optional-bound-upstream finding cannot run, so "
+              f"'nothing to report' below is about the WDL only")
+        return ""
 
 
 # Which ref a config's bindings should be compared to. Empty means GSVTK_BRANCH. Set it when the
@@ -676,6 +736,114 @@ def _classify_outputs(config_out: dict, declared_out: list[str], has_block: bool
             "problems": len(undeclared) + (1 if empty_config else 0)}
 
 
+def _report_template(tmpl_dir: str, workflow: str, tpl: dict, omitted: list, label: str) -> None:
+    """The template verdict for one step, and the one finding class only the template can give.
+
+    Four states, four sentences, because they mean different remedies: DERIVED and JINJA-NEUTRALISED are
+    both a successful read (the second says values were replaced by `null`, so the KEYS are known and the
+    VALUES are not); NO TEMPLATE says upstream ships nothing for this workflow at this ref; CANNOT PARSE
+    says the document refused the strict parse after the one substitution. None of them is a pass, and
+    none of them is a failure of this config.
+
+    `optional-bound-upstream-but-omitted` is the finding `check_maps` could not see before the templates
+    were read at all: an input the WDL makes OPTIONAL, that production PINS, and that this profile leaves
+    to the WDL default. Nothing else distinguishes "optional, deliberately default" from "optional,
+    forgotten" -- miniwdl is silent about who supplies an optional input, and `validate()` prints
+    `missingInputs` without failing. NON-FATAL by design: for genotyping the answer is recorded in the
+    profile (`_why_unbound` in `profiles/genotyping.json` says `n_RD_genotype_bins` and
+    `fail_on_degenerate_sr_cutoffs` come from the WDL defaults on purpose), and a non-fatal named line is
+    what makes that deliberate choice visible to the next module's author instead of invisible.
+
+    `DUPLICATE-KEY` is the other thing only the template can give, and it is a state of the DOCUMENT
+    rather than of the maps: a key bound twice is one binding to every parser (`json.loads` keeps the
+    LAST) and two lines to whoever reads the file. `read_template` records both sides and this prints
+    them; the run-level total is `_report_dupkey_census`. NON-FATAL for the measured reason, not the
+    polite one: upstream's own templates at `e1909d2f` carry three (`docs/module-profiles.md` §9 step 3),
+    so a fatal version of this would refuse a launch on documents that launch fine today.
+    """
+    where = (os.path.relpath(find_template(tmpl_dir, workflow), tmpl_dir)
+             if tmpl_dir and find_template(tmpl_dir, workflow) else "")
+    if tpl["state"] == "NOT READ":
+        print(f"      TEMPLATE NOT READ  {tpl['error']} -- the production binding map was not "
+              f"compared, so\n        nothing above is evidence about which inputs production pins.")
+        return
+    if tpl["state"] == "NO TEMPLATE":
+        print(f"      NO TEMPLATE   no {workflow}.json.tmpl under {TEMPLATE_SUBPATH} at {label}.")
+        print("        Upstream may bind this workflow elsewhere (test/, single_sample/) or not at all;\n"
+              "        either way the optional-omitted finding had no source, so its absence means nothing.")
+        return
+    extra = (f"; {tpl['neutralised']} value(s) were {{{{ ... }}}} and are read as null, so the KEYS are\n"
+             f"        known and those VALUES are not -- rendering is a different, bundle-dependent thing") \
+        if tpl["neutralised"] else ""
+    if tpl["state"] == "CANNOT PARSE":
+        print(f"      TEMPLATE CANNOT PARSE  {where}: {tpl['error']}\n"
+              "        after the one substitution, so nothing was derived from it. Not counted as a\n"
+              "        problem with this config: it is a finding about that document.")
+        return
+    print(f"      TEMPLATE {tpl['state']:<16} {where}  -- {len(tpl['keys'])} key(s) bound by "
+          f"production at {label}{extra}")
+    for d in tpl["dupkeys"]:
+        dropped = ", ".join(_tpl_value(v) for v in d["dropped"])
+        print(f"      DUPLICATE-KEY  {d['key']} -- bound {d['count']} time(s) in {where}; `json.loads` "
+              f"keeps the\n        LAST value, so what production binds is {_tpl_value(d['kept'])} and "
+              f"the {len(d['dropped'])}\n        earlier binding(s) ({dropped}) are dropped silently. "
+              f"NON-FATAL, and not a defect in THIS\n        map: it is a fact about that document -- "
+              f"but the value a submission gets is the one\n        nobody reads first, and `show` prints "
+              f"neither side. `checks/terra_entity_check.py`\n        names the same key as `dupkeys=` "
+              f"(one rule, two readers: docs/module-profiles.md §9 step 3).")
+    for k in omitted:
+        v = tpl["keys"][k]
+        print(f"      optional-bound-upstream-but-omitted  {k} -- upstream's template binds it"
+              + (f" to {v!r}" if v is not None else " (a Jinja value, unread without rendering)")
+              + f",\n        {workflow} declares it optional, and this profile binds nothing, so the WDL "
+              f"default wins.\n        NON-FATAL, and for this module deliberate: see `_why_unbound` in "
+              f"the profile. For a new\n        module it is the case §4 of docs/module-profiles.md names "
+              f"-- an optional input nobody\n        asks about is exactly how a default becomes "
+              f"production behaviour.")
+
+
+TEMPLATE_STATES_READ = ("DERIVED", "JINJA-NEUTRALISED")
+
+
+def _report_dupkey_census(templates: list) -> None:
+    """One census for the whole run, on every arm -- including the arm where nothing was read.
+
+    Three states, three sentences, because they mean different things to the reader: NOT RUN (no config
+    reached its template block, so there was no document to ask), NOT READ (a block ran and every
+    template in it was absent, unreadable or unread -- the last-wins question was never asked), and the
+    count. Printing only the nonzero arm would leave a reader to tell "0 duplicates" from "0 templates",
+    which is the conflation `check` has been rewritten repeatedly to remove.
+
+    The count is keys, not bindings, and is stated beside the number of TEMPLATES that carry one, so `1
+    key in 1 of 5` cannot be read as `1 of 5 documents are broken`. `dropped` is the separate total of
+    bindings last-wins swallowed: two numbers, because one duplicate bound three times drops two values.
+    """
+    if not templates:
+        print("check: template duplicate-key census: NOT RUN -- no config reached its template block, so\n"
+              "       no document was asked. Not 0 found.")
+        return
+    read = [t for t in templates if t["state"] in TEMPLATE_STATES_READ]
+    absent = sum(1 for t in templates if t["state"] == "NO TEMPLATE")
+    broken = sum(1 for t in templates if t["state"] == "CANNOT PARSE")
+    unread = sum(1 for t in templates if t["state"] == "NOT READ")
+    if not read:
+        print(f"check: template duplicate-key census: NOT READ -- {len(templates)} template block(s) ran "
+              f"and\n       none was readable ({absent} absent, {broken} unreadable, {unread} with no "
+              f"source to read\n       at). The last-wins question was never asked of any document, so a "
+              f"clean exit says nothing\n       about duplicate keys here. Not reported as 0 found.")
+        return
+    keys = sum(len(t["dupkeys"]) for t in read)
+    hits = sum(1 for t in read if t["dupkeys"])
+    dropped = sum(len(d["dropped"]) for t in read for d in t["dupkeys"])
+    print(f"check: template duplicate-key census: {keys} key(s) bound more than once in {hits} of "
+          f"{len(read)}\n       template(s) read ({dropped} binding(s) dropped by last-wins; {absent} "
+          f"template(s) absent,\n       {broken} unreadable, {unread} with no source to read at). "
+          f"NON-FATAL by design: this\n       command's exit code is about these maps vs the WDL, and a "
+          f"duplicate is a fact about\n       upstream's document; each one is named above with BOTH "
+          f"values. A duplicate inside a\n       nested object is named by its LEAF, not its path: that "
+          f"is all an\n       `object_pairs_hook` can see, and a path here would be a guess.")
+
+
 def _report_outputs(name: str, workflow: str, declared_out: list[str], g: dict) -> None:
     """The verdict per output key, and one sentence per empty state. `_classify_outputs` decided."""
     if g["empty_config"]:
@@ -727,7 +895,8 @@ def _report_outputs(name: str, workflow: str, declared_out: list[str], g: dict) 
               "(`show` prints what would be POSTed).")
 
 
-def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: str = "") -> int:
+def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: str = "",
+               tmpl_dir: str = "") -> int:
     """Every top-level bound key of BOTH maps vs what that ref declares; every required input vs what is bound.
 
     Call-site bindings (`Workflow.Call.input`) are counted and named but NOT compared: this reads the
@@ -752,11 +921,18 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
     `ref` is only a label, but the label is the claim: `check --against <a>` grades `<a>`, while
     `create`/`validate` grade the ref their own config runs (`_posted_ref`). Both print it, so
     "graded" never silently means "graded against something other than what you asked for".
+
+    Every template this run reached is also asked one question that has nothing to do with the WDL: does
+    it bind a key twice (`read_template`'s `dupkeys`). Those are printed per step and totalled once by
+    `_report_dupkey_census`, on both exit paths, because a guard whose only output is a nonzero exit
+    cannot distinguish "clean" from "never asked".
     """
     bad = 0
     ncomp = 0
+    tpl_reads: list = []      # one tpl dict per config that reached its template block, for the census
     label = ref or _verify_ref() or "the ref under test"
-    for tgt in configs_to_check(only):
+    targets = configs_to_check(only)
+    for tgt in targets:
         name, workflow = tgt["name"], tgt["workflow"]
         try:
             declared, required = _declared_inputs(wdl_dir, workflow)
@@ -797,6 +973,14 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
                 bound.pop(key.split(".")[-1], None)
         unknown = [k for k in sorted(bound) if k not in declared]
         unbound = sorted(k for k in required if k not in bound)
+        # The template side (§9 step 3): what production binds, read structurally at the same ref.
+        tpl = read_template(find_template(tmpl_dir, workflow)) if tmpl_dir else \
+            {"state": "NOT READ", "keys": {}, "neutralised": 0, "dupkeys": [], "error": "no ref to read at"}
+        tpl_reads.append(tpl)
+        bound_here = set(tgt["inputs"]) | {f"{workflow}.{k}" for k in bound}
+        omitted = sorted(k for k in tpl["keys"]
+                         if k.split(".")[-1] in declared and k.split(".")[-1] not in required
+                         and k not in bound_here and f"{workflow}.{k.split('.')[-1]}" not in bound_here)
         # One line per config, both maps on it: the reader sees in one place that the output side was
         # compared too, how many keys each side had, and which file a JSON config came from.
         summary = (f"{len(bound)} bound vs {len(declared)} declared"
@@ -805,6 +989,9 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
                    + f"  |  {len(g['bound'])} out vs {len(declared_out)} declared"
                    + (f", {len(g['unsaved'])} declared but unbound (not saved; not a defect)"
                       if g["unsaved"] else "")
+                   + (f"  |  template {tpl['state'].replace(' ', '-').lower()}"
+                      f" ({len(tpl['keys'])} key(s) bound upstream)" if tpl["keys"] else
+                      f"  |  template {tpl['state'].lower()}")
                    + ("" if tgt["origin"] == "CONFIGS" else f"   [{tgt['origin']}]")
                    )
         print(f"  {'BAD' if unknown or unbound or g['problems'] else 'ok '} {name:<24} {summary}")
@@ -841,10 +1028,12 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
             bad += 1
             print(f"      MISSING {workflow}.{k} -- required by the WDL, bound by nothing, "
                   f"no default to fall back on")
+        _report_template(tmpl_dir, workflow, tpl, omitted, label)
         # The outputs map, after the input findings, so one config's report is one block. Its
         # problems are counted with everything else; the header already showed the verdict.
         _report_outputs(name, workflow, declared_out, g)
         bad += g["problems"]
+    _report_dupkey_census(tpl_reads)
     if bad:
         print(f"check: {bad} problem(s) across {ncomp} config(s) compared. Either the ref is not the "
               f"one these maps\nwere written against or the maps are stale. `validate` asks Terra the "
@@ -862,6 +1051,7 @@ def check_maps(wdl_dir: str, only: str | None = None, drop: bool = False, ref: s
 
 
 def cmd_check() -> int:
+    require_module("check")
     ref = _flag_value("--against") or BRANCH
     wd = _flag_value("--wdl-dir")
     if not wd:
@@ -874,7 +1064,12 @@ def cmd_check() -> int:
             # A ref you cannot read is not a ref that fits: say what failed, and do not exit 0.
             raise SystemExit(f"cannot read the WDL at {ref}: {e}") from None
         print(f"WDL read from {config.get('GATK_SV_CHECKOUT')} @ {ref}")
-    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv, ref=ref)
+    # --tmpl-dir is the template side of `--wdl-dir`: a dirty tree has no ref to archive, so the bytes
+    # you want compared are the ones on disk. Both point at a directory, and both are stated on the
+    # per-step line, so "which document did you read" is never a guess.
+    td = _flag_value("--tmpl-dir") or ("" if _flag_value("--wdl-dir") else templates_for_ref(ref))
+    return check_maps(wd, only=_flag_value("--config"), drop=DROP_FLAG in sys.argv, ref=ref,
+                      tmpl_dir=td)
 
 
 def preflight(tag: str) -> None:
@@ -907,12 +1102,13 @@ def preflight(tag: str) -> None:
         raise SystemExit(f"{tag}: refusing to continue -- cannot read the WDL at {ref}: {e}.\n"
                          f"  Unverified is not verified. Fix the ref/checkout, or say you mean it "
                          f"with --allow-unknown-inputs.") from None
-    if check_maps(wd, drop=DROP_FLAG in sys.argv, ref=ref):
+    if check_maps(wd, drop=DROP_FLAG in sys.argv, ref=ref, tmpl_dir=templates_for_ref(ref)):
         raise SystemExit(f"{tag}: refusing to continue -- these maps do not fit the WDL at {ref}.\n"
                          f"  Fix the ref, fix the map, or say you mean it with --allow-unknown-inputs.")
 
 
 def create():
+    require_module("create")
     preflight("create")                    # offline: a config Terra will reject must not be POSTed
     print(call_cache_line())               # the mode that is about to be POSTed, not the default
     out = {}
@@ -935,6 +1131,7 @@ def validate():
     """Terra resolves the Dockstore WDL and reports per-input binding: the cheapest real gate
     before spending money. Response shape is extraInputs / invalidInputs / invalidOutputs /
     missingInputs / validInputs - there is no boolean 'valid' key."""
+    require_module("validate")
     preflight("validate")                  # free + offline first; this step costs a round-trip each
     bad = 0
     for name in CONFIGS:
@@ -964,7 +1161,7 @@ def validate():
 # Flags that CONSUME the next token. `show` used to be found by "every argument that does not start
 # with -", which meant `check --against main` was reported as two modes -- and the fix for that must
 # not be to accept any stray positional, because `create foo` should still be a usage error.
-VALUE_FLAGS = ("--against", "--wdl-dir", "--config")
+VALUE_FLAGS = ("--against", "--wdl-dir", "--tmpl-dir", "--config")
 
 
 def positional(argv: list[str]) -> list[str]:
@@ -1238,6 +1435,10 @@ def usage(code=0):
               scored -- those keys are unverified, not wrong, and are not enumerated as
               findings). 3-segment keys are call-level wiring: disclosed UNCHECKED, not
               compared, not a finding.
+              --tmpl-dir <dir> reads the production `.json.tmpl` files from a directory instead of
+              `git archive`-ing inputs/templates at the ref -- the template side of --wdl-dir, for a
+              dirty tree and for fixtures. Without either, no template is read and the command says
+              TEMPLATE NOT READ per step rather than implying it compared production's bindings.
               --config takes any of the five shipped names OR a path to a method-config
               JSON (the body create POSTs / Terra returns); which workflow to read comes
               from that config's own methodRepoMethod. A name that is neither is a refusal

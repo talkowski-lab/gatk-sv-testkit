@@ -435,6 +435,26 @@ fi
 $DRY_RUN && exit 0
 
 say "Waiting for SSH on '$INSTANCE'"
+# The VM now exists (created or started above), and until the poll loop takes over at the DISARM
+# line below, NOTHING stopped it. `die "SSH never came up"`, either unguarded `gcloud compute scp`
+# (silent under set -e, no message at all), and `die "builder failed to start"` each exited with a
+# brand-new VM RUNNING and only a laptop to pay for it. `--keep-running` is still respected: that is
+# an explicit request, this is an accident.
+GUARD_ARMED=1
+prebuild_guard() {
+    [ "${GUARD_ARMED:-0}" = 1 ] || return 0
+    if [ "$KEEP_RUNNING" = true ]; then
+        warn "build did not start, but $INSTANCE stays up because --keep-running asked for that"
+        return 0
+    fi
+    warn "build never reached its poll loop — stopping $INSTANCE so a failed launch cannot bill"
+    warn "postmortem: gcloud compute instances start $INSTANCE --project $PROJECT --zone $ZONE"
+    warn "           gcloud compute ssh $INSTANCE --project $PROJECT --zone $ZONE --command 'tail -200 /var/log/gsv-build.log'"
+    stop_vm
+}
+trap prebuild_guard EXIT
+trap 'prebuild_guard; exit 130' INT TERM
+
 ssh_ready=false
 for i in $(seq 1 30); do
     st="$(vm_status)"
@@ -450,7 +470,7 @@ ssh_cmd() { gcloud compute ssh "$INSTANCE" --project "$PROJECT" --zone "$ZONE" -
 
 say "Copying builder + launcher; launching the build DETACHED (laptop sleep / VPN blips cannot kill it)"
 LAUNCH_FILE="$(mktemp "${TMPDIR:-/tmp}/gsv-launch-XXXXXX")"
-trap 'rm -f "$LAUNCH_FILE"' EXIT
+trap 'rm -f "$LAUNCH_FILE"; prebuild_guard' EXIT
 {
     echo '#!/bin/bash'
     echo 'set -u'
@@ -458,6 +478,8 @@ trap 'rm -f "$LAUNCH_FILE"' EXIT
     # still sit in an old log; a poll starting at line 1 would false-positive
     # it and stop the VM mid-build. Rotate the log and drop any stale lock /
     # pidfile before launching.
+    echo 'p=$(cat /tmp/gsv-build.pid 2>/dev/null || true)'
+    echo 'if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "GSV_BUSY pid=$p"; tail -n 3 /var/log/gsv-build.log 2>/dev/null || true; exit 1; fi'
     echo 'mv -f /var/log/gsv-build.log /var/log/gsv-build.prev.log 2>/dev/null || true'
     echo 'rm -f /tmp/gsv-build.pid'
     # NB: never rm the .lock file here — deleting it while another builder
@@ -473,9 +495,15 @@ gcloud compute scp "$LAUNCH_FILE" "$INSTANCE:/tmp/gsv-launch.sh" --project "$PRO
 launch_out="$(ssh_cmd "sudo bash /tmp/gsv-launch.sh" || true)"
 case "$launch_out" in
     *GSV_LAUNCHED*) ;;
+    # A live builder on a shared persistent VM is not a failure to fix by launching anyway: two
+    # builds on one checkout push the wrong image to a shared registry.
+    *GSV_BUSY*) printf '%s\n' "$launch_out"; die "a build is already running on $INSTANCE (its pid is alive). Watch it instead of starting a second: gcloud compute ssh $INSTANCE --project $PROJECT --zone $ZONE --command 'tail -f /var/log/gsv-build.log'" ;;
     *) printf '%s\n' "$launch_out"; die "builder failed to start on $INSTANCE (tail output above)" ;;
 esac
 
+# The poll loop owns cleanup from here on (its rc branches stop the VM), so the pre-build guard is
+# disarmed rather than left to stop the box the build is using.
+GUARD_ARMED=0
 rc=2; seen=0; misses=0; deadline=$(( $(date +%s) + TIMEOUT_H * 3600 ))
 # Liveness = the builder's own pidfile (written after it takes the flock),
 # not `pgrep -f`, which would also match the probe command line itself.

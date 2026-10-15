@@ -70,7 +70,34 @@ INTERPRETERS = ("python", "python3", "bash", "sh", "zsh", "$GSVTK_PYTHON", "$PY"
 # Scripts whose `--help` is not a usage printer. `scripts/selftest.sh` takes no arguments at all: it
 # IS the gate, so asking it for help RAN the whole suite — 5 minutes of recursive gate inside the gate,
 # found by timing the scan at 5m. Probing such a tool is not grading it, so it is named instead.
+#
+# That set was ONE literal name, and the comment above recorded the hazard having been found once
+# already, so the same class came back through the door the comment did not close. Every file under
+# scripts/selftest.d/ is the same shape of script: a gate phase that reads `$1` as an interpreter and
+# FALLS BACK SILENTLY when `$1` is not executable. So the documented
+# `bash scripts/selftest.d/womtool.sh python3` (docs/plan-launch-any-module.md:188) handed `--help` to
+# a phase, the phase could not exec it as an interpreter, and carried on with its own default: a full
+# phase run inside `make check`. The 25 s timeout does not bound that either — after the kill,
+# communicate() is called again with NO timeout while the phase's python/java grandchildren still hold
+# the capture pipe's write end. So the directory is a harness by shape, not a name to remember.
 HARNESS = {"scripts/selftest.sh"}
+HARNESS_DIRS = ("scripts/selftest.d/",)
+
+
+def is_harness(rel: str) -> bool:
+    """True when `--help` would RUN the tool rather than describe it. Graded by shape, not by name."""
+    return rel in HARNESS or rel.startswith(HARNESS_DIRS)
+
+
+# How many tools this repo cannot grade, and the ceiling the gate fails above. See the verdict in
+# main() for why a ceiling rather than zero, and what it costs to move it.
+#
+# Measured on this box at 6aa94af with `scripts/check_doc_flags.py` run over README.md + docs/*.md:
+# **11 tools ungradable** — the 9 gate phases in scripts/selftest.d/, scripts/selftest.sh, and
+# scripts/check_artifacts.py (`--help` is a real run there, exit 2). Before the harness-by-shape fix
+# the same run printed 4, because the other 9 phases had been EXECUTED as `--help` probes and their
+# tallies mistaken for usage text.
+UNGRADABLE_CEILING = 11
 
 
 def command_tool(span: str) -> str:
@@ -121,12 +148,17 @@ def resolve(rel: str) -> str:
 def help_text(tool_rel: str, run=subprocess.run) -> tuple:
     """(text, error). Runs `tool --help` with the interpreter its extension asks for."""
     abs_tool = os.path.join(GIT_ROOT, tool_rel)
-    if tool_rel in HARNESS:
-        return "", "is a harness, not a CLI: `--help` would run it rather than describe it"
+    if is_harness(tool_rel):
+        return "", ("is a harness, not a CLI: `--help` would run it rather than describe it "
+                    "(scripts/selftest.sh and every scripts/selftest.d/ phase take $1 as an "
+                    "interpreter and fall back when it is not executable)")
     argv = [sys.executable, abs_tool] if tool_rel.endswith(".py") else (
         ["bash", abs_tool] if tool_rel.endswith(".sh") else [abs_tool])
     try:
-        r = run(list(argv) + ["--help"], cwd=GIT_ROOT, capture_output=True, text=True, timeout=25)
+        # stdin=DEVNULL: a tool that reads stdin sees EOF at once instead of the gate's own stdin, on
+        # which `make test` may be waiting. A probe that blocks there is not bounded by timeout=25.
+        r = run(list(argv) + ["--help"], cwd=GIT_ROOT, capture_output=True, text=True, timeout=25,
+                stdin=subprocess.DEVNULL)
     except Exception as exc:
         return "", f"{type(exc).__name__}: {str(exc)[:120]}"
     if r.returncode != 0:
@@ -137,9 +169,12 @@ def help_text(tool_rel: str, run=subprocess.run) -> tuple:
 def check_file(path: str, run=subprocess.run, cache=None) -> list:
     """Problems as (kind, doc, command, detail). Never silently drops a file it cannot grade."""
     problems = []
-    # One --help per tool for the WHOLE run, not per file: with a per-file cache the 13 graded files
-    # re-spawned ~40 interpreter-starting subprocesses each, which added minutes to the gate. Hoisting
-    # it is also why this can live in `make test` at all.
+    # One --help per tool for the WHOLE run, not per file: the graded files otherwise re-spawn an
+    # interpreter-starting subprocess for every tool each of them names, which is minutes in the gate
+    # and is why this checker can live in `make test` at all. So the CALLER's cache is kept, and the
+    # hoisted cache is what main() passes. The line that used to sit two lines below this one said
+    # "hoisted" and then did `cache = {}`, re-emptying it on every file — a comment describing code
+    # that was not there. Its positive control counts the probes, not the wall clock.
     cache = {} if cache is None else cache
     try:
         with open(path) as fh:
@@ -147,7 +182,6 @@ def check_file(path: str, run=subprocess.run, cache=None) -> list:
     except OSError as exc:
         return [("unreadable", path, "", str(exc))]
     rel_doc = os.path.relpath(path, GIT_ROOT)
-    cache = {}
     for span in code_spans(text):
         tool = command_tool(span)
         if not tool:
@@ -159,10 +193,22 @@ def check_file(path: str, run=subprocess.run, cache=None) -> list:
                 problems.append(("missing-tool", rel_doc, span.strip()[:100],
                                  f"{tool} does not exist"))
             continue                          # a bare name in prose is not a repo command
-        if tool.startswith("./") and not os.access(os.path.join(GIT_ROOT, rel), os.X_OK):
-            problems.append(("no-exec-bit", rel_doc, span.strip()[:100],
-                             f"{rel} is not executable, so `./{rel}` cannot run as written "
-                             "(tracked mode is what a clean checkout gets)"))
+        if tool.startswith("./"):
+            # THE TRACKED MODE is what a clean checkout gets. `os.access(..., X_OK)` grades this
+            # machine's working tree: with core.fileMode=false a documented `./terra/batch_peek.py`
+            # tracked 100644 passes here and dies on a clone — the exact defect this file's header
+            # describes. An UNtracked file has no mode in git, so the local bit is the only evidence.
+            mode = tracked_mode(rel)
+            if mode:
+                runnable = mode.endswith("755") or mode.endswith("754") or mode.endswith("750")
+                why = f"{rel} is tracked mode {mode}"
+            else:
+                runnable = os.access(os.path.join(GIT_ROOT, rel), os.X_OK)
+                why = f"{rel} is not tracked and has no exec bit here"
+            if not runnable:
+                problems.append(("no-exec-bit", rel_doc, span.strip()[:100],
+                                 f"{why}, so `./{rel}` cannot run as written "
+                                 "(git update-index --chmod=+x <path> is the cure)"))
         if rel not in cache:
             cache[rel] = help_text(rel, run=run)
         htext, herr = cache[rel]
@@ -264,6 +310,201 @@ def selftest() -> int:
         ck("and the real repo's harness is in that set", "scripts/selftest.sh" in HARNESS)
         ck("fenced blocks are graded too, not only inline spans",
            "unknown-flag" in kinds("```bash\n./good.py --bogus\n```"))
+
+        # ---- the --help CACHE is the caller's, not the file's -------------------------------------
+        # The bug was a `cache = {}` two lines after the caller's cache was honoured, under a comment
+        # claiming the cache was hoisted. The control counts PROBES, because a wall clock is not
+        # evidence: grading the same tool from two docs must start ONE interpreter, not two.
+        probes = []
+
+        def probe_run(argv, **kw):
+            probes.append(list(argv))
+            return subprocess.CompletedProcess(list(argv), 0, "usage: --tail N\n", "")
+
+        def grade_with_probe_counter(bodies):
+            """Grade one doc per body, all through ONE cache, counting every --help actually run."""
+            import check_doc_flags as cdf
+            old = cdf.GIT_ROOT
+            cdf.GIT_ROOT = d
+            try:
+                seen = {}
+                for i, body in enumerate(bodies):
+                    with open(os.path.join(d, "doc%d.md" % i), "w") as fh:
+                        fh.write(body)
+                    seen[i] = cdf.check_file(os.path.join(d, "doc%d.md" % i), run=probe_run,
+                                             cache=seen_cache)
+                return seen
+            finally:
+                cdf.GIT_ROOT = old
+
+        seen_cache = {}
+        grade_with_probe_counter(["Run `./good.py --tail 3`", "And again: `./good.py --tail 3`"])
+        ck("CONTROL: the same tool named by TWO docs costs ONE --help probe, not two (the hoisted "
+           "cache survived the file loop; a `cache = {}` inside it re-spawned every probe)",
+           len(probes) == 1, f"{len(probes)} probe(s) for 2 docs")
+        probes[:] = []
+        seen_cache.clear()
+        grade_with_probe_counter(["Run `./good.py --tail 3`", "Run `./fails.py --tail 3`"])
+        ck("and two DIFFERENT tools still cost two probes — the cache is keyed by tool, not a switch "
+           "that turns probing off",
+           len(probes) == 2, f"{len(probes)} probe(s)")
+
+        # ---- a documented GATE PHASE is named ungradable and never executed ------------------------
+        # Every scripts/selftest.d/ phase takes $1 as an interpreter and falls back when it is not
+        # executable, so `bash scripts/selftest.d/womtool.sh python3` (docs/plan-launch-any-module.md)
+        # handed `--help` to a phase and RAN THE PHASE inside `make check`. The control grades a
+        # fixture span against the REAL tree and requires: one `no-help` problem, and not one probe.
+        def grade_real_tree(body):
+            """Grade fixture prose against the REAL repo tree: GIT_ROOT is unpatched here, and the
+            phase files being graded are real files that only the real tree has."""
+            probes[:] = []
+            with open(os.path.join(d, "phase-doc.md"), "w") as fh:
+                fh.write(body)
+            return cdf.check_file(os.path.join(d, "phase-doc.md"), run=probe_run)
+
+        got_phase = grade_real_tree("Run `bash scripts/selftest.d/womtool.sh python3` now")
+        ck("a documented scripts/selftest.d/ PHASE is named not-graded and NEVER PROBED: `--help` on a "
+           "phase runs the phase, and the 25 s timeout does not bound it because the killed phase's "
+           "grandchildren hold the capture pipe open",
+           [p[0] for p in got_phase] == ["no-help"] and not probes,
+           f"{[p[0] for p in got_phase]} / {len(probes)} probe(s)")
+        ck("...and the reason it prints says harness, so a reader cannot mistake it for a broken tool",
+           bool(got_phase) and "harness" in got_phase[0][3], got_phase[0][3][:70] if got_phase else "")
+        ck("harness-by-shape covers the directory, not one remembered name",
+           cdf.is_harness("scripts/selftest.d/any-new-phase.sh") and
+           not cdf.is_harness("checks/wdl_gate.sh"))
+
+        # ---- an ungradable tool cannot pass silently: the ceiling is the verdict -------------------
+        # main() is the verdict, so the control runs main(). The fixture doc names a tool whose --help
+        # exits 3, which is UNGRADEABLE rather than clean; the ceiling decides, and both arms are
+        # asserted so the red cannot be about anything except the ceiling line.
+        import contextlib
+        import io
+
+        def run_main(body, ceiling):
+            import check_doc_flags as cdf
+            old_root, old_argv, old_ceil = cdf.GIT_ROOT, list(sys.argv), cdf.UNGRADABLE_CEILING
+            cdf.GIT_ROOT = d
+            cdf.UNGRADABLE_CEILING = ceiling
+            buf = io.StringIO()
+            try:
+                with open(os.path.join(d, "doc.md"), "w") as fh:
+                    fh.write(body)
+                sys.argv = ["check_doc_flags", "--doc", os.path.join(d, "doc.md")]
+                with contextlib.redirect_stdout(buf):
+                    rc = cdf.main()
+            finally:
+                cdf.GIT_ROOT, sys.argv, cdf.UNGRADABLE_CEILING = old_root, old_argv, old_ceil
+            return rc, buf.getvalue()
+
+        leaky = "Run `./fails.py --tail 3`"
+        rc_red, out_red = run_main(leaky, 0)
+        rc_green, _ = run_main(leaky, 1)
+        ck("a doc naming a tool with no obtainable --help is RED when it exceeds the declared ceiling, "
+           "and the ceiling line is printed as the reason (a checker that cannot run must not pass by "
+           "default — this file's own header rule)",
+           rc_red == 1 and "UNGRADABLE_CEILING = 0" in out_red and "1 tool(s) ungradable" in out_red,
+           f"rc={rc_red}")
+        ck("CONTROL for that red: the SAME doc is green one ceiling point higher, so the verdict is "
+           "the ceiling and not the mere presence of an ungradable tool",
+           rc_green == 0, f"rc={rc_green}")
+        # ---- the ceiling is priced against the tree, not against the literal in this file ----------
+        # This leg used to read `cdf.UNGRADABLE_CEILING == 11`: a constant compared with a copy of
+        # itself. It could notice the CONSTANT being edited and could not notice the COUNT it exists to
+        # price moving, so the sentence above it ("the count this run prints") described a check that
+        # never ran anything. Measured, the count is 11 today (`./scripts/check_doc_flags.py` prints
+        # `11 tool(s) ungradable (ceiling 11)`), and ten of those eleven are harnesses — a status this
+        # file decides from `HARNESS`/`HARNESS_DIRS` without executing anything. So price those here,
+        # off the real doc set, with `run` a stub that answers every other tool's --help: the scan still
+        # boots no gate phase (that is the whole point of `HARNESS`), and the number below comes from
+        # the tree rather than from the constant. The eleventh name, `scripts/check_artifacts.py`, is
+        # ungradable because its REAL --help exits 2 — only a real run can discover that, and the gate
+        # leg that runs the whole scan is where that one is graded (scripts/selftest.sh, the 60 s
+        # budget leg). What this leg can now catch: the constant lowered under the count the repo
+        # itself produces, and a count of nothing — `count <= ceiling` over an empty set is the vacuous
+        # pass this file's header refuses. A PARTIAL loss in the `HARNESS` list belongs to the two legs
+        # above (a phase that stops being a harness gets PROBED, and the shape is graded by name), and
+        # raising the constant is graded by the gate leg that prints the number — this leg's job is the
+        # relation between the constant and what the tree measures.
+        def probe_help(argv, **kw):
+            """Every tool but a harness answers --help, so counting the set costs no subprocess."""
+            class _Answer:
+                returncode, stdout, stderr = 0, "usage: stub\n", ""
+            return _Answer()
+
+        real_scan, real_cache = [], {}
+        for real_doc in cdf.markdown_files(None):
+            real_scan += cdf.check_file(real_doc, run=probe_help, cache=real_cache)
+        # The same derivation main() prints its count from, so the leg and the summary line cannot
+        # disagree about what "a tool this checker cannot grade" means.
+        real_ungrad = sorted({p[3].split(":")[0] for p in real_scan if p[0] == "no-help"})
+        ck("the declared ceiling is priced against the REAL doc set: the documented tools this checker "
+           "cannot grade, counted off README.md + docs/*.md without a single subprocess, sit inside it "
+           "— and that count is not zero, because an inequality over an empty set is the pass this "
+           "file's own header refuses (raise the constant with the measurement beside it, never to "
+           "silence a red)",
+           isinstance(cdf.UNGRADABLE_CEILING, int) and 0 < len(real_ungrad) <= cdf.UNGRADABLE_CEILING,
+           f"{len(real_ungrad)} ungradable tool(s) counted off the tree, "
+           f"ceiling={cdf.UNGRADABLE_CEILING}")
+
+        # ---- the exec-bit grade reads git's mode, not this checkout's bit --------------------------
+        # os.access(X_OK) graded the working tree: with core.fileMode=false a documented
+        # `./terra/batch_peek.py` tracked 100644 passed here and died on a clean clone — the defect
+        # this file's header describes and `tracked_mode` existed to catch but never did, with zero
+        # call sites. Both directions, in a throwaway git repo, because only `ls-files -s` knows what
+        # a clone gets.
+        repo = os.path.join(d, "gitrepo")
+        os.makedirs(repo)
+
+        def gg(*a):
+            subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c",
+                            "user.email=t@example.invalid", "-c", "commit.gpgsign=false", *a],
+                           capture_output=True, check=True)
+
+        gg("init", "-q")
+        for nm, mode in (("ships.py", 0o755), ("doc_only.py", 0o644)):
+            with open(os.path.join(repo, nm), "w") as fh:
+                fh.write("#!/usr/bin/env python3\nimport argparse\np = argparse.ArgumentParser()\n"
+                         "p.add_argument('--tail', type=int)\np.parse_args()\n")
+            os.chmod(os.path.join(repo, nm), mode)
+        gg("add", ".")
+        # Now make the working tree LIE in both directions, without re-staging.
+        os.chmod(os.path.join(repo, "doc_only.py"), 0o755)   # bit here, mode 100644 in git
+        os.chmod(os.path.join(repo, "ships.py"), 0o644)      # mode 100755 in git, no bit here
+
+        def grade_repo(body):
+            import check_doc_flags as cdf
+            old = cdf.GIT_ROOT
+            cdf.GIT_ROOT = repo
+            try:
+                with open(os.path.join(repo, "doc.md"), "w") as fh:
+                    fh.write(body)
+                return [p[0] for p in cdf.check_file(os.path.join(repo, "doc.md"), run=probe_run)]
+            finally:
+                cdf.GIT_ROOT = old
+
+        ck("a file whose TRACKED mode is not 755 is reported even when this working tree has the bit "
+           "(the clean checkout is what a doc promises)",
+           "no-exec-bit" in grade_repo("Run `./doc_only.py --tail 3`"))
+        ck("CONTROL: a file tracked 100755 is silent even when this working tree LACKS the bit — the "
+           "core.fileMode=false machine that used to hide the finding, seen from the other side",
+           "no-exec-bit" not in grade_repo("Run `./ships.py --tail 3`"),
+           str(grade_repo("Run `./ships.py --tail 3`")))
+        def tracked_in_repo(rel):
+            """tracked_mode() reads the mode out of GIT_ROOT, so grade it with GIT_ROOT on the fixture."""
+            import check_doc_flags as cdf
+            old = cdf.GIT_ROOT
+            cdf.GIT_ROOT = repo
+            try:
+                return cdf.tracked_mode(rel)
+            finally:
+                cdf.GIT_ROOT = old
+
+        ck("tracked_mode has a call site now (it shipped with zero, which is how the header bug "
+           "survived it having been written)",
+           tracked_in_repo("ships.py") == "100755" and tracked_in_repo("doc_only.py") == "100644",
+           f"ships.py={tracked_in_repo('ships.py')} doc_only.py={tracked_in_repo('doc_only.py')}")
+
         ck("a file that cannot be read is reported (never an empty problem list)",
            check_file(os.path.join(d, "nope.md"))[0][0] == "unreadable")
     finally:
@@ -298,8 +539,19 @@ def main() -> int:
         print(f"  no --help (flags unverifiable, named so the count cannot grow silently): "
               f"{len(ungradable)} tool(s): {', '.join(sorted(ungradable))}")
     hard = [p for p in problems if p[0] != "no-help"]
+    scope = f"--doc {a.doc}" if a.doc else "README.md + docs/*.md"
     print(f"check_doc_flags: {len(markdown_files(a.doc))} file(s), {spans} code span(s), "
-          f"{len(hard)} problem(s), {len(ungradable)} tool(s) ungradable")
+          f"{len(hard)} problem(s), {len(ungradable)} tool(s) ungradable "
+          f"(ceiling {UNGRADABLE_CEILING}; scope: {scope})")
+    # An ungradable tool is NOT a pass — this file's header rule is that a checker which cannot run
+    # passes by default, and that is the class this file exists to catch — but the COUNT of them is a
+    # property of the repo's tools, so it is graded against UNGRADABLE_CEILING (where the measurement
+    # and the way to lower it are recorded) rather than against zero. The names print every run.
+    if len(ungradable) > UNGRADABLE_CEILING:
+        print(f"  FAIL  {len(ungradable)} tool(s) ungradable exceeds the declared ceiling "
+              f"UNGRADABLE_CEILING = {UNGRADABLE_CEILING}: the names above lost their `--help`, so "
+              f"their documented flags are no longer graded by anything. Scope of this run: {scope}.")
+        return 1
     return 1 if hard else 0
 
 

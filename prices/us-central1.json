@@ -1,0 +1,8 @@
+{
+  "source": "n1-standard-1, us-central1 (Iowa), cross-checked: gcloud-compute.com/us-central1.html ($0.0475/hr, spot $0.0271/hr) and economize.cloud GCP n1-standard-1 page (same figures); the machine rate is used AS the per-vCPU rate, which bundles 3.75 GB RAM per vCPU",
+  "as_of": "2026-10-13",
+  "vcpu_hour": 0.0475,
+  "vcpu_hour_spot": 0.0271,
+  "bundled_ram_gb_per_vcpu": 3.75,
+  "note": "GCP bills vCPU and memory separately; this file quotes a bundled machine rate instead, so the direction of the error is stated rather than assumed. Replace with component rates (vcpu_hour + ram_gb_hour) for a machine type other than n1-standard."
+}

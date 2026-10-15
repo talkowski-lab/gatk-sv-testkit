@@ -70,7 +70,7 @@ terra     ~/repo/gatk-sv-testkit/.venv/bin/python
 wdl_gate  ok (~/repo/gatk-sv-testkit/.venv/bin/miniwdl)
 jq scan   ok
 build     gcloud ok
-inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar
+inputs    java ok, WOMTOOL_JAR unset/missing — export WOMTOOL_JAR=/path/womtool.jar (terra/batch_check_inputs.py AND the gate: check prints the required-input gap without it, the womtool verdict with it)
 ```
 
 That is the whole tool inventory with its dependencies resolved, including *where* miniwdl was found,
@@ -195,7 +195,7 @@ write-once, is in [terra-head-to-head.md](terra-head-to-head.md).
 
 ## 5. Loop: "the numbers moved, do they match?"
 
-Thirteen comparators, one rule each, and each rule is written down so that someone can check the
+Seventeen comparators, one rule each, and each rule is written down so that someone can check the
 number. They take explicit paths, touch no network, and their only writes are `--out-prefix` and `--json`.
 
 | Tool | Question it answers | Needs |
@@ -213,8 +213,14 @@ number. They take explicit paths, touch no network, and their only writes are `-
 | `lineset_diff.py` | sample lists, interval lists, VID lists, as sets | two line files |
 | `json_diff.py` | did `inputs.json` change | two JSON / JSON.gz |
 | `tar_manifest.py` | did a bundle change (tar-in-tar included) | two tarballs or dirs |
+| `artifact_tally.py` | what does this ONE file actually contain, ignoring its own summary | one file |
+| `vcf_body_diff.py` | are two VCFs' record bodies identical, whatever their headers say | two VCFs |
+| `gd_calls_diff.py` | the GD calls changed — which kind of change, and was it the case sample | two GD calls tables |
+| `sample_census.py` | how many distinct samples are in this evidence table (streamed) | one table |
 
-The last seven are generic; the first six are the fixed rules a v1.1.1 head-to-head happened to need.
+The last seven are generic; the first six are the fixed rules a v1.1.1 head-to-head happened to need,
+`gd_calls_diff.py` is a fixed rule again, and `artifact_tally.py` / `sample_census.py` are not diffs:
+each measures one file.
 Every one of them takes `--json`, which writes `{tool, argv, inputs+hash, rule, …, compared_something}`:
 so the rule that produced a number is recorded next to it.
 

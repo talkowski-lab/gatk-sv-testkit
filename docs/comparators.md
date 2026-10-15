@@ -24,14 +24,23 @@ someone else checking it.
 | `lineset_diff.py` | sample lists, interval lists, VID lists, PED-like files, compared as sets | two line files |
 | `json_diff.py` | did `inputs.json` change (paths foldable, string lists compared as sets) | two JSON / JSON.gz |
 | `tar_manifest.py` | did a bundle change (members, sizes, optionally bytes, tar-in-tar included) | two tarballs or directories |
+| `artifact_tally.py` | what does this ONE artifact actually contain, ignoring the summary shipped with it | one file |
+| `vcf_body_diff.py` | are two VCFs' **record bodies** identical, whatever their headers say | two VCFs |
+| `gd_calls_diff.py` | the GD calls changed — but *which kind* of change, and was it the case sample | two GD calls tables |
+| `sample_census.py` | how many distinct samples are in this evidence table (streamed) | one table |
 
-The last seven are generic engines; the first six are fixed rules that happen to be the ones a
-v1.1.1 head-to-head needed. Both kinds take `--json`; see **One artifact envelope** below.
+The first six are fixed rules that happen to be the ones a v1.1.1 head-to-head needed. `table_diff`
+and the six after it are generic engines. `gd_calls_diff.py` is a fixed rule again — the GD calls table
+is one file's shape — and `artifact_tally.py` and `sample_census.py` are not diffs at all: each
+measures ONE file, which is why neither can ever be mistaken for evidence of agreement. Every one of
+them takes `--json`; see **One artifact envelope** below.
 
-Seven of the thirteen need nothing but the standard library (`table_diff`, `matrix_diff`,
-`site_set_diff`, `lineset_diff`, `json_diff`, `tar_manifest`, `compare_batch_tables`); the GQ pair
-and `vcf_paired_diff` need `numpy`, `profile_summarize` needs `numpy`/`pandas`,
-`pair_level_concordance` needs `pysam` and `diff_rd_states` shells out to `bcftools`. None of them
+On dependencies, the list rather than a total, because a total here rots the day a tool lands:
+`table_diff`, `matrix_diff`, `site_set_diff`, `lineset_diff`, `json_diff`, `tar_manifest`,
+`compare_batch_tables`, `artifact_tally`, `vcf_body_diff`, `gd_calls_diff` and `sample_census` need
+nothing but the standard library; the GQ pair and `vcf_paired_diff` need `numpy`,
+`profile_summarize` needs `numpy`/`pandas`, `pair_level_concordance` needs `pysam` and
+`diff_rd_states` shells out to `bcftools`. None of them
 touch the network, and none of them write outside the path you name: `--out-prefix` and `--json`
 are the only writes anywhere in this directory.
 
@@ -45,6 +54,9 @@ are the only writes anywhere in this directory.
 * [Which artefact shape needs which tool](#which-artefact-shape-needs-which-tool)
 * [One artifact envelope (`--json`)](#one-artifact-envelope---json)
 * [One artifact at a time (`compare/artifact_tally.py`)](#one-artifact-at-a-time-compareartifact_tallypy)
+* [Record-body equality that ignores volatile headers (`compare/vcf_body_diff.py`)](#record-body-equality-that-ignores-volatile-headers-comparevcf_body_difpy)
+* [What changed in the GD calls table (`compare/gd_calls_diff.py`)](#what-changed-in-the-gd-calls-table-comparegd_calls_difpy)
+* [How many samples are in this evidence table (`compare/sample_census.py`)](#how-many-samples-are-in-this-evidence-table-comparesample_censuspy)
 * [How these are tested](#how-these-are-tested)
 
 ## Read this before quoting any concordance number
@@ -179,9 +191,12 @@ comparison has to do to them** is what makes the set small enough to implement:
 | Shape | What it looks like | What comparing it means | Tool |
 |---|---|---|---|
 | cell table | VCF: site × sample × `FORMAT` tag | pair the same (site, sample), then compare one tag | `vcf_paired_diff.py`, `gq_paired_compare.py`, `diff_rd_states.py`, `pair_level_concordance.py` |
+| record body | a VCF whose header a re-run rewrites by itself (`##bcftools_viewCommand` carries `Date=` and a temp path) | hash the record lines only; the header may not enter the answer | `vcf_body_diff.py` |
 | keyed rows | `*.tsv.gz` with a header and a stable first column | join on the named key, diff named columns, report one-sided columns | `table_diff.py`, `compare_batch_tables.py` |
+| per-(sample, locus) calls | the wide GD table `gd_cnv_calls.tsv.gz`: `sample`, `GD_ID`, `cn_state`, `cn_probabilities` | join the two-part key, then report the **kind** of change, case sample apart from panel | `gd_calls_diff.py` (and `table_diff.py` for columns that do not carry a call) |
 | wide matrix | key columns + one column per sample (`all_samples.RD.txt.gz`, binned coverage, `all_batches.ploidy.tsv`) | join samples by name, report cohort change separately from value change | `matrix_diff.py` |
 | long list | unheadered 5-7 column records (`all_samples.sr.txt.gz`, `all_samples.pe.txt.gz`) | compare sets of fields, never positions | `lineset_diff.py --columns N` |
+| one column's cardinality | a long-format evidence table with a sample column (merged `*.baf.txt.gz`, `.sd/.pe/.sr`), ~1.8 GB | how many DISTINCT values it holds, in one pass, and whether that is the number you declared | `sample_census.py`, then `lineset_diff.py` on what `--write-samples` wrote |
 | set | sample lists, contig lists, VID lists, PED files | set difference, with normalization opt-in | `lineset_diff.py` |
 | key→value with a preamble | `inputs.json`, metrics JSON, `.json.gz` | compare by JSON pointer, fold paths, sets for string lists | `json_diff.py` |
 | bundle | `*.tar.gz` (and tar inside tar, the `Array[Array[File]]` gCNV case) | manifest of members; bytes only when asked | `tar_manifest.py` |
@@ -225,7 +240,18 @@ exit 2: an empty result is never a silent pass.
 
 Exit codes are part of the contract across all thirteen: **0** compared and nothing outside the
 stated rule, **1** compared and found differences, **2** compared nothing (disjoint keys, no shared
-sample, unreadable join), which is never a pass.
+sample, no comparable cell, unreadable join), which is never a pass.
+
+The third of those was the last one `gq_paired_compare.py` honoured. A pair sharing VIDs whose shared
+samples are **all** `GQ=.` had rows in the join and no comparable cell in it: the empty selection reached
+`np.percentile`, which raised, and the crash exited **1** — the code this repo defines as "compared and found
+a difference". Zero comparable cells is now the same named refusal as zero shared VIDs: exit 2,
+`NOTHING_COMPARED`, `comparable_cells: 0` in the `--json` artifact for **both** refusal branches, and a
+message that counts itself — `2 shared VID(s) x 2 shared sample(s) = 4 cell(s), and 0 of them carry GQ on BOTH
+sides (A missing 4, B missing 4) — nothing compared, not a difference found`. The control that this is not
+"always refuse" is the pre-existing leg beside it, which still measures a real pair at `exact 100.0000%`, and
+a refusal printing a traceback is asserted against separately, because exit 1 plus a traceback is the exact
+ambiguity the legs exist to remove (`1a40201`).
 
 ## One artifact at a time (`compare/artifact_tally.py`)
 
@@ -261,6 +287,134 @@ Three behaviours matter more here than the tally does:
 `--pysam-check` prints whether this interpreter's pysam agrees with production's pin; see
 `scripts/prod_pins.py` and `docs/setup.md` for why the pinned version is worth checking.
 
+## Record-body equality that ignores volatile headers (`compare/vcf_body_diff.py`)
+
+A branch was validated by proving its final VCF was "the same file" as the baseline's. It is not the
+same file: it has a different byte count, a different md5 and a different gz size, because `bcftools`
+rewrote the header on the way through and wrote
+`##bcftools_viewCommand=view -Oz -o /tmp/tmp.AB12cd/out.vcf; Date=20261002-14:31:07` into it. Byte
+comparison on two such files is not a strict test, it is a meaningless one: it can only answer NO, and
+it answers NO for every pair ever produced.
+
+```bash
+./compare/vcf_body_diff.py armA/final.vcf.gz armB/final.vcf.gz
+./compare/vcf_body_diff.py base.vcf.gz new.vcf.gz --drop-info AC --drop-info AF
+./compare/vcf_body_diff.py base.vcf.gz new.vcf.gz --unordered --json body.json
+```
+
+What the rule commits to:
+
+* The **body** is every line that does not start with `#`, and the digest never sees a header line, so
+  a header rewrite can neither break a match nor manufacture one. The answer is one hash per arm plus
+  the record count, which is a number two people can quote at each other.
+* Volatile header lines are matched by regex, **listed one by one**, and recorded in the artifact.
+  Default: `##bcftools_*Command=`, `##GATKCommandLine.`, `##fileDate=`. A `##bcftools_viewVersion=`
+  line is deliberately NOT on that list: a different tool chain in the header is a real difference, and
+  the run says `BODY-IDENTICAL` and exits 1 anyway. `--volatile REGEX` extends the list and every line
+  the extension drops is still printed, because the way to hide a difference in a comparator is to make
+  the comparator drop it quietly.
+* Order is a rule, not an accident: file order by default, `--unordered` to join records on
+  `--key CHROM,POS,ID,REF,ALT` when the question is "same records" rather than "same bytes in the same
+  order". Both answers are printed with the rule that produced them.
+* A different sample set is `SAMPLES-DIFFER` and the genotype cells are then **not** compared
+  positionally — that comparison would turn a column shift into thousands of call changes.
+  `vcf_paired_diff.py` is the tool that joins those cells by name.
+* Zero record lines on either side exits 2. A header-only VCF cannot agree with anything.
+
+The negative control is in the fixture pair itself (`compare/make_fixtures.py`): `body_a.vcf` and
+`body_b.vcf.gz` are the same three records under two volatile header lines and a different container,
+so the ONLY thing that can make that pair report a difference is the rule being broken; `body_c.vcf`
+then moves `INFO/AC` on one record and the run must find exactly that record and name `INFO{AC}`.
+`body_empty.vcf` is the refusal. `--selftest` adds the controls the fixture pair cannot: a same-body
+pair in the other order (file order must say DIFFER, `--unordered` must say IDENTICAL), a cohort that
+renamed a sample column and one that grew by one, a repeated key, and a `##bcftools_viewVersion`
+line that must NOT be forgiven.
+
+## What changed in the GD calls table (`compare/gd_calls_diff.py`)
+
+`table_diff.py` counts cells. The GD question is not how many cells moved, it is **what kind of change
+happened to the copy-number call** — and the number that decided a PR was "32,970 rows, 948 panel
+`cn_state` shifts, 0 for NA12878", where the answer that mattered was the last clause. Fold the case
+sample in with the reference panel and the headline is 948; separate them and the headline is "the case
+did not move", which is the pass condition.
+
+```bash
+./compare/gd_calls_diff.py armA/gd_cnv_calls.tsv.gz armB/gd_cnv_calls.tsv.gz --case-sample NA12878
+./compare/gd_calls_diff.py base/gd.tsv.gz new/gd.tsv.gz --case-sample NA12878 --json gd.json
+./compare/gd_calls_diff.py base/gd.tsv.gz new/gd.tsv.gz --only-column qual_score
+```
+
+Four sections, reported apart, every count in each of them split case / not-case:
+
+* **KEY SET** on `(sample, GD_ID)` joined by name, duplicates disclosed rather than folded.
+* **CN_STATE** as a transition table. `empty -> 1` and `1 -> empty` are their own buckets: a call
+  appearing is not a call changing, and a tool that reports them as `2 -> 1`-shaped events hides how
+  many loci simply stopped being called.
+* **CN_PROBABILITIES** parsed as the JSON map of copy number to probability that it is, and compared
+  level by level with `--prob-tol`. Compared as text, `{"1":0.02,"2":0.98}` versus
+  `{"2":0.98,"1":0.02}` is "a difference"; compared as an unlabelled vector, one extra scored level is
+  "a length mismatch". Both are lies, and both are fixtures here.
+* **OTHER COLUMNS** — every remaining shared column, numeric where both sides parse as numbers, exact
+  text otherwise, missing on either side counted and not compared.
+
+Two refusals carry the weight. Zero shared keys exits 2 and names the **GD_ID namespace** trap: a run
+that re-mints locus IDs produces two disjoint key sets, and a disjoint-key diff is the one result that
+looks like perfect agreement. And the legacy 6-column narrow GD manifest (one row per locus, carriers
+comma-joined) is refused as the wrong *shape*, with the tool that can diff it, instead of being joined
+on its coordinates.
+
+Its negative control: `gd_a.tsv.gz` / `gd_b.tsv.gz` plant one dropped key, one added key, one panel
+`cn_state` shift, one posterior rewritten in another key order and precision (must NOT be a change),
+one posterior that really moved, and one duplicate key — while the case row `NA12878/GD_A` is
+untouched. The gate leg asserts both halves of the sentence that PR needed: exit 1, **and** `CASE
+NA12878 … -> CLEAN`. `gd_rekey.tsv.gz` is the disjoint-namespace refusal, and `--selftest` adds the
+row that vanished for the case sample, which is exit 1 with `CASE_MOVED` even though every shared cell
+still matches.
+
+## How many samples are in this evidence table (`compare/sample_census.py`)
+
+`ConcatBaf` merges the case's BAF with the reference panel's. When it passed only the case, the merged
+table held **1 sample instead of 157**, GD ran, and nothing reported it — and `ls -l` says 1.8 GB
+either way, because a big file and a wrong file have the same size.
+
+```bash
+./compare/sample_census.py NA12878.baf.txt.gz --sample-column SAMPLE --expect 157
+./compare/sample_census.py case.baf.txt.gz --sample-column 4
+./compare/sample_census.py A.sd.txt.gz --write-samples A.samples.txt
+./compare/lineset_diff.py A.samples.txt B.samples.txt
+```
+
+* It counts **distinct values, not rows**, and prints the distribution beside the count: min, quartiles,
+  max, the share the busiest value carries, and a named note when there is exactly one value — the
+  shape of a merge that kept one side.
+* `--expect N` is the difference between a tool that prints `1` and a tool that prints
+  `EXPECTED 157, FOUND 1 -> VIOLATED` and exits 1. Without it the tool says it produced a measurement,
+  not a pass.
+* One file only. There is no `--against`: a census that quietly opened a second file is a diff wearing
+  a census's name. `--write-samples` emits the sorted distinct list for `lineset_diff.py`, which is the
+  tool that diffs it.
+* The header decision is printed, because guessing it either way is a wrong sample count: a first line
+  starting `#` is the header, otherwise the first line is data, and a NAME column against a headerless
+  file is refused with the first line shown rather than resolved against nothing.
+* Values are counted as written. `--normalize trim,case` exists because a sample name with a trailing
+  space is a distinct sample until somebody decides otherwise — and the decision is printed.
+* A wide site×sample matrix is refused with the reason: its samples live in the column **names**, not
+  in any value column, and that count belongs to `matrix_diff.py`.
+
+**Why it is streamed, and what bounds it.** The loop keeps exactly one thing: a `Counter` with one
+integer per distinct sample name. Rows are read, split, counted and dropped — no row list, no second
+pass, no per-site state. So peak RSS is bounded by `O(distinct values × bytes per sample name)`, not by
+the file. Measured on the 10-million-row case: 302 MB of table with 157 samples cost 27.8 MiB of peak
+RSS against a 23.8 MiB interpreter baseline, and 200,000 samples cost about 80 MiB whether the file held
+1,000,000 rows or 10,000,000 — ten times the rows and ten times the bytes, the same resident memory.
+The absolute numbers are this box's and nobody should quote them; the *shape* is what `--selftest`
+tests, and it tests it by trying to break it: the same 50,000 values over 20x the rows may not cost more
+than 1.6x the RSS, and a version that appends each row to a list fails that leg at 2.7x. A printed
+number is a claim; a leg that goes red when the claim is false is the proof.
+
+Its negative control is `baf_a.txt.gz` / `baf_b.txt.gz`: identical except that every `PANEL2`
+row is gone, which is the bug's shape, and the gate leg asserts the declared count fails by name.
+
 ## How these are tested
 
 `make smoke` used to exercise one of the six comparators, on 40 MB of real VCF, with no assertion
@@ -275,6 +429,17 @@ mind when you add a comparator:
 * a Float `FORMAT` field must produce real statistics: the original integer-histogram tool printed
   `mean 0.00 / zero 100 %` for `PCC`, with only a `frac` column hinting that every value had been
   fractional.
+
+The three comparators a single-sample PR added (`vcf_body_diff`, `gd_calls_diff`, `sample_census`)
+carry their own controls in the same pair: a VCF pair identical except for two volatile header lines
+and the container, the same records with `INFO/AC` recomputed, and a header-only VCF; a GD pair where
+the panel moved and the case did not, with a rewritten posterior that must not count and a moved one
+that must; and an evidence table that lost a sample. Each also ships `--selftest`, which builds its own
+fixtures in a temp dir and asserts the cases a two-file fixture cannot express — the same records in
+the other order, a cohort that renamed a column versus one that grew by one, a row that vanished for
+the case sample, a headerless table, a wide matrix, a short row. A tool whose answer depends on which
+fixtures happen to be installed is not tested; a tool whose answer depends on which files happen to be
+installed is not tested either, which is why those cases live with the tool.
 
 `scripts/check_artifacts.py` runs the fixture pair through every comparator that can take it and
 fails if any `--json` output is missing `tool`, `argv`, `inputs` (with a hash per file), `rule` or

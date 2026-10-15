@@ -17,7 +17,9 @@ demonstrably had the data; the code kept trusting it, so the monitoring loop rep
 matching <prefix>" against a workspace holding five.
 
 Read operations are always allowed. Every mutating helper requires an explicit
-`confirm=True` argument so nothing is created, updated, or submitted by accident.
+`confirm=True` argument so nothing is created, updated, or submitted by accident. `submit` refuses a
+second thing it was not told: the call-cache choice (`use_call_cache`), because the fiss call it wraps
+defaults that field to true and always POSTs it -- see its docstring.
 
     python -c "import sys; sys.path.insert(0,'terra'); import terra; print(terra.whoami())"
 """
@@ -238,11 +240,35 @@ def entity_types(ns: str, name: str) -> dict:
 
 
 def entity_sample(ns: str, name: str, etype: str, page_size: int = 50, page: int = 1) -> dict:
-    """One page of entities of `etype` (avoids dumping whole tables)."""
+    """One page of entities of `etype` (avoids dumping whole tables).
+
+    Note what this is NOT: the dict is truthy even when the page is empty, so it cannot answer whether one
+    named row exists. That question is `entity_exists` below -- and the difference is not academic, see
+    there.
+    """
     d = _j(fapi.get_entities_query(ns, name, etype, page=page, page_size=page_size,
                                    sort_direction="asc", filter_terms=""),
            f"get_entities_query {etype}")
     return d
+
+
+def entity_exists(ns: str, name: str, etype: str, entity_name: str) -> bool:
+    """Does Terra actually have this row? A point lookup, because a page of rows cannot answer that.
+
+    `entity_sample` above returns one page, and its dict is truthy whether or not the page holds anything
+    -- measured on this repo's own reasoning today, where calling it with a row NAME in the `etype` slot
+    printed "FOUND" for a row that `get_entity` then answered 404 for. A launcher that believes a row
+    exists because a list call returned something is that mistake, so this asks the endpoint that answers
+    404. Anything other than 200/404 raises: "could not check" is not evidence a row is there, and a
+    submission that cannot be described should not be POSTed.
+    """
+    resp = fapi.get_entity(ns, name, etype, entity_name)
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
+        return False
+    raise TerraError(f"get_entity {etype}/{entity_name}: HTTP {resp.status_code} "
+                     f"{str(getattr(resp, 'text', ''))[:140]}")
 
 
 def workspace_configs(ns: str, name: str) -> list:
@@ -366,11 +392,41 @@ def upload_entities_tsv(ns: str, name: str, tsv: str, confirm: bool = False) -> 
 
 
 def submit(ns: str, name: str, config_namespace: str, config_name: str, entity: str,
-           entity_type: str, expression: str, confirm: bool = False) -> dict:
+           entity_type: str, expression: str, confirm: bool = False,
+           use_call_cache: bool | None = None) -> dict:
+    """Submit one entity, carrying the caller's OWN call-cache choice into the POST.
+
+    `use_call_cache` has no default in substance, even though it has one in the signature. The call
+    this wraps, `fapi.create_submission`, defaults `use_callcache=True` and puts the key in the POST
+    body unconditionally -- so a caller that says nothing does not get "whatever the method config
+    says", it gets `"useCallCache": true` stated by the submission request itself. Measured before
+    this parameter existed (offline, capturing the body at fiss's own request boundary):
+    `batch_rerun_step.py submit` on the default printed `useCallCache=false` while the body it POSTed
+    to `workspaces/<ns>/<ws>/submissions` said `true`. Which of the two values the server honours is a
+    question about Terra that nobody here measured; what is measured is that the tool printed one
+    answer and asked Terra for the other, on the one field whose wrong value can still look like a
+    clean run (docs/terra-head-to-head.md §5, docs/gap-ledger.md C1). So the caller hands over the
+    value its own config body states, and print and POST cannot come from two different reads.
+
+    (`delete_intermediate_output_files` is the same shape unfixed and harmless: fiss defaults it False
+    and this repo's builder states False, so the two agree by coincidence, not because anything
+    threads it. Nothing prints a claim about it, so there is nothing to disagree with.)
+    """
     if not confirm:
         raise TerraError("refusing to submit a workflow without confirm=True")
+    if use_call_cache is None:
+        raise TerraError(
+            "refusing to submit with no call-cache choice, because saying nothing is not neutral.\n"
+            "  fiss's create_submission defaults use_callcache=True and always sends `useCallCache`,\n"
+            "  so an unstated choice POSTs caching ON -- on the one field whose wrong value still looks\n"
+            "  like a clean run: a rerun served from a cache did not run the code it came to measure,\n"
+            "  and its output still passes. Hand over the value your own config body states, so the\n"
+            "  line printed before the POST and the body that reaches Terra cannot disagree:\n"
+            "      terra.submit(..., use_call_cache=body['useCallCache'])\n"
+            "  Nothing was submitted.")
     return _j(fapi.create_submission(ns, name, config_namespace, config_name,
-                                    entity=entity, etype=entity_type, expression=expression),
+                                    entity=entity, etype=entity_type, expression=expression,
+                                    use_callcache=use_call_cache),
               f"create_submission {config_name}", ok=(200, 201))
 
 

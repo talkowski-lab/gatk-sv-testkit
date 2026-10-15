@@ -1,0 +1,8 @@
+{
+  "Extras.vcf": "gs://gatk-sv-ref-panel-1kg/sub/x/call-A/all.b.vcf.gz",
+  "Extras.MakeThing.cpu": 4,
+  "Extras.MakeThing.threads": 2,
+  "Extras.attrs.cpu": 4,
+  "Extras.more_attrs": {"cpu": 2, "unknown_member": true},
+  "Extras.note": "${this.note}"
+}

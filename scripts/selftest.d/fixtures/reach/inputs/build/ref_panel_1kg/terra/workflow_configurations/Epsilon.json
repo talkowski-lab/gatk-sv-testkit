@@ -1,0 +1,4 @@
+{
+  "Epsilon.in_vcf": "${this.input_vcf}",
+  "Epsilon.manta_docker": "${workspace.manta_docker}"
+}
