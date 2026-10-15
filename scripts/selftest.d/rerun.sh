@@ -1675,6 +1675,196 @@ PY
 inproc "an unstated call cache is refused by terra.submit; fiss's true default is unreachable by omission" \
     0 "$TMP/wire_no_choice.py"
 
+# ---------------------------------------------------------------------------
+# 9. The publish precondition on the POST path (GitHub issue #3).
+#
+# `checks/version_resolves.py` answers the question; this section pins what a POST DOES with the answer,
+# which is the half that can spend money. The four verdicts must NOT collapse into "refuse / allow":
+#   CURRENT   -> proceeds, and says the two shas are the same commit.
+#   STALE     -> refuses, naming both shas and the remedy; `--allow-stale-dockstore` proceeds and the
+#                exemption is PRINTED before the POST, the same way the image exemption is.
+#   ABSENT    -> refuses too (a capture that covers one entry of 341 can produce ABSENT for a published
+#                version, which is why the same override covers it), and says which one it is.
+#   REFUSED   -> the check declined, so the pin is UNVERIFIED and the POST goes ahead. This is the arm
+#                with the trap in it: reading "I could not look" as "not published" is the misread that
+#                cost the 2026-10-13 session a day, and hard-stopping here would rebuild the very
+#                hard-stop issue #5 just removed from batch_check_inputs.py.
+# The tip files are written by the probe, not shipped: `main` happens to be current in the shipped pair,
+# so a leg that borrowed it could only ever have measured one of the two arms. The capture with commitID
+# rows is issue3's shape-holder; the capture WITHOUT them is the real TRS listing, which is what makes
+# the REFUSED arm a measurement of Dockstore's actual API and not of a fixture's mood.
+# Nothing here reaches Terra: this phase's API root is a closed port, and the check runs before the
+# first request anyway.
+# ---------------------------------------------------------------------------
+cat > "$TMP/publish_pre.py" <<'PY'
+"""What create()/submit() do with a publish verdict, driven by capture + tip instead of by network.
+
+The captures are SYNTHESISED from the shipped row's own shape and name the pin this rerun actually
+carries (`rr.WDL_VERSION`, which the sandbox config sets to `your-branch-under-test`, not `main`).
+A leg that borrowed the shipped fixture's version names would silently grade ABSENT while claiming to
+grade STALE -- measured, not assumed: that is exactly what the first draft of this section did.
+"""
+import copy
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rerun_submit_lib as L
+
+TRS = os.path.join(os.environ["GSVTK_REPO_ROOT"], "scripts/selftest.d/fixtures/trs")
+CASE = sys.argv[1]
+OLD = "1111111111111111111111111111111111111111"      # what Dockstore serves
+NEW = "2222222222222222222222222222222222222222"      # what the branch tip is
+tmp = os.path.dirname(os.path.abspath(__file__))
+
+terra, rr = L.setup("10")                       # every request but the captured POST is a raiser
+ver = str(rr.WDL_VERSION)
+entry = rr.resolved()["method_path"]
+holder = json.load(open(os.path.join(TRS, "workflowversions-genotypebatch-shape-holder.json"), encoding="utf-8"))
+ROW = holder[0] if isinstance(holder, list) else holder
+
+
+def capture(rows, name):
+    path = os.path.join(tmp, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rows, fh)
+    return path
+
+
+def rows_for(names, sha):
+    out = []
+    for n in names:
+        row = copy.deepcopy(ROW)
+        row["workflowPath"] = entry
+        row["name"] = n
+        if sha is None:
+            row.pop("commitID", None)           # the real TRS listing has no commit field at all
+        else:
+            row["commitID"] = sha
+        out.append(row)
+    return out
+
+
+def tip(sha):
+    path = os.path.join(tmp, "tip-%s.txt" % sha[-4:])
+    # Two refs, so picking the wrong branch is caught here rather than by luck.
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("%s\trefs/heads/%s\n%s\trefs/heads/some-other-branch\n" % (sha, ver, OLD))
+    return path
+
+
+CAP = os.environ["GSVTK_PUBLISH_CAPTURE"] = capture(rows_for([ver], OLD), "capture-stale.json")
+TIP = os.environ["GSVTK_PUBLISH_TIP"] = tip(NEW)
+
+
+def proceed(label, *needles):
+    stage()
+    refused, out = L.run_submit(rr)
+    assert refused is None, "%s: stopped the POST:\n%s" % (label, refused[:700])
+    for n in needles:
+        assert n in out, "%s: output never said %r\n%s" % (label, n, out[:900])
+    assert [t[0] for t in L.TRACE] == ["read", "submit"], L.TRACE
+    print("PASS %s" % label)
+
+
+def refuse(label, *needles):
+    refused, out = L.run_submit(rr)
+    assert refused, "%s: submitted anyway\n%s" % (label, out[-900:])
+    for n in needles:
+        assert n in refused, "%s: refusal never said %r\n%s" % (label, n, refused[:900])
+    assert [t for t in L.TRACE if t[0] == "submit"] == [], L.TRACE   # refused BEFORE any request
+    print("PASS %s" % label)
+
+
+def stage():
+    """The workspace copy that agrees with this body, so a PROCEED case dies at nothing.
+
+    Without it every proceeding leg refuses at the read-back -- a real refusal, for a reason this
+    section is not about, and it looks exactly like the guard failing to fire.
+    """
+    L.read_with(L.server_copy(rr.make_body()))
+
+
+if CASE == "current":
+    os.environ["GSVTK_PUBLISH_CAPTURE"] = capture(rows_for([ver], NEW), "capture-current.json")
+    proceed("CURRENT proceeds and names both shas as the same commit", "publish check: CURRENT", NEW,
+            "refs/heads/%s" % ver)
+
+elif CASE == "stale":
+    refuse("STALE refuses submit with both shas, the remedy and the flag",
+           "refusing to submit", "STALE", OLD, NEW, "REMEDY", "--allow-stale-dockstore", entry)
+
+elif CASE == "stale-override":
+    rr.ALLOW_STALE_DOCKSTORE = True
+    stage()
+    refused, out = L.run_submit(rr)
+    assert refused is None, refused
+    for n in ("STALE, proceeding per --allow-stale-dockstore", "authorised the Dockstore pin to stay STALE",
+              "not the branch tip"):
+        assert n in out, (n, out[-900:])
+    assert [t[0] for t in L.TRACE] == ["read", "submit"], L.TRACE
+    print("PASS the override proceeds AND prints the exemption before the POST")
+
+elif CASE == "absent":
+    os.environ["GSVTK_PUBLISH_CAPTURE"] = capture(rows_for(["not-the-pin-this-rerun-names"], OLD),
+                                                  "capture-absent.json")
+    refuse("ABSENT refuses submit too and names the override that covers it",
+           "refusing to submit", "(ABSENT)", "--allow-stale-dockstore")
+
+elif CASE == "refused":
+    os.environ["GSVTK_PUBLISH_CAPTURE"] = capture(rows_for([ver], None), "capture-nocommit.json")
+    proceed("a REFUSED capture proceeds as a counted skip, labelled UNVERIFIED and never absence",
+            "publish check: REFUSED", "NO COMMIT TO COMPARE", "UNVERIFIED", "does not apply")
+    stage()
+    refused, out = L.run_submit(rr)
+    for forbidden in ("NOT RUN", "ABSENT", "authorised the Dockstore pin"):
+        assert forbidden not in out, "a declined check read as %s" % forbidden
+    print("PASS a declined check is never read as absence, unrun, or authorised")
+
+elif CASE == "refused-flag":
+    # The override must not reach an unmeasured pin: there is no decision here to authorise.
+    os.environ["GSVTK_PUBLISH_CAPTURE"] = capture(rows_for([ver], None), "capture-nocommit.json")
+    rr.ALLOW_STALE_DOCKSTORE = True
+    proceed("--allow-stale-dockstore does not launder a refused check into an authorised pin",
+            "does not apply")
+    stage()
+    refused, out = L.run_submit(rr)
+    assert "authorised the Dockstore pin" not in out, out[-900:]
+    print("PASS an unmeasured pin is never reported as authorised")
+
+elif CASE == "real-capture":
+    # The shipped REAL Dockstore bytes, against this rerun's real pin: the entry is there, the version
+    # is not, and the shape is the TRS one that carries no commit at all. This is the case that makes
+    # the override's ABSENT arm honest -- a capture covering 1 entry of 341 says ABSENT about a pin it
+    # never saw, which is a statement about the capture, not about Dockstore.
+    os.environ["GSVTK_PUBLISH_CAPTURE"] = os.path.join(TRS, "dockstore-trs-genotypebatch-2026-10-14.json")
+    refuse("the shipped real capture says ABSENT about a pin it does not cover, and names the override",
+           "(ABSENT)", "2 version(s) listed for this entry", "your-branch-under-test", "--allow-stale-dockstore")
+
+elif CASE == "notrun":
+    del os.environ["GSVTK_PUBLISH_CAPTURE"], os.environ["GSVTK_PUBLISH_TIP"]
+    proceed("with no capture the check says NOT RUN, names both vars, and points at the fix",
+            "publish check: NOT RUN", "GSVTK_PUBLISH_CAPTURE, GSVTK_PUBLISH_TIP unset",
+            "gsvtk publish --ls-remote", "the name resolving is not evidence")
+
+elif CASE == "create-stale":
+    refused = None
+    try:
+        rr.create()
+    except SystemExit as exc:
+        refused = str(exc)
+    assert refused and "refusing to create" in refused and "STALE" in refused, refused[:700]
+    assert [t for t in L.TRACE if t[0] in ("submit", "create_config")] == [], L.TRACE
+    print("PASS create() carries the same precondition, before the config POST")
+
+else:
+    raise SystemExit("no such case: %s" % CASE)
+PY
+for c in current stale stale-override absent refused refused-flag real-capture notrun create-stale; do
+    inproc "publish check on the POST path: $c" 0 "$TMP/publish_pre.py" "$c"
+done
+
 if [ "$skipped" -gt 0 ]; then
     # The skipped count is printed when it is non-zero and omitted when it is not, so the string every
     # ledger row and handoff quotes for a full run stays byte-identical on a machine that skipped nothing.
@@ -1704,6 +1894,7 @@ fi
 # to run the offline gate. That is why the bail line itself says a SKIP is not a pass in CI, and why the
 # declared/reached line beside it is the SAME guard as this one, run over the rerun-no-firecloud region that
 # covers the rest of this file.
+
 gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

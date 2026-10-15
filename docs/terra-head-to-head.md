@@ -341,6 +341,27 @@ pointing a body at inputs another workflow never declared is the extra-input rej
 A pinned-but-UNTAGGED path is refused in the same breath — `.../sv-pipeline` with no `:` floats to
 whatever is current at pull time, which is not a statement about which code ran.
 
+**And the descriptor itself is checked, not just the images.** `create` and `submit` ask whether the
+Dockstore version this body points at is still the branch tip, through the same offline checker as
+`gsvtk publish` (`checks/version_resolves.py`, docs/static-checks.md). It never fetches: point it at
+files you supplied with `GSVTK_PUBLISH_CAPTURE` (a Dockstore capture) and `GSVTK_PUBLISH_TIP` (a sha,
+or the output of `git ls-remote origin refs/heads/<branch>`). Four answers, deliberately not two:
+
+| verdict | what `create`/`submit` do |
+|---|---|
+| `CURRENT` | proceed, naming both shas as the same commit |
+| `STALE` | refuse, naming both shas and the `_terra` sidecar remedy; `--allow-stale-dockstore` proceeds and the exemption is printed before the POST |
+| `ABSENT` | refuse, same override — because a capture covering one entry of 341 says `ABSENT` about a pin it never saw, which is a statement about the capture |
+| `REFUSED` | proceed, labelled `UNVERIFIED`: the check declined, so there is nothing to authorise and `--allow-stale-dockstore` does not apply |
+| (unset) | proceed, `NOT RUN`, naming both variables and the command that would fill them |
+
+A stale descriptor is the expensive invisible one: the name resolves, `validate` passes, the fleet
+boots, and the rerun disagrees with the baseline for a reason nobody can reproduce — while still
+billing. Reading a check that declined as "not published" is the misread this ladder exists to prevent
+(2026-10-13, a day lost to it), which is why `REFUSED` is a counted skip rather than a refusal: the
+alternative is the same hard stop that used to block `batch_check_inputs.py` entirely, and measured in
+this repo's own gate, a hard stop there reddens 30 legs that are asking an unrelated question.
+
 ## 5. Run, wait, price
 
 ```bash

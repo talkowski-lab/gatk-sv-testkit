@@ -259,6 +259,10 @@ def images_from_profile(step: str = "") -> tuple:
     return stated, sorted(flag_only)
 CONFIRMED = False        # set only by an explicit --confirm on the command line
 ALLOW_UNPINNED = False   # set only by an explicit --allow-unpinned-docker
+ALLOW_STALE_DOCKSTORE = False   # set only by an explicit --allow-stale-dockstore
+# What the publish check last said, kept for the printed exemption in `submit()`: a POST that went out on
+# a stale descriptor has to say so in the log that documents it, the same way the image exemption does.
+PUBLISH_VERDICT = ""
 OVERWRITE = ""           # set only by --overwrite <the exact config name>; never a default
 WDL_VERSION = os.environ.get("GSV_WDL_VERSION") or config.get("BRANCH")
 # This config's Dockstore pin is WDL_VERSION, which GSV_WDL_VERSION can move off GSVTK_BRANCH. Tell
@@ -731,12 +735,86 @@ def refuse_collision(rd) -> None:
         f"  If that is what you mean, repeat the name: --overwrite {name}")
 
 
+def _publish_precheck(rd: dict, mode: str) -> None:
+    """Ask whether the Dockstore pin this body points at is still the branch tip, before touching Terra.
+
+    Why it is here and not only in `gsvtk publish`: a stale descriptor is invisible at launch. The name
+    resolves, `validate` passes, the fleet boots, and the rerun disagrees with the baseline for a reason
+    nobody can reproduce -- and the rerun is the expensive way to find out (GitHub issue #3, and the
+    2026-10-13 session that spent a day on exactly this). `checks/version_resolves.py` answers the
+    question offline from an operator-supplied capture; this function only decides what a POST does with
+    the answer.
+
+    Four answers, and they do NOT collapse into two:
+      * `CURRENT`  -> say so, proceed.
+      * `STALE` / `ABSENT` -> refuse, because a launch here runs a descriptor Dockstore last saw, or one
+        it does not serve at all. `--allow-stale-dockstore` overrides: the operator may know the pin is
+        deliberate, and `ABSENT` can also be a capture that covers one entry of 341 rather than a version
+        that was never published, which is why the override exists at all.
+      * `REFUSED` (or missing capture, missing module) -> the check could not answer, so it is a counted
+        SKIP, printed and remembered, and the POST goes ahead. Refusing here would rebuild the very
+        hard-stop this repo just spent an issue removing from `batch_check_inputs.py`, and it would
+        launder "I could not look" into "not published" -- the misread that cost the 2026-10-13 session
+        its day. `--allow-stale-dockstore` deliberately does NOT cover this: there is no measurement to
+        override, so there is no decision to authorise.
+
+    Never fetches. Capture and tip are files or values the operator supplied; a check that silently
+    reaches the network is a check that fails differently on someone else's machine.
+    """
+    cap = os.environ.get("GSVTK_PUBLISH_CAPTURE", "").strip()
+    tipsrc = os.environ.get("GSVTK_PUBLISH_TIP", "").strip()
+    missing = [n for n, v in (("GSVTK_PUBLISH_CAPTURE", cap), ("GSVTK_PUBLISH_TIP", tipsrc)) if not v]
+    if missing:
+        globals()["PUBLISH_VERDICT"] = "NOT RUN"
+        print(f"        publish check: NOT RUN ({', '.join(missing)} unset) -- the name resolving is not"
+              " evidence the pin is the tip. To make this check answer:\n"
+              "          gsvtk publish --ls-remote <gatk-sv checkout> --branch <branch> --capture <file>")
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checks"))
+        import version_resolves as vr
+        with open(cap, encoding="utf-8") as fh:
+            parsed = vr.parse_capture(json.load(fh))
+        branch = str(WDL_VERSION or "")
+        tip = tipsrc
+        if os.path.exists(tipsrc):        # an `ls-remote` capture is the friendlier spelling
+            tips = vr.tips_from_ls_remote(open(tipsrc, encoding="utf-8").read())
+            tip = tips.get(branch) or tips.get(f"{branch}_terra") or ""
+        rc, verdict = vr.grade_publish(parsed, rd["method_path"], str(WDL_VERSION), tip, branch)
+    except (OSError, ValueError, ImportError) as exc:
+        globals()["PUBLISH_VERDICT"] = "UNKNOWN"
+        print(f"        publish check: UNKNOWN (cannot read the capture or the checker: {exc}) -- this is"
+              " NOT a finding that the version is unpublished, and it does not stop the POST")
+        return
+    head = verdict.split("\n")[0]
+    if rc == 0:
+        globals()["PUBLISH_VERDICT"] = "CURRENT"
+        print(f"        publish check: {head}")
+        return
+    if rc == vr.REFUSE:
+        globals()["PUBLISH_VERDICT"] = "UNKNOWN"
+        print(f"        publish check: {head}\n        -- the check declined, so the pin is UNVERIFIED."
+              " This is not \"not published\" and --allow-stale-dockstore does not apply: there is no"
+              " measurement here to override")
+        return
+    globals()["PUBLISH_VERDICT"] = "STALE" if verdict.startswith(vr.STALE) else "ABSENT"
+    if not ALLOW_STALE_DOCKSTORE:
+        raise SystemExit(f"refusing to {mode}: the Dockstore pin is not current ({PUBLISH_VERDICT}).\n"
+                         f"  {verdict}\n"
+                         "  publish the tip as the version this rerun names (the remedy above is the whole\n"
+                         "    procedure), or pass --allow-stale-dockstore if running the older descriptor is\n"
+                         "    what you mean -- a rerun of a stale WDL still bills, and its differences from\n"
+                         "    the baseline will not be reproducible.")
+    print(f"        publish check: {PUBLISH_VERDICT}, proceeding per --allow-stale-dockstore -- {head}")
+
+
 def create() -> None:
     if not CONFIRMED:
         raise SystemExit("create overwrites a method config that submissions read.\n"
                          "  check `show` printed the images you meant, then re-run with --confirm.")
     rd = resolved()
     announce(rd, "create")
+    _publish_precheck(rd, "create")
     # Identity and shared-target refusal BEFORE the first request, exactly as batch_configs.py
     # does it. This POSTs a config that the next submission reads back, so it is a write on the
     # same footing as `configs create` -- and an unresolved target used to reach Terra as an
@@ -787,6 +865,7 @@ def submit() -> None:
                          "  re-run with --confirm, and check `show` printed the images you meant.")
     rd = resolved()
     announce(rd, "submit")
+    _publish_precheck(rd, "submit")
     # The row before anything else: `--step 09` is rooted in sample_set_set and `GSVTK_BATCH` is not a
     # cohort, so the missing precondition is named here -- before the target check, before the pre-check,
     # well before anything that could boot a fleet.
@@ -814,6 +893,15 @@ def submit() -> None:
     # resolved by the workspace, because a submission log has to answer "which images were not pinned,
     # and who said so" without anyone re-deriving it from a command line. `make_body()` is what keeps
     # this list empty when the flag was NOT given, so a non-empty list here always has an author.
+    # Same treatment for the descriptor: if the pin is stale or absent and the operator overrode it, the
+    # submission log has to carry that without anyone re-deriving it from argv.
+    if PUBLISH_VERDICT in ("STALE", "ABSENT"):
+        print(f"rerun submit: --allow-stale-dockstore authorised the Dockstore pin to stay "
+              f"{PUBLISH_VERDICT} -- this submission runs the descriptor Dockstore last synced,"
+              " not the branch tip (gsvtk publish --help for the remedy)")
+    elif PUBLISH_VERDICT == "UNKNOWN":
+        print("rerun submit: the Dockstore pin is UNVERIFIED (the publish check declined) -- not stale,"
+              " not current, simply not answered; see the line above")
     exempt = sorted(k for k in b["inputs"] if k.endswith("_docker") and k not in IMAGES)
     if exempt:
         print("rerun submit: --allow-unpinned-docker authorised these *_docker inputs to stay\n"
@@ -921,6 +1009,10 @@ its config name, its input-key prefix and its root entity all come from terra/st
                     an earlier session or another person. Nothing is POSTed to make them agree: that is
                     `create --confirm`'s decision. An unreadable copy, a 404 and a field the copy does
                     not answer all refuse too: "could not check" is not evidence of agreement.
+  --allow-stale-dockstore   proceed when the publish check says the Dockstore pin is behind the branch
+                            tip, or is not in the capture at all (checks/version_resolves.py, needs
+                            GSVTK_PUBLISH_CAPTURE + GSVTK_PUBLISH_TIP). It does NOT silence a check that
+                            declined to answer: an unmeasured pin is reported, not authorised.
   --allow-unpinned-docker   let a *_docker input resolve from a workspace attribute (off by
                             default: it breaks reproducibility, so it has to be asked for). submit
                             honours it and names the keys it left workspace-resolved before the POST,
@@ -992,6 +1084,8 @@ if __name__ == "__main__":
                 raise SystemExit("--overwrite wants the exact config name you are about to replace, "
                                  "not a yes.\n  It is printed by `show` and by the refusal itself.")
             globals()["OVERWRITE"] = rest[i + 1]; i += 2
+        elif a == "--allow-stale-dockstore":
+            globals()["ALLOW_STALE_DOCKSTORE"] = True; i += 1
         elif a == "--allow-unpinned-docker":
             globals()["ALLOW_UNPINNED"] = True; i += 1
         elif a == "--drop-branch-only-inputs":

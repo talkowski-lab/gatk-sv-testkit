@@ -49,7 +49,7 @@ trap 'rm -rf "$TMP"' EXIT
 # instead of one.
 SELF="$ROOT/scripts/selftest.d/profiles.sh"
 . "$ROOT/scripts/selftest.d/declared.sh"
-GSVTK_DECL_FUNCS="want canary"
+GSVTK_DECL_FUNCS="want canary want_not"
 gsvtk_declared_init "$TMP"          # the ledger is the set of reached sites (bash 3.2: no associative arrays)
 
 # want DESC WANT_RC NEEDLE... -- CMD...
@@ -89,6 +89,43 @@ canary() {
         ok=$((ok + 1)); printf '  ok    this file notices a failing command (canary)\n'
     else
         fail=$((fail + 1)); printf '  FAIL  the harness in %s is vacuous\n' "$0"
+    fi
+}
+
+# want_not DESC WANT_RC NEEDLE... -- FORBIDDEN... -- CMD...
+#
+# `want` can only say "this string appeared". A VERDICT word is worth less than half that: a publish check that
+# printed `CURRENT` and `STALE` in the same run passes a leg needle-matching `CURRENT`, and a check that read an empty
+# capture as "the workflow was never published" passes one needle-matching the refusal's exit code. Both are the shape
+# of bug this repo keeps finding — a check whose all-clear survives the thing being broken — so the negative is graded
+# here, in the same voice, with the same site accounting.
+want_not() {
+    gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED want_not(); one entry per call SITE
+    local desc="$1" wantrc="$2"; shift 2
+    local needles=() forbidden=() out rc n miss=""
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do needles=("${needles[@]-}" "$1"); shift; done
+    shift                                   # the first -- separator
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do forbidden=("${forbidden[@]-}" "$1"); shift; done
+    shift                                   # the second one
+    out="$("$@" 2>&1)"; rc=$?
+    for n in "${needles[@]-}"; do
+        [ -n "$n" ] || continue
+        printf '%s' "$out" | grep -qF -- "$n" || miss="$miss
+          missing: $n"
+    done
+    for n in "${forbidden[@]-}"; do
+        [ -n "$n" ] || continue
+        if printf '%s' "$out" | grep -qF -- "$n"; then
+            miss="$miss
+          printed what it must not: $n"
+        fi
+    done
+    if [ "$rc" = "$wantrc" ] && [ -z "$miss" ]; then
+        ok=$((ok + 1)); printf '  ok    %s (exit %s)\n' "$desc" "$rc"
+    else
+        fail=$((fail + 1))
+        printf '  FAIL  %s (exit %s, want %s)%s\n' "$desc" "$rc" "$wantrc" "$miss"
+        printf '%s\n' "$out" | head -8 | sed 's/^/          /'
     fi
 }
 
@@ -1473,8 +1510,157 @@ want "and an empty listing is refused rather than read as evidence of absence" 4
     env GSVTK_MODULE=single_sample "$PY" "$ROOT/checks/version_resolves.py" \
     --entry github.com/broadinstitute/gatk-sv/SingleSamplePipeline --version main \
     --from-file "$TMP/trs/empty.json"
-want "the checker's own suite runs on the gate, with its fixture count" 0 "5 ok, 0 failed" -- \
+
+# ---------------- depth 2: does the version a rerun names still point at the branch tip? (issue #3)
+#
+# The name resolving is not the question. Dockstore publishes a gatk-sv branch only while that entry's
+# `filters.branches` in `.github/.dockstore.yml` lists it, and a PR cannot carry that edit (upstream's
+# `readonly_check.yaml` fails any PR touching that file) — so when a rebase drops the filter commit, Dockstore stops
+# syncing while the version NAME keeps resolving, and every name-level check passes a stale WDL. Field case, measured
+# 2026-10-14: `GenotypeBatch @ mw_genotype_scale` served 62d7f80d while `refs/heads/mw_genotype_scale` was af68ae48,
+# 12 commits on. Both shas below are those measured commits, and the legs below assert them as literals: a matcher that
+# found nothing anywhere could not pass the stale arm by accident.
+#
+# Fixtures are the committed ones under `scripts/selftest.d/fixtures/trs/` (provenance in that directory's README):
+# one excerpt of a real unauthenticated response, and one labelled shape-holder for the `commitID` rows — that field is
+# what makes the tip question answerable at all, and no anonymous endpoint that serves it was reachable. The tip is
+# driven from a `git ls-remote`-shaped FILE: no leg here touches a remote, a network or a credential.
+TRSFIX="$ROOT/scripts/selftest.d/fixtures/trs"
+TRS="$TRSFIX/dockstore-trs-genotypebatch-2026-10-14.json"
+WV="$TRSFIX/workflowversions-genotypebatch-shape-holder.json"
+GB=github.com/broadinstitute/gatk-sv/GenotypeBatch
+SERVED=62d7f80d0b32eca55ca5eaeae770cf56eccbfeca
+TIP=af68ae488725dddf7d43b66547c9bfa0324db1e1
+MAIN=743dd9d41edeee98bdd97cde0638a89a4432cfe7
+
+want_not "a version whose commitID IS the tip prints CURRENT and never STALE" 0 \
+    "CURRENT" "$SERVED" -- "STALE" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --tip-from-file "$TRSFIX/tip-ls-remote-current.txt"
+want "a version behind the tip is STALE, naming BOTH shas as literals" 1 \
+    "STALE" "$SERVED" "$TIP" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+# The remedy is the deliverable, not a footnote: without the throwaway branch and the filter commit it says, an
+# operator with a stale WDL has a diagnosis and no action. Every token here is load-bearing, so deleting any of them
+# turns this leg red rather than shortening a paragraph.
+want "the stale verdict prints the remedy: a <branch>_terra at the tip plus the filter commit" 1 \
+    "REMEDY" "mw_genotype_scale_terra" "filters.branches" ".github/.dockstore.yml" \
+    "readonly_check.yaml" "under a minute" "GSV_WDL_VERSION=mw_genotype_scale_terra" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+want_not "a version Dockstore does not list is ABSENT (and never CURRENT), with the same remedy" 1 \
+    "ABSENT" "mw_fix_single_sample_blocking" "REMEDY" -- "CURRENT" "STALE" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_fix_single_sample_blocking --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+# Branch selection, not luck: the tip fixture holds TWO `refs/heads/` lines, so asking about `main` against the SAME
+# file must answer CURRENT while asking about `mw_genotype_scale` answers STALE. A comparison that read the first line
+# of `ls-remote` output, or the last, would pass one of those two legs and fail this one.
+want_not "the tip file is read per branch: the same file says CURRENT for main and STALE for the other ref" 0 \
+    "CURRENT" "$MAIN" -- "STALE" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version main --branch main --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+# The real capture, not a shape-holder: the unauthenticated TRS listing carries no commit field at all (341 rows, 0
+# with one), so depth 2 must REFUSE. This is the leg that would go green on a tool that defaulted to CURRENT when it
+# could not find a commit — which is the failure that launches a stale WDL with a confident name on it.
+want_not "the committed REAL capture has no commitID, so depth 2 refuses rather than reporting CURRENT" 4 \
+    "REFUSED" "NO COMMIT TO COMPARE" "0 of 2" -- "CURRENT" "STALE" "ABSENT" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$TRS" --entry "$GB" \
+    --version mw_genotype_scale --tip "$TIP"
+want "and that same real capture still answers depth 1: the name resolves" 0 \
+    "RESOLVES github.com/broadinstitute/gatk-sv/GenotypeBatch @ mw_genotype_scale" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$TRS" --entry "$GB" \
+    --version mw_genotype_scale
+want_not "an empty capture is refused in depth 2 too, and never reported as ABSENT" 4 \
+    "REFUSED" "LISTING UNUSABLE" "not evidence" -- "ABSENT" "CURRENT" "STALE" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$TMP/trs/empty.json" --entry "$GB" \
+    --version mw_genotype_scale --tip "$TIP"
+want_not "a tip source that omits the asked-for branch refuses instead of reading absence" 4 \
+    "REFUSED" "refs/heads/mw_genotype_scale_terra" -- "ABSENT" "CURRENT" "STALE" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --branch mw_genotype_scale_terra \
+    --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+want "asking for a branch with no tip at all is a refusal that prints the tip command" 4 \
+    "REFUSED" "git -C <gatk-sv checkout> ls-remote origin refs/heads/mw_genotype_scale" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --branch mw_genotype_scale
+# "Each Dockstore entry a rerun names" is a SET, so the answer is a set of verdicts plus one counting line: the shape
+# of the output an operator reads before choosing which remedy to run.
+want "--all-steps answers for every entry the launcher names, and counts the verdicts" 1 \
+    "publish check:" "1 STALE," "named by the launcher" -- \
+    "$PY" "$ROOT/checks/version_resolves.py" --from-file "$WV" --all-steps \
+    --version mw_genotype_scale --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+
+# The CLI, wired and read-only. Under GSVTK_READ_ONLY=1 — the state the shipped skill's shim puts it in — this must
+# DISPATCH, not be refused: it grades a file, opens no workspace, launches nothing. The `--ls-remote` arm is the only
+# path that could reach a remote, and no leg runs it (there is nothing to grade that a fixture does not grade, and a
+# leg that fetched would fail on the next machine — the rule the module docstring is built on. `--fetch` is the
+# second such arm now (one GET per entry, unauthenticated); what its legs grade is its OFFLINE refusal, below.
+want_not "gsvtk publish dispatches under --read-only and says STALE (no refusal, both shas)" 1 \
+    "STALE" "$SERVED" "$TIP" "mw_genotype_scale_terra" -- "gsvtk: refusing" "usage:" -- \
+    env GSVTK_READ_ONLY=1 "$ROOT/gsvtk" --read-only publish --from-file "$WV" --entry "$GB" \
+    --version mw_genotype_scale --tip-from-file "$TRSFIX/tip-ls-remote-stale.txt"
+want "--ls-remote with a --tip already typed is refused: one comparison per verdict" 2 \
+    "would replace the tip you already passed" -- \
+    env GSVTK_READ_ONLY=1 "$ROOT/gsvtk" --read-only publish --ls-remote --tip "$TIP" \
+    --entry "$GB" --version mw_genotype_scale
+want "--ls-remote with no branch named is refused too, rather than reading some ref at random" 2 \
+    "needs to know which branch to ask for" -- \
+    env GSVTK_READ_ONLY=1 "$ROOT/gsvtk" --read-only publish --ls-remote --from-file "$WV" --entry "$GB"
+want "the tool's own suite runs on the gate, with its fixture count" 0 "17 ok, 0 failed" -- \
     "$PY" "$ROOT/checks/version_resolves.py" --selftest
+
+# ---------------- the route issue #3 actually named (measured 2026-10-15, and it is anonymous)
+#
+# Everything above grades a HAND-BUILT shape-holder, because this file's own docs (and the module docstring) claimed the
+# anonymous routes carried no commit at all: `/versions` -> 404, `?include=versions` -> 401. Both numbers were right.
+# The conclusion was not: `/published?include=versions` was never tried, and it answers 200 with no token and a
+# `commitID` on all 28 rows. So `CURRENT` and `STALE` stop being reachable only from a file someone assembled by hand,
+# and the correction is measured here rather than asserted in prose.
+#
+# The fixture is the real body, excerpted (provenance in the fixture's `_about` and in that directory's README). Two of
+# its keys are decoys that make these legs mean something: on this document `workflow_path` is the DESCRIPTOR FILE
+# (`/Dockstore.cwl`) and `path` is the repo — both contain a `/`, so a generic "is this an entry path?" test accepts
+# them, and an entry read that way files every version under a `.cwl` filename and then answers ABSENT for the entry
+# that was asked about. That is a wrong answer wearing an answer's clothes, which is the one thing this file refuses.
+PUB="$TRSFIX/dockstore-published-genotypebatch-excerpt.json"
+
+want_not "the real published-entry capture parses as its own shape, with a commit on every row" 1 \
+     "capture: Dockstore published entry (workflowVersions), 1 entry, 4 version rows, 4 carrying a commitID" \
+     -- "/Dockstore.cwl" "unrecognised" -- \
+     "$PY" "$ROOT/checks/version_resolves.py" --from-file "$PUB" --entry "$GB" \
+     --version mw_genotype_scale --tip "$TIP"
+want "and it grades the field case STALE from Dockstore's own bytes, naming both shas" 1 \
+     "STALE" "$SERVED" "$TIP" "mw_genotype_scale_terra" -- \
+     "$PY" "$ROOT/checks/version_resolves.py" --from-file "$PUB" --entry "$GB" \
+     --version mw_genotype_scale --tip "$TIP"
+want_not "and CURRENT when the tip IS the commit Dockstore serves (same file, different tip)" 0 \
+     "CURRENT github.com/broadinstitute/gatk-sv/GenotypeBatch @ mw_genotype_scale" -- "STALE" -- \
+     "$PY" "$ROOT/checks/version_resolves.py" --from-file "$PUB" --entry "$GB" \
+     --version mw_genotype_scale --tip "$SERVED"
+want_not "the entry comes from full_workflow_path, never from the descriptor path or the repo path" 1 \
+     "STALE" -- "/Dockstore.cwl" "github.com/broadinstitute/gatk-sv @" -- \
+     "$PY" "$ROOT/checks/version_resolves.py" --from-file "$PUB" --entry "$GB" \
+     --version mw_genotype_scale --tip "$TIP"
+# A fetcher must not keep its own list of what to fetch: two derivations drift, and the drift shows up as a verdict
+# about an entry nobody asked about. The grader prints the list, the fetcher reads it.
+want "--print-entries prints the entry a fetch would read, from the launcher's own derivation" 0 \
+     "github.com/broadinstitute/gatk-sv/GenotypeBatch" -- \
+     "$PY" "$ROOT/checks/version_resolves.py" --print-entries --step 10
+# The fetch arm's offline arm. A blackholed root is the only way a leg can drive a network path without a network: the
+# point graded is not the GET but what a failed GET BECOMES. It must be REFUSED at exit 3, naming the entry — never a
+# partial capture handed to the grader, which would report the entry it never saw as ABSENT. That distinction (a check
+# that declined is not a check that found nothing) is the whole reason `REFUSED` exists as a fourth verdict.
+want_not "a fetch that cannot reach Dockstore is REFUSED at exit 3, and never becomes an ABSENT verdict" 3 \
+     "REFUSED" "never read" "cannot be called ABSENT" -- "CURRENT" "STALE" "ABSENT github" -- \
+     env GSVTK_DOCKSTORE_API_ROOT=http://127.0.0.1:9/ "$ROOT/gsvtk" publish --fetch --step 10 \
+         --branch mw_genotype_scale --tip "$TIP"
+want_not "publish-check <branch> is the live one-liner, and the read-only shim does NOT refuse it (a GET is not a write)" 3 \
+     "REFUSED" -- "gsvtk: refusing" "CURRENT" "STALE" -- \
+     env GSVTK_READ_ONLY=1 GSVTK_DOCKSTORE_API_ROOT=http://127.0.0.1:9/ "$ROOT/gsvtk" publish-check mw_genotype_scale
+want "--fetch together with --from-file is a usage error, not a precedence" 2 \
+     "would replace the capture passed with --from-file" -- \
+     env GSVTK_READ_ONLY=1 "$ROOT/gsvtk" publish --fetch --from-file "$PUB" --entry "$GB" --version mw_genotype_scale
 
 printf 'profiles selftest: %s ok, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
 # Equal sets, every run. What the pair cannot see is a DELETION: remove a call site and declared and reached

@@ -1039,6 +1039,16 @@ gsvtk <command> — the gatk-sv-testkit command line
                             ${this.<etype>_id}, cross-checked against the entity tables that ref ships,
                             plus a census of what the tool did NOT check. Read-only either way — it reads
                             a ref with `git archive` or a directory you name, never a workspace
+  publish [--from-file CAPTURE] [--step NN | --all-steps] [--entry E --version V] [--branch B]
+          [--tip SHA | --tip-from-file FILE | --ls-remote] [--fetch]
+                            is the Dockstore version a rerun names still the branch tip? One tool
+                            (checks/version_resolves.py), two depths: the name resolves, and the commit
+                            behind it. Reads a capture you made; fetches only if you pass --ls-remote
+                            (one read-only `git ls-remote`), and writes nothing anywhere, so it runs
+                            under GSVTK_READ_ONLY=1 with no --confirm
+  publish-check <branch>    the same check with the live defaults filled in: --fetch (one unauthenticated GET
+                            per entry) plus --ls-remote for the tip. Both are GETs: nothing POSTed, nothing
+                            written, so it too runs under GSVTK_READ_ONLY=1 with no --confirm
   build <branch> [image ...] [--confirm]
                             no flags but --confirm: the default IS the free preview (--check then
                             --dry-run); --confirm does the real build. Other gatk-sv-build.sh flags
@@ -1138,6 +1148,204 @@ cmd_entity() {
   return $rc
 }
 
+# ------------------------------------------------------------------ publish
+# Is the Dockstore version a rerun names still the branch tip? Dispatches checks/version_resolves.py, which owns the
+# verdicts; this function owns flags, the tip seam, and nothing else.
+#
+# Read-only by construction, so it dispatches under GSVTK_READ_ONLY=1 with no --confirm, exactly like `entity`: it
+# grades a file you already captured, opens no workspace, and cannot launch or spend anything. What it does not inherit
+# is a network read. The default run touches nothing outside this checkout. `--ls-remote` is the one opt-in read: one
+# `git ls-remote`, refs only, needing no Terra or gcloud credential (a private remote uses your own git auth), and
+# printed before it runs. It is NOT what the offline gate exercises -- the legs pass `--tip-from-file`, because a check
+# that silently reaches the network is a check that fails differently on the next machine.
+cmd_publish() {
+  local from="" step="" entry="" version="" branch="" tip="" tipfile="" ck="" want_all=0 want_ls=0 want_fetch=0 check_mode=0
+  local capmk="" entfile=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        printf '%s\n' \
+'usage: gsvtk publish [--from-file CAPTURE] [--step NN | --all-steps] [--entry E --version V]' \
+'                     [--branch B] [--tip SHA | --tip-from-file FILE | --ls-remote]' \
+'' \
+'For each Dockstore entry a rerun names: is the descriptor Dockstore serves still the branch tip?' \
+'' \
+'One tool answers it (checks/version_resolves.py), at two depths. The NAME resolves, and the COMMIT behind it.' \
+'Without a tip source you get the name answer (RESOLVES / NO SUCH ENTRY / NO SUCH VERSION). With one you get' \
+'CURRENT, STALE, ABSENT or REFUSED -- and STALE names both shas, because "it is behind" is not actionable.' \
+'' \
+'  --from-file CAPTURE   a captured Dockstore listing. The grader itself never fetches (a check that reaches the' \
+'                        network fails differently on the next machine), so this hands it a file you made.' \
+'  --fetch               MAKE that file: one unauthenticated GET per entry, on the route issue #3 names --' \
+'                        <root>workflows/path/workflow/<entry>/published?include=versions, root being' \
+'                        $GSVTK_DOCKSTORE_API_ROOT (default https://dockstore.org/api/). Read-only: a GET, no token,' \
+'                        nothing POSTed. This is the arm `publish-check` takes by default. If a GET fails the command' \
+'                        STOPS at exit 3 naming the entry -- a capture never read is REFUSED, and grading a partial one' \
+'                        would call the entry it never saw ABSENT, the one thing this check promised not to do.' \
+'  --step NN | --all-steps' \
+'                        which entries to ask about: one step of the module profile, or every entry a rerun can name' \
+'  --entry E --version V ask about them directly instead of deriving them from the launcher' \
+'  --branch B            the branch the version names; default the version name itself, which for these entries' \
+'                        IS a branch name. A branch with no tip source is a REFUSAL that prints the tip command, not' \
+'                        a depth-1 pass -- answering depth 1 to a depth-2 question is how a stale WDL gets an' \
+'                        all-clear, which is the defect this subcommand exists to catch.' \
+'  --tip SHA             the commit at refs/heads/<branch>, pasted from git ls-remote' \
+'  --tip-from-file FILE  a file holding that ls-remote output (the seam the offline gate drives)' \
+'  --ls-remote           read it instead: one `git ls-remote origin refs/heads/<branch>` against' \
+'                        $GSVTK_GATK_SV_CHECKOUT, fed in as --tip-from-file. Read-only, and the only network this' \
+'                        subcommand can make.' \
+'' \
+'Read-only either way: no --confirm, no Terra call, nothing launched, nothing written. On STALE or ABSENT it prints' \
+'the remedy (a throwaway <branch>_terra at the tip plus the filter commit, then re-check) and runs none of it.' \
+'' \
+'Exit codes are the tool'"'"'s: 0 CURRENT, 1 STALE/ABSENT, 2 usage, 3 --ls-remote could not read the remote,' \
+'4 REFUSED (the capture or the tip source cannot answer). checks/version_resolves.py --help is authoritative for its' \
+'own flags.'
+        return 0;;
+      --from-file)     from="${2:?publish --from-file needs a capture file (CAPTURE in checks/version_resolves.py --help has the curl)}"; shift 2;;
+      --step)          step="${2:?publish --step needs a step number}"; shift 2;;
+      --entry)         entry="${2:?publish --entry needs a Dockstore entry path}"; shift 2;;
+      --version)       version="${2:?publish --version needs the version name the launch carries}"; shift 2;;
+      --branch)        branch="${2:?publish --branch needs a branch name}"; shift 2;;
+      --tip)           tip="${2:?publish --tip needs the sha from git ls-remote}"; shift 2;;
+      --tip-from-file) tipfile="${2:?publish --tip-from-file needs a file holding git ls-remote output}"; shift 2;;
+      --ls-remote)     want_ls=1; shift;;
+      --fetch)         want_fetch=1; shift;;
+      --check)         check_mode=1; shift;;
+      [!-]*)           [ -z "$branch" ] && { branch="$1"; version="$1"; }; shift;;
+      --all-steps)     want_all=1; shift;;
+      --)              shift; while [ $# -gt 0 ]; do pyargs+=("$1"); shift; done;;
+      -*)              die "publish: unknown flag $1 (flags: --from-file CAPTURE --fetch --step NN --all-steps --entry E --version V --branch B --tip SHA --tip-from-file FILE --ls-remote; run: gsvtk publish --help)";;
+    esac
+  done
+  cd "$ROOT" || die "cd failed"
+  stamp
+  [ -n "$from" ]    && pyargs+=(--from-file "$from")
+  [ -n "$step" ]    && pyargs+=(--step "$step")
+  [ -n "$entry" ]   && pyargs+=(--entry "$entry")
+  [ -n "$version" ] && pyargs+=(--version "$version")
+  [ -n "$branch" ]  && pyargs+=(--branch "$branch")
+  [ -n "$tip" ]     && pyargs+=(--tip "$tip")
+  [ -n "$tipfile" ] && pyargs+=(--tip-from-file "$tipfile")
+  [ "$want_all" = 1 ] && pyargs+=(--all-steps)
+  # The scope default is EVERY entry a rerun can name, not step 01. This started as a bug in the fetch arm and is a
+  # pre-existing one in the plain command: the launcher map knows 06-10, so the old python-side default of `01` made
+  # `publish --branch X --tip Y` (no --step) die with "unknown step '01'" -- a check that cannot be invoked is not a
+  # check. `publish-check <branch>` asks about a branch, and one branch can back several entries, so "answer for the
+  # whole set" is the question that was actually asked. An explicit --step or --entry still scopes it.
+  if [ -z "$step" ] && [ -z "$entry" ] && [ "$want_all" != 1 ]; then
+    want_all=1
+    pyargs+=(--all-steps)
+  fi
+  # `publish-check BRANCH` is the shape issue #3 asked for, so a bare branch name means "answer the live question about
+  # that branch": the Dockstore capture AND the branch tip are both read. An explicit source on either side wins --
+  # --from-file means "grade the file I already have", --tip/--tip-from-file means "compare against THIS commit" -- so
+  # defaults are filled in, never overridden.
+  if [ "$check_mode" = 1 ]; then
+    [ -n "$from" ] || [ "$want_fetch" = 1 ] || want_fetch=1
+    if [ -z "$tip" ] && [ -z "$tipfile" ] && [ "$want_ls" != 1 ]; then want_ls=1; fi
+  fi
+  # One answer per question: --fetch and --from-file both decide what the capture IS, and letting a fetch overwrite
+  # the file the caller named would grade something other than the evidence they pointed at.
+  if [ "$want_fetch" = 1 ] && [ -n "$from" ]; then
+    die "publish: --fetch would replace the capture passed with --from-file, and a verdict is a claim about ONE document.
+  Grade the file:   ./gsvtk publish --from-file <capture> ...
+  Read the live one: ./gsvtk publish-check <branch>   (or publish --fetch alone)"
+  fi
+  # The capture arm: one GET per entry THIS invocation would grade -- the entry list comes from the grader's own
+  # --print-entries, so fetcher and grader cannot disagree about what is in scope. Bodies are assembled into a JSON
+  # array, which is the second shape parse_capture reads (a list of published-entry documents).
+  if [ "$want_fetch" = 1 ]; then
+    local root="${GSVTK_DOCKSTORE_API_ROOT:-https://dockstore.org/api/}"
+    entfile="$(mktemp "${TMPDIR:-/tmp}/gsvtk-publish-ents.XXXXXX")" || die "publish: cannot make a temp file"
+    capmk="$(mktemp "${TMPDIR:-/tmp}/gsvtk-publish-cap.XXXXXX")" || die "publish: cannot make a temp file"
+    local -a entsel=(--print-entries)
+    if [ "$want_all" = 1 ]; then entsel+=(--all-steps); else entsel+=(--step "${step:-01}"); fi
+    [ -n "$entry" ] && entsel+=(--entry "$entry")
+    [ -n "$version" ] && entsel+=(--version "$version")
+    if ! "$PY" checks/version_resolves.py "${entsel[@]}" > "$entfile" 2>&1; then
+      local ew; ew="$(head -3 "$entfile" 2>/dev/null)"; rm -f "$entfile" "$capmk"; entfile=""; capmk=""
+      printf 'gsvtk: the entry list could not be derived (nothing was fetched). Its words:\n  %s\n' "${ew:-the tool said nothing}" >&2
+      exit 2
+    fi
+    printf '[\n' > "$capmk"
+    local n_done=0 sep="" body ent
+    while IFS= read -r ent; do
+      [ -n "$ent" ] || continue
+      local enc url; enc="${ent//\//%2F}"; url="${root%/}/workflows/path/workflow/$enc/published?include=versions"
+      printf 'fetch     GET %s  (unauthenticated: no token, no POST)\n' "$url" >&2
+      body="$(mktemp "${TMPDIR:-/tmp}/gsvtk-publish-body.XXXXXX")"
+      if ! curl -fsS --max-time 90 -o "$body" "$url" 2>/dev/null \
+         || ! "$PY" -c 'import json,sys; json.load(open(sys.argv[1]))' "$body" 2>/dev/null; then
+        rm -f "$body" "$entfile" "$capmk"; entfile=""; capmk=""
+        printf 'gsvtk: REFUSED -- Dockstore could not be consulted for %s (nothing was compared, no verdict implied).
+  This is NOT an absence answer: the entry was never read, so it cannot be called ABSENT. Grade a file you read
+  yourself:  curl -fsS "%s" -o capture.json && ./gsvtk publish --from-file capture.json ...
+' "$ent" "$url" >&2
+        exit 3
+      fi
+      printf '%s  ' "$sep" >> "$capmk"; cat "$body" >> "$capmk"; rm -f "$body"
+      sep=","; n_done=$((n_done + 1))
+    done < "$entfile"
+    printf '\n]\n' >> "$capmk"
+    printf 'capture %s fetched (%s, unauthenticated)\n' "$n_done" "${root%/}" >&2
+    from="$capmk"
+    pyargs+=(--from-file "$capmk")
+  fi
+  # Two answers to "where does the tip come from" is a usage error, not a precedence: a verdict is a claim about ONE
+  # comparison, and letting --ls-remote overwrite a --tip the caller typed would silently change which commit was
+  # graded -- the same reason `entity` refuses --tree together with --ref/--repo.
+  if [ "$want_ls" = 1 ] && { [ -n "$tip" ] || [ -n "$tipfile" ]; }; then
+    die "publish: --ls-remote would replace the tip you already passed, and a verdict is a claim about one comparison.
+  Pass one of:
+    ./gsvtk publish --ls-remote ...                      # read refs/heads/<branch> now (read-only)
+    ./gsvtk publish --tip <sha> ...                      # the sha you already read
+    ./gsvtk publish --tip-from-file <file> ...           # a capture of that output (what the offline gate does)"
+  fi
+  # --ls-remote is the one arm of this subcommand that touches the network, so it states what it reads and where from.
+  # The ref must come from the GATK-SV remote and not from this checkout's: asking the testkit's origin about a
+  # gatk-sv branch answers a question about the wrong repository and prints it as a verdict.
+  if [ "$want_ls" = 1 ]; then
+    local target="${branch:-$version}"
+    if [ -z "$target" ]; then
+      die "publish --ls-remote needs to know which branch to ask for: pass --branch NAME (or --version NAME, which is
+  a branch name for these entries). Reading some ref and comparing it to your version is not a check; it is a coin
+  flip that prints CURRENT."
+    fi
+    ck="$(cfg GATK_SV_CHECKOUT)"
+    [ -n "$ck" ] || die "publish --ls-remote needs a gatk-sv checkout to ask its origin: export GSVTK_GATK_SV_CHECKOUT=<path> (that is where refs/heads/<branch> lives; this testkit's own origin does not hold gatk-sv branches). Or pass --tip / --tip-from-file and run this offline."
+    [ -d "$ck" ] || die "publish --ls-remote: GSVTK_GATK_SV_CHECKOUT=$ck is not a directory (run: gsvtk doctor)"
+    local tipmk
+    tipmk="$(mktemp "${TMPDIR:-/tmp}/gsvtk-publish-tip.XXXXXX")" || die "publish: cannot make a temp file for the tip"
+    printf 'tip       git -C %s ls-remote origin refs/heads/%s\n' "$ck" "$target" >&2
+    if ! git -C "$ck" ls-remote origin "refs/heads/$target" > "$tipmk" 2>&1; then
+      local why; why="$(head -3 "$tipmk" 2>/dev/null)"; rm -f "$tipmk"
+      printf 'gsvtk: git ls-remote could not read refs/heads/%s (nothing was compared). Its words:\n  %s\n' \
+        "$target" "${why:-git said nothing}" >&2
+      exit 3
+    fi
+    tipfile="$tipmk"
+    pyargs+=(--tip-from-file "$tipmk")
+  fi
+  # The tool, not a re-implementation of it: the verdict words, the remedy and the two capture shapes all live in
+  # checks/version_resolves.py, so what prints here is what its own legs grade.
+  "$PY" checks/version_resolves.py ${pyargs[@]+"${pyargs[@]}"}
+  local rc=$?
+  # Delete ONLY the files this function made, tested by the variable holding the path and not by a flag being
+  # non-empty -- see the want_ls comment two lines below, which is that bug class named.
+  [ -n "$capmk" ] && rm -f "$capmk"
+  [ -n "$entfile" ] && rm -f "$entfile"
+  # Delete ONLY the file this function made. A `[ -n "$want_ls" ]` test here was the bug class this repo keeps naming:
+  # `want_ls` is initialised to `0`, which is a non-empty string, so the first run that passed `--tip-from-file` ate the
+  # caller's fixture and the next one reported it missing. Ownership of a file is not a flag being truthy.
+  [ -n "${tipmk:-}" ] && rm -f "$tipmk"
+  if [ "$rc" = 1 ]; then
+    printf '  (STALE or ABSENT: the remedy above names the throwaway branch and the filter commit. Nothing here\n'
+    printf '   pushed, POSTed or launched anything, and the same command re-run after the sync is the re-check.)\n'
+  fi
+  return $rc
+}
+
 # ------------------------------------------------------------------ dispatch
 # Leading global flags only: a --confirm after the subcommand belongs to that subcommand's argument
 # rules, and is picked up by whichever gate needs it.
@@ -1167,6 +1375,8 @@ case "$cmd" in
   check)    shift; if [ "${1:-}" = "image" ]; then shift; cmd_check_image "$@"; fi; cmd_check "$@";;
   gate)     shift; cmd_check "$@";;        # the name the released skill (<=0.5.0) used; kept working
   entity)   shift; cmd_entity "$@";;
+  publish)  shift; cmd_publish "$@";;   # read-only by construction: no gate, no --confirm, nothing to refuse
+  publish-check) shift; cmd_publish --check "$@";;   # issue #3's one-liner: gsvtk publish-check <branch> reads Dockstore and the branch tip, both GETs
   build)    shift; cmd_build "$@";;
   terra)    shift; cmd_terra "$@";;
   compare)  shift; cmd_compare "$@";;

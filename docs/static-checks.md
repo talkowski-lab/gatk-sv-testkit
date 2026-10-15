@@ -1,7 +1,9 @@
 # Static checks: catching it before a VM boots
 
-Seven checkers, all local, all seconds, none needing data, docker, or a Terra account. They
-exist because gatk-sv has classes of breakage that no existing CI sees:
+Every checker here is local, runs in seconds, and needs no data, no docker and no Terra account.
+No count is stated for them, on purpose: this list has outgrown a fixed number twice, and a stale
+tally in the first line is a reason not to trust the rest of the paragraph. They exist because
+gatk-sv has classes of breakage that no existing CI sees:
 
 | Breakage | Why normal CI misses it | Checker |
 |---|---|---|
@@ -16,6 +18,7 @@ exist because gatk-sv has classes of breakage that no existing CI sees:
 | A Terra method config binding an input the WDL at that ref does not declare | `wdl_gate.sh` compares call sites **inside** a WDL tree; nothing there knows about method configs, and `validate` asks Terra, which needs the ref published on Dockstore | `terra/batch_configs.py check --against <ref>` (below, and it is the pre-check of `create`/`validate`) |
 | A launch config whose entity type is a guess, or whose `${this.<attr>}` reads are not columns of any entity table the ref ships | a method config is JSON, not WDL: no validator opens it, and a wrong `entityType` is not an error — it resolves every `this.*` binding to nothing at run time, after the VMs booted | `terra_entity_check.py` |
 | The config that names a workflow binds **nothing** for an input that workflow requires — not an entity read, not a workspace attribute, not a literal | nothing compares a method config to the required-input set of the workflow its own `methodRepoMethod` points at: `wdl_gate.sh`'s `MISSING-INPUTS` asks about gatk-sv's **test** input JSONs, and `batch_configs.py check` asks about keys the WDL does not *declare* (the mirror direction). Cromwell asks at input-resolution time, mid-submission | `terra_entity_check.py` (`UNRESOLVED-REQUIRED`, via `GSVTK-REQUIRED`) |
+| A Dockstore version whose **name resolves** while the commit behind it sits behind the branch tip, so the launch runs a week-old WDL under a name that sounds current | nothing in CI compares a published Dockstore version against a git ref — and the only thing that keeps a gatk-sv version moving is that entry's `filters.branches` in `.github/.dockstore.yml`, a file upstream's `readonly_check.yaml` forbids any PR to touch, so once a rebase drops the commit that added the filter the sync stops while the name keeps resolving. Every name-level check says `RESOLVES` | `version_resolves.py` (depth 2, `--tip-from-file`; `STALE` names both shas) |
 
 The last checker lives in `terra/` rather than `checks/` because it checks this repo's own config
 table against a WDL ref, not gatk-sv's source. It is still offline: `git archive` of `wdl/` from
@@ -31,6 +34,7 @@ branch-only key it currently reports against `main`.
 * [`svshell_contract_check.py`: the rename that becomes `null`](#svshell_contract_checkpy-the-rename-that-becomes-null)
 * [`svshell_jq_plumbing_scan.py`: execute the plumbing instead of reading it](#svshell_jq_plumbing_scanpy-execute-the-plumbing-instead-of-reading-it)
 * [`terra_entity_check.py`: which entity row a launch config runs against](#terra_entity_checkpy-which-entity-row-a-launch-config-runs-against)
+* [`version_resolves.py`: does the version a launch names still point at the tip](#version_resolvespy-does-the-version-a-launch-names-still-point-at-the-tip)
 * [`image-check/`: proof about shipped bytes, not checkout bytes](#image-check-proof-about-shipped-bytes-not-checkout-bytes)
 * [`audit_history.py`: what the object store would publish](#audit_historypy-what-the-object-store-would-publish)
 * [Using them as gates](#using-them-as-gates)
@@ -761,6 +765,68 @@ resolves a checkout. The mechanism is written out at `scripts/selftest.d/entity.
 network, no credentials, no jar — and no `miniwdl` for the legs outside the two `*miniwdl*` regions, which is
 what the `entity-no-miniwdl` skip is for: the phase that owes a required-input answer says it withheld it, and
 `Qblind` runs the missing-miniwdl arm anyway.
+
+## `version_resolves.py`: does the version a launch names still point at the tip
+
+```bash
+checks/version_resolves.py --step 01 --from-file /tmp/trs-single-sample.json   # depth 1: does the NAME resolve
+checks/version_resolves.py --from-file capture.json --all-steps \
+    --tip-from-file /tmp/ls-remote.txt          # depth 2: is the commit behind it the TIP
+gsvtk publish --from-file capture.json --all-steps --tip-from-file /tmp/ls-remote.txt
+```
+
+One tool at two depths, because both questions read the same capture document and two tools answering one question
+with two vocabularies is a reader reconciling verdicts. **Depth 1** answers whether the `(entry, version)` the launcher
+will put in `methodRepoMethod` exists at all: `RESOLVES`, `NO SUCH ENTRY`, `NO SUCH VERSION`, or a refusal. It grades
+the pair that `batch_rerun_step.dstore()` itself builds, so a body builder that disagrees with the profile cannot pass.
+**Depth 2** adds a tip source — `--tip`, or `--tip-from-file` holding `git ls-remote origin refs/heads/<branch>` output
+— and answers one word: `CURRENT`, `STALE` (naming **both** shas), `ABSENT`, or `REFUSED`. `--all-steps` answers for
+every entry the launcher can name rather than for one step's, and prints a counting line. `gsvtk publish` dispatches
+the same file; it is read-only, takes no `--confirm`, and runs under `GSVTK_READ_ONLY=1`. Exit codes are the CLI's:
+0 `CURRENT`, 1 `STALE`/`ABSENT`, 2 usage, 4 `REFUSED`.
+
+It never fetches, and that is the contract rather than a limitation: the operator captures with the `curl` in
+`--help`, and a check that silently reaches the network is a check that fails differently on someone else's machine.
+`--tip-from-file` exists so the comparison itself is gradeable offline — it is what the gate drives. `gsvtk publish
+--ls-remote` is the one arm allowed to reach out (one read-only `git ls-remote`, refs only, no Terra or gcloud
+credential), it says which remote it is asking, and no leg runs it.
+
+**Why a name is not a commit — the structural cause, not a one-off.** Dockstore publishes a gatk-sv branch only while
+that branch is listed in **that entry's** `filters.branches` in `.github/.dockstore.yml`, and a PR branch cannot carry
+that edit: upstream's `.github/workflows/readonly_check.yaml` fails any PR that touches the file. Both read at
+`origin/main` on 2026-10-14 — the `GenotypeBatch` entry's filter is `branches: [main]`, and the check's list is
+`readonly_files=(".github/.dockstore.yml" "inputs/values/dockers.json")`. So when a rebase drops the commit that added
+the filter, Dockstore stops syncing the branch, while the version name it already published keeps resolving. Depth 1
+says `RESOLVES`, Terra's `validate` passes, and the launch runs the descriptor Dockstore last saw. There is no CI that
+can see this coming, because the fix cannot be committed on the branch that needs it. The remedy the tool prints is
+therefore a sidecar: branch `<branch>_terra` at the tip, one commit on it adding `<branch>_terra` to that entry's
+`filters.branches`, wait for the sync (under a minute in practice), re-check naming `<branch>_terra`, and move
+`GSV_WDL_VERSION` to it. The tool prints those commands and runs none of them.
+
+**Measured, 2026-10-14 (dated capture note; one read-only capture, no credentials, no POST).** For the field case
+`GenotypeBatch @ mw_genotype_scale`: the unauthenticated TRS listing still **lists the version** — 3 entries, 341
+version rows — while `git ls-remote origin refs/heads/mw_genotype_scale` answers
+`af68ae488725dddf7d43b66547c9bfa0324db1e1`. The commit Dockstore was serving, `62d7f80d0b32eca55ca5eaeae770cf56eccbfeca`,
+is 12 commits back, and its committer timestamp equals that version row's `meta_version` (`2026-10-01 16:07:38`) to the
+second, which is what a per-version last-sync stamp means. The same listing also answers a design question, and answers
+it no: **341 version rows, 0 carrying a commit field of any spelling.** Dockstore's own `openapi.json` puts `commitID`
+on `WorkflowVersion`/`Tag`/`Version` and not on `ToolVersion`. An earlier revision of this page concluded from two
+closed routes that a `commitID` capture therefore required a token; re-measured 2026-10-15 against
+`.../path/workflow/github.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch`, and both old numbers were right while the
+conclusion was not: `?include=versions` alone → **401**, `/versions` → **404**, and — the one never tried —
+`/published?include=versions` → **200 unauthenticated, 28 version rows, 28 carrying `commitID`**. So depth 2 needs no
+token, `gsvtk publish --fetch` runs that GET, and a capture that omits the entry is still a **`REFUSED`** for that
+entry and never a `CURRENT` — the leg that grades the real committed capture exists to keep that true.
+
+What it does **not** prove, stated rather than implied:
+
+* the `commitID` fixture under `scripts/selftest.d/fixtures/trs/` is a **shape-holder**, labelled as one — its field
+  names are Dockstore's, its two shas are real commits measured that day, and no live endpoint that would answer with
+  exactly that envelope was reachable anonymously (see that directory's `README.md`);
+* the committed real capture is an **excerpt**: 1 entry and 2 version rows out of the 3 entries and 341 rows measured.
+  The rest stays out of the repo, because a full listing is a list of other people's branch names;
+* `--ls-remote`, the sync delay of "under a minute", and the remedy's *effectiveness* are operations reports, not
+  measurements any leg makes. Nothing here launches, POSTs, pushes or spends: every leg grades a file.
 
 ## `image-check/`: proof about shipped bytes, not checkout bytes
 
