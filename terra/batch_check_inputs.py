@@ -389,6 +389,56 @@ def attribute_state(attrs: dict, attr: str) -> str:
     return STATE_PRESENT
 
 
+def suffix_disagreement(missing: list, seen: dict, expected: str, src: tuple) -> str:
+    """"0 of N under `_new`, N of N under `_h2h`" when a row's outputs exist under ANOTHER suffix.
+
+    A bare `ABSENT` is true and useless in the most common shape of a mismatched sandbox: the step ran,
+    it wrote its outputs, and it wrote them under a different suffix -- a `--tag` rerun writes `_TAG`, a
+    second chain in one workspace carries its own `GSVTK_NEW_SUFFIX`, and a suffix exported for one run
+    and not this one is the version of that mistake that looks like a broken branch. The data is there;
+    the NAME this config asks for is not. Saying only ABSENT sends the reader to fetch outputs that exist.
+
+    So for every missing name that ends with the expected suffix, look on the SAME row for the same stem
+    under some other suffix, and report what the row actually carries. Three limits, because this is the
+    kind of helpful line that becomes a lie if it is allowed to guess:
+      * only rows that were READ are consulted (`seen` is filled from a real read, capture or live), so a
+        row that answered 404, or a lookup that declined, can never contribute a counterpart;
+      * the numbers are counted, not asserted -- `found of candidates`, and the two can differ;
+      * a row that explains nothing prints NOTHING. An agreeing sandbox must not see this line, which is
+        the arm of the contract that keeps the diagnostic from becoming noise.
+
+    `src` is `(value, source)` straight from `config.resolve()`, so the line says whether the suffix in
+    force is the shipped default or this shell's override -- the same provenance `gsvtk doctor --redact`
+    prints, next to the claim that depends on it.
+    """
+    if not expected or not missing or not seen:
+        return ""
+    out = []
+    for (rtype, rname), names in sorted(seen.items()):
+        candidates = 0
+        explained: dict = {}
+        for ref in missing:
+            base = ref.rsplit(".", 1)[-1]
+            if not base.endswith(expected):
+                continue
+            candidates += 1
+            stem = base[:-len(expected)]
+            for nm in names:
+                if nm != base and nm.startswith(stem + "_"):
+                    explained.setdefault(nm[len(stem):], []).append(base)
+        if not explained or not candidates:
+            continue
+        sfx, refs = max(explained.items(), key=lambda kv: (len(kv[1]), kv[0]))
+        value, source = src
+        out.append(f"      note    0 of {candidates} expected output(s) under `{expected}`, "
+                   f"{len(refs)} of {candidates} under `{sfx}` -- on {rtype}/{rname} the outputs ARE "
+                   f"there under a different suffix, so this is a suffix mismatch and not a missing "
+                   f"input. The suffix in force is NEW_SUFFIX={value!r} (source: {source}); re-run with "
+                   f"GSVTK_NEW_SUFFIX={sfx.lstrip('_')} set, or read the `{sfx}` attributes "
+                   f"(a rerun launched with --tag {sfx.lstrip('_')} is what writes names like that).")
+    return "\n".join(out)
+
+
 def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: str) -> list:
     """Check 2b: every reference in the config's bindings, looked up on the row it is read from.
 
@@ -429,6 +479,10 @@ def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: s
     # and not just claimed.
     row_cache: dict = {}
     workspace_cache: list = []
+    # What each row the check ACTUALLY READ carries, by name. `suffix_disagreement` is the only consumer,
+    # and it is the reason this exists: the absence verdict says what is not there, and this is the part
+    # that can say what is -- without it a wrong suffix reads as a missing input.
+    seen_names: dict = {}
 
     def read_row(ref_type: str, ref_row: str) -> tuple:
         key = (ref_type, ref_row)
@@ -454,6 +508,7 @@ def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: s
         kind, ref_type, ref_row, attr = reference_shape(ref, etype, row, ws)
         state = STATE_UNGRADED
         why = ""
+        read_attrs = None        # the row/workspace this reference resolved to, when one answered
         if kind == "member":
             why = "member read: the value sits on each row of the collection, not on this row"
         elif kind == "ungraded":
@@ -467,6 +522,7 @@ def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: s
                    + "; a row is not guessed")
         elif ENTITY_JSON:
             attrs = ws_attrs if kind == "workspace" else rows.get((ref_type, ref_row))
+            read_attrs = attrs
             if attrs is None:
                 state = STATE_UNKNOWN
                 why = ("the capture says nothing about this row" if kind != "workspace"
@@ -475,16 +531,21 @@ def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: s
                 state = attribute_state(attrs, attr)
         elif kind == "workspace":
             attrs, why = read_workspace()
+            read_attrs = attrs
             if attrs is None:
                 state = STATE_UNKNOWN
             else:
                 state = attribute_state(attrs, attr)
         else:
             attrs, _exists, note = read_row(ref_type, ref_row)
+            read_attrs = attrs
             if attrs is None:
                 state, why = STATE_UNKNOWN, note
             else:
                 state = attribute_state(attrs, attr)
+        if isinstance(read_attrs, dict):
+            seen_names.setdefault(("workspace" if kind == "workspace" else ref_type,
+                                   ref_row), set()).update(read_attrs)
         counts[state] += 1
         states.append(state)
         lines.append((state, f"      state={state:<13} type={ref_type} row={ref_row} "
@@ -507,6 +568,13 @@ def check_attribute_existence(payload: dict, step: str, ns: str, ws: str, row: s
         print(f"  FAIL {len(missing)} bound attribute(s) are ABSENT from the row/workspace that answers "
               f"them (row type={etype}, row={row or 'unknown'}; see the state=ABSENT lines above): "
               f"{', '.join(missing)}")
+        # ...and when the row is full of the SAME names under another suffix, say that too. This is the
+        # whole of GitHub issue #4: nothing recorded which suffix a sandbox's outputs really sit under,
+        # so a wrong one looked like a step that had not run.
+        note = suffix_disagreement(missing, seen_names, tc.NW,
+                                   config.resolve().get("NEW_SUFFIX", ("", "unknown")))
+        if note:
+            print(note)
     if empties:
         fails.append(f"empty attributes: {empties}")
         print(f"  FAIL {len(empties)} bound attribute(s) are PRESENT BUT EMPTY there "
