@@ -35,7 +35,7 @@ off the workspace rather than guessing it.
 | # | Ask this | Run this | Detail |
 |---|---|---|---|
 | 0 | Can this machine run the loop, and is my branch set? | `./gsvtk doctor --redact` then `./gsvtk tools` | [quickstart.md](quickstart.md) §0-1 |
-| 1 | Will my change even *start* — WDL launchable, `sv_shell` keys intact? | `./gsvtk check origin/main --wf GenotypeBatch` | [static-checks.md](static-checks.md) |
+| 1 | Will my change even *start* — WDL launchable, `sv_shell` keys intact? | `./gsvtk check your-branch-under-test --wf GenotypeBatch` | [static-checks.md](static-checks.md) |
 | 2 | Do the config's input keys still fit the WDL at my ref? | `python terra/batch_configs.py check --against main` | [§3 Method configs](terra-head-to-head.md#3-method-configs) |
 | 3 | Build the image the rerun will pin (free preview first) | `./gsvtk build your-branch-under-test` | [docker-builds.md](docker-builds.md) |
 | 4 | Is the Dockstore descriptor this config names still my branch tip? | `./gsvtk publish-check your-branch-under-test` (reads Dockstore and the tip, both GETs) — or offline: `./gsvtk publish --all-steps --from-file dockstore-capture.json --tip-from-file branch-tip.txt` | [§4](terra-head-to-head.md#4-gate-before-you-submit), [static-checks.md](static-checks.md) |
