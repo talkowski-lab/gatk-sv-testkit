@@ -1,0 +1,36 @@
+{
+ "_about": [
+  "HAND-AUTHORED SYNTHETIC FIXTURE: the ABSENCE-ONLY control. One chain output genuinely",
+  "is not on the row (`cutoffs_new` deleted) and NOTHING on the row carries a competing suffix -- so",
+  "this is a real missing input, exactly what issue #4 must NOT be allowed to explain away as a suffix",
+  "problem. A diagnostic that fires here is a diagnostic that has stopped reading the row: the only",
+  "reason not to print is that the row itself offers no counterpart name, which is what the leg asserts.",
+  "Shapes real, values PLACEHOLDER."
+ ],
+ "entities": [
+  {
+   "entityName": "EXAMPLE_SET_A",
+   "entityType": "sample_set",
+   "attributes": {
+    "sample_set_id": "EXAMPLE-PLACEHOLDER",
+    "outlier_filtered_pesr_vcf_new": "EXAMPLE-PLACEHOLDER",
+    "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+    "median_cov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_SR_frz": "EXAMPLE-PLACEHOLDER"
+   }
+  }
+ ],
+ "workspace": {
+  "namespace": "your-namespace",
+  "name": "your-workspace",
+  "attributes": {
+   "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+   "reference_dict": "EXAMPLE-PLACEHOLDER",
+   "depth_exclusion_intervals_unused": "EXAMPLE-PLACEHOLDER",
+   "bin_exclude": "EXAMPLE-PLACEHOLDER",
+   "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+  }
+ }
+}

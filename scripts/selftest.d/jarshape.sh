@@ -145,6 +145,9 @@ CI_WT="$FIX/checkinputs-GenotypeBatch-synthetic-womtool-inputs.json"     # synth
 CI_RUN="$FIX/checkinputs-GenotypeBatch-run-and-workspace.json"  # submissions + workspace attributes
 CI_CAPTURE="$FIX/checkinputs-GenotypeBatch-entity-capture.json"          # GSVTK_ENTITY_JSON: 3 states
 CI_CAPTURE_FULL="$FIX/checkinputs-GenotypeBatch-entity-capture-complete.json"
+CI_SUFFIX_H2H="$FIX/checkinputs-GenotypeBatch-entity-suffix-h2h.json"
+CI_SUFFIX_NEW="$FIX/checkinputs-GenotypeBatch-entity-suffix-new.json"
+CI_SUFFIX_BLIND="$FIX/checkinputs-GenotypeBatch-entity-absentonly.json"
 CI_PAGES="$FIX/checkinputs-GenotypeBatch-entity-lookup.json"     # the live point lookup's 6 scenarios
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gsvtk-jarshape.XXXXXX")"
@@ -170,7 +173,7 @@ ok=0; fail=0; skipped=0
 # assertion would ever reach.
 SELF="$ROOT/scripts/selftest.d/jarshape.sh"
 . "$ROOT/scripts/selftest.d/declared.sh"
-GSVTK_DECL_FUNCS="want want_no canary"
+GSVTK_DECL_FUNCS="want want_no want_no_sub canary"
 gsvtk_declared_init "$TMP"          # the ledger is the set of reached sites (bash 3.2: no associative arrays)
 
 # --------------------------------------------------------------------------- harness
@@ -181,6 +184,28 @@ gsvtk_declared_init "$TMP"          # the ledger is the set of reached sites (ba
 #       disappearing from it.
 say_ok()   { ok=$((ok + 1)); printf '  ok    %s (exit %s)\n' "$1" "$2"; }
 say_fail() { fail=$((fail + 1)); printf '  FAIL  %s (exit %s, want %s)%s\n' "$1" "$2" "$3" "$4"; }
+
+want_no_sub() {
+    # The same recorder as want_no, for needles that are PHRASES inside a line rather than a whole line:
+    # want_no greps -qxF (exact whole line), which for a dynamic sentence -- a suffix-disagreement note,
+    # a tally with counts in it -- can never match, so a leg written that way passes forever. Measured,
+    # not assumed: the agreeing/absence legs first written against want_no stayed green with the note
+    # firing on both rows. Substring match, same rc discipline.
+    gsvtk_note_site "${BASH_LINENO[0]}"   # see want() above
+    local desc="$1" wantrc="$2"; shift 2
+    local absent=() out rc hit="" n
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do absent=("${absent[@]-}" "$1"); shift; done
+    shift
+    out="$("$@" 2>&1)"; rc=$?
+    for n in "${absent[@]-}"; do
+        [ -n "$n" ] || continue
+        printf '%s' "$out" | grep -qF -- "$n" && hit="$hit
+          unexpectedly present: $n"
+    done
+    if [ "$rc" = "$wantrc" ] && [ -z "$hit" ]; then say_ok "$desc" "$rc"; else
+        say_fail "$desc" "$rc" "$wantrc" "$hit"; printf '%s\n' "$out" | head -6 | sed 's/^/          /'
+    fi
+}
 
 want() {
     gsvtk_note_site "${BASH_LINENO[0]}"   # the line that CALLED want(); one entry per call SITE, not per loop turn
@@ -917,6 +942,43 @@ want 'a 200 with no attributes member is UNKNOWN too, and is never read as binds
 want "and no live-path leg leaks an attribute value either" 0 \
     "NO-VALUES-PRINTED" -- \
     ci_values_leak none none default row-found
+
+
+# =============================================================================================
+# 13. THE WRONG SUFFIX IS A DIFFERENT DIAGNOSIS FROM A MISSING INPUT (GitHub issue #4).
+#
+# Nothing here recorded which suffix a sandbox's outputs actually sit under. `NEW_SUFFIX` is one global
+# default (`kit/gsvtk-config`, `new`), so a workspace whose outputs were written under a different one --
+# a rerun with `--tag h2h`, a second chain in the same workspace, a `GSVTK_NEW_SUFFIX` exported for one
+# run and not this one -- reported every output of that step as ABSENT. That reads as "the step did not
+# run" and sends the reader to fetch files that exist.
+#
+# Both arms grade off captures, never live Terra, and the agreeing arm is what keeps the diagnostic
+# honest: the line may be fired only by NAMES THE ROW ACTUALLY CARRIES, not by absence in general. The
+# two tallies differ in the one number that matters -- 6 present / 2 absent where the suffix disagrees,
+# 8 / 0 where it agrees.
+#
+# Labels kept: `_h2h` is what `--tag` writes (measured by rerun.sh's own legs), but no leg here has a live
+# workspace, so "a real sandbox looks like this" is an inference from the derivation, not a measurement.
+# The 4 UNKNOWN in both arms are the member reads this check withholds by design.
+
+want 'a suffix mismatch is named as a suffix mismatch, with counts and the source of the suffix' 1 \
+     'note    0 of 2 expected output(s) under `_new`, 2 of 2 under `_h2h`' \
+     'suffix mismatch and not a missing input' 'source: default' '--tag h2h' \
+     '# attribute existence: refs=12 graded=12 present=10 present-empty=0 absent=2 unknown=0 ungraded=0' -- \
+     ci none "$CI_SUFFIX_H2H" default unused --entity EXAMPLE_SET_A
+want_no_sub 'an AGREEING sandbox prints no suffix line at all (8 present, 0 absent -- nothing to explain)' 0 \
+        'note    0 of' 'suffix mismatch' -- \
+        ci none "$CI_SUFFIX_NEW" default unused --entity EXAMPLE_SET_A
+want 'the agreeing row grades every reference under the suffix it asks for (arms differ by suffix only)' 0 \
+     '# attribute existence: refs=12 graded=12 present=12 present-empty=0 absent=0 unknown=0 ungraded=0' -- \
+     ci none "$CI_SUFFIX_NEW" default unused --entity EXAMPLE_SET_A
+want_no_sub 'a GENUINELY missing input is not explained away as a suffix problem' 1 \
+        'note    0 of' 'suffix mismatch' -- \
+        ci none "$CI_SUFFIX_BLIND" default unused --entity EXAMPLE_SET_A
+want 'and the suffix in force is reported WITH where it came from (doctor, redacted view)' 0 \
+     'GSVTK_NEW_SUFFIX' -- \
+     sh -c "cd '$ROOT' && ./gsvtk doctor --redact 2>/dev/null | grep -E 'GSVTK_NEW_SUFFIX.*[[]default[]]'"
 
 printf '\njarshape selftest: %s passed, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
 # The pair's line is where this phase's mode-invariance is visible: the same declared count against the same
