@@ -1843,10 +1843,42 @@ elif CASE == "real-capture":
            "(ABSENT)", "2 version(s) listed for this entry", "your-branch-under-test", "--allow-stale-dockstore")
 
 elif CASE == "notrun":
+    # The behaviour half of the unmeasured arm only: a counted skip that does NOT stop the POST. The
+    # advice TEXT it prints is graded one phrase per leg off `$TMP/notrun-cure.txt` below, so deleting
+    # one sentence of the cure reddens exactly one leg rather than the whole case.
     del os.environ["GSVTK_PUBLISH_CAPTURE"], os.environ["GSVTK_PUBLISH_TIP"]
-    proceed("with no capture the check says NOT RUN, names both vars, and points at the fix",
-            "publish check: NOT RUN", "GSVTK_PUBLISH_CAPTURE, GSVTK_PUBLISH_TIP unset",
-            "gsvtk publish --ls-remote", "the name resolving is not evidence")
+    proceed("with no capture the check counts a skip and does not stop the POST",
+            "publish check: NOT RUN")
+
+elif CASE == "notrun-advice":
+    # One run of that arm, with the advice printed to stdout so bash can grade it. The sentinel is what
+    # keeps those legs honest: it prints ONLY when this reached the submission call, so a leg cannot
+    # pass by grepping bytes an earlier crash left in the file.
+    del os.environ["GSVTK_PUBLISH_CAPTURE"], os.environ["GSVTK_PUBLISH_TIP"]
+    stage()
+    refused, out = L.run_submit(rr)
+    assert refused is None, "the NOT RUN arm stopped the POST:\n%s" % refused[:700]
+    assert [t[0] for t in L.TRACE] == ["read", "submit"], L.TRACE
+    sys.stdout.write(out)
+    print("ADVICE-CAPTURED-AT-SUBMIT")
+
+elif CASE == "notrun-offline":
+    # The forbidden arm, made observable. Nothing supplied means NOTHING fetched -- and "never" is only
+    # a measurement if something would notice, so the socket and process boundaries become tripwires for
+    # the duration of the call. The closed-port Terra API root cannot catch this one: a Dockstore GET or
+    # a `git ls-remote` never touches it, which is exactly why this leg exists.
+    del os.environ["GSVTK_PUBLISH_CAPTURE"], os.environ["GSVTK_PUBLISH_TIP"]
+
+    def _trip(*a, **k):
+        raise AssertionError("the unmeasured publish arm tried to leave this machine")
+
+    import socket
+    import subprocess
+    for _mod, _name in ((socket, "socket"), (socket, "create_connection"),
+                        (socket, "getaddrinfo"), (subprocess, "Popen")):
+        setattr(_mod, _name, _trip)
+    proceed("and with nothing supplied it fetches nothing: socket and Popen are tripwired and untripped",
+            "publish check: NOT RUN")
 
 elif CASE == "create-stale":
     refused = None
@@ -1861,9 +1893,30 @@ elif CASE == "create-stale":
 else:
     raise SystemExit("no such case: %s" % CASE)
 PY
-for c in current stale stale-override absent refused refused-flag real-capture notrun create-stale; do
+for c in current stale stale-override absent refused refused-flag real-capture notrun notrun-offline create-stale; do
     inproc "publish check on the POST path: $c" 0 "$TMP/publish_pre.py" "$c"
 done
+
+# The NOT RUN cure, graded one phrase per leg. It is captured from ONE run that reached the submission
+# call (the sentinel leg proves that), because every earlier version of this leg pinned a handful of
+# needles inside one `proceed()` call -- which could not tell the reader which sentence went missing, and
+# which is how the arm shipped a cure naming `--capture`, a flag `gsvtk publish` rejects out of hand.
+# Every needle below is a fixed-string grep with no regex metacharacters in it (`run` uses grep -qF).
+"$PY" "$TMP/publish_pre.py" notrun-advice > "$TMP/notrun-cure.txt" 2>&1
+run "that cure was graded off a run that really reached the submission call, not off a stale file" 0 \
+    "ADVICE-CAPTURED-AT-SUBMIT" /bin/cat "$TMP/notrun-cure.txt"
+run "and it names BOTH vars, so the reader knows which two to set" 0 \
+    "GSVTK_PUBLISH_CAPTURE, GSVTK_PUBLISH_TIP unset" /bin/cat "$TMP/notrun-cure.txt"
+run "it still says the name resolving is not evidence, so a skip is not an all-clear" 0 \
+    "the name resolving is not evidence" /bin/cat "$TMP/notrun-cure.txt"
+run "it leads with the live one-liner that now exists: gsvtk publish-check <branch>" 0 \
+    "publish-check <branch>" /bin/cat "$TMP/notrun-cure.txt"
+run "and the offline form is spelled in flags publish really takes" 0 \
+    "--from-file <capture> --tip-from-file <tip>" /bin/cat "$TMP/notrun-cure.txt"
+run "it corrects the mis-statement: --ls-remote takes no argument, it reads the checkout from the env" 0 \
+    "--ls-remote takes no argument" /bin/cat "$TMP/notrun-cure.txt"
+run_absent "and the flag that does not exist is gone: the cure never names --capture" 0 \
+    "--capture" /bin/cat "$TMP/notrun-cure.txt"
 
 # =============================================================================================
 # 10. THE ONE-PAGE DOC KEEPS THE PROMISES ISSUE #7 ASKED FOR.
@@ -1879,6 +1932,52 @@ done
 # proves every flag the page documents exists in the tool's own --help, and `scripts/check_docs.py`
 # proves the three pointers into the page resolve.
 page() { sed -n '1,$p' "$ROOT/docs/test-a-branch.md"; }
+
+# ledger_counts_agree WHAT — the figures docs/gap-ledger.md quotes about this page, compared with the
+# page as it is right now. The ledger is prose, so the gate cannot see a number in it: a lane re-added a
+# deleted sentence and a stale `97 lines / 13 decision rows` pair and BOTH graders stayed green, which is
+# how a doc claim rots while the gate reports ok. This is the guard that closes that hole. It checks the
+# RELATIONSHIP (row says N, page has N) rather than pinning a literal, so growing the page stays legal --
+# grow the page without updating the ledger and THIS leg goes red.
+ledger_counts_agree() {
+    python3 - "$ROOT" "$1" <<'PY'
+import os, re, sys
+
+root, what = sys.argv[1], sys.argv[2]
+led = open(os.path.join(root, 'docs', 'gap-ledger.md'), encoding='utf-8').read()
+page = open(os.path.join(root, 'docs', 'test-a-branch.md'), encoding='utf-8').read()
+lines = page.count('\n')
+pipe = sum(1 for l in page.split('\n') if l.startswith('|'))
+digit = sum(1 for l in page.split('\n') if re.match(r'^\| [0-9]', l))
+rows = pipe - 2                       # data rows = pipe lines - header - |---| separator
+if what == 'row':
+    m = re.search(r'\*\*(\d+) lines, (\d+) decision rows\*\*', led)
+    if not m:
+        print('the #7 row no longer carries its `N lines, M decision rows` pair'); sys.exit(1)
+    if int(m.group(1)) != lines or int(m.group(2)) != rows:
+        print('DISAGREE row says %s lines / %s rows, page is %d lines / %d rows'
+              % (m.group(1), m.group(2), lines, rows))
+        sys.exit(1)
+    print('ROW-AGREE %d lines, %d decision rows' % (lines, rows))
+elif what == 'note':
+    tail = led.split('**Page counts, by command.**', 1)
+    if len(tail) == 1:
+        print('the by-command note under the issue table is gone'); sys.exit(1)
+    figs = [int(n) for n in re.findall('\u2192 \\*\\*(\\d+)\\*\\*', tail[1])][:3]
+    if figs != [lines, pipe, digit]:
+        print('DISAGREE note prints %s, recomputed %s (wc / pipe-initial / bare-digit)'
+              % (figs, [lines, pipe, digit]))
+        sys.exit(1)
+    print('NOTE-AGREE %s' % figs)
+else:
+    print('unknown check %r' % what); sys.exit(2)
+PY
+}
+
+run "the ledger quotes this page's real size, so the row cannot rot quietly" 0 \
+    "ROW-AGREE" ledger_counts_agree row
+run "and its by-command note still prints what those three commands print" 0 \
+    "NOTE-AGREE" ledger_counts_agree note
 
 run "the page names the output suffix a sandbox writes under (issue #7 item 2)" 0 \
     "GSVTK_NEW_SUFFIX" page
@@ -1898,8 +1997,10 @@ run "and where the mutating steps belong: the checkout, not the read-only shim" 
     "in the live checkout" page
 run "that a frozen copy is the deliberate exception -- naming the bug that cost the day" 0 \
     "methodConfigVersion" page
-run "the check row carries the --wf form the issue asked for, not a bare ref" 0 \
-    "check origin/main --wf GenotypeBatch" page
+run "the check row asks about YOUR branch under test, in the --wf form the issue asked for (issue #7)" 0 \
+    "check your-branch-under-test --wf" page
+run_absent "and it does not send the reader to check main, the one branch that is not theirs" 0 \
+    "check origin/main" page
 run "the publish row offers the live one-liner as well as the offline capture" 0 \
     "publish-check" page
 run "and the Dockstore cure is on the page: throwaway <branch>_terra plus the filter commit (item 3)" 0 \

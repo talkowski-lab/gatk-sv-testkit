@@ -760,6 +760,12 @@ def _publish_precheck(rd: dict, mode: str) -> None:
 
     Never fetches. Capture and tip are files or values the operator supplied; a check that silently
     reaches the network is a check that fails differently on someone else's machine.
+
+    The advice printed by the NOT RUN arm is a claim about ANOTHER tool's flags, so it is graded here as
+    much as anything else: every token in it is in `gsvtk publish --help` (`--capture` is not, and
+    `--ls-remote` takes no argument -- it reads $GSVTK_GATK_SV_CHECKOUT). Advice that dies with "unknown
+    flag" when the operator types it is worse than no advice; this branch's history has a submission
+    wall built out of exactly that.
     """
     cap = os.environ.get("GSVTK_PUBLISH_CAPTURE", "").strip()
     tipsrc = os.environ.get("GSVTK_PUBLISH_TIP", "").strip()
@@ -767,8 +773,17 @@ def _publish_precheck(rd: dict, mode: str) -> None:
     if missing:
         globals()["PUBLISH_VERDICT"] = "NOT RUN"
         print(f"        publish check: NOT RUN ({', '.join(missing)} unset) -- the name resolving is not"
-              " evidence the pin is the tip. To make this check answer:\n"
-              "          gsvtk publish --ls-remote <gatk-sv checkout> --branch <branch> --capture <file>")
+              " evidence the pin is the tip, and this check never fetches the answer for you.\n"
+              "          To get the answer now:  ./gsvtk publish-check <branch>\n"
+              "        one unauthenticated GET per Dockstore entry plus the branch tip itself; nothing is"
+              " POSTed.\n"
+              "        To make THIS run answer instead of counting a skip, set GSVTK_PUBLISH_CAPTURE to a"
+              " capture and\n"
+              "        GSVTK_PUBLISH_TIP to a sha or to `git ls-remote` output. Offline, from files you"
+              " already hold:\n"
+              "          ./gsvtk publish --all-steps --from-file <capture> --tip-from-file <tip>\n"
+              "        and --ls-remote takes no argument -- it reads the checkout GSVTK_GATK_SV_CHECKOUT"
+              " names.")
         return
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checks"))
