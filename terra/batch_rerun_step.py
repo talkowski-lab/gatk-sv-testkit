@@ -85,14 +85,32 @@ def _opt(flag: str) -> str:
     return a[i + 1] if i >= 0 and len(a) > i + 1 and not a[i + 1].startswith("--") else ""
 
 
+def _tag() -> str:
+    """This command line's run tag, or the untagged default -- never an empty tag.
+
+    `--tag` absent is "" (the documented default run). `--tag` PRESENT and empty is refused, by the same
+    rule `entity()` applies to `--entity ''`: it is what `--tag "$TAG"` looks like with TAG unset, and it
+    resolves to the DEFAULT config name and the DEFAULT output attributes -- i.e. the run silently
+    overwrites the previous one, through the flag that was typed to stop that. Falling back to the
+    default is the failure this tool has already been audited for, so an empty tag is an exit, not a
+    default.
+    """
+    return st.check_tag(_opt("--tag")) if "--tag" in sys.argv else ""
+
+
 def resolved() -> dict:
     """The per-step data this invocation runs: config name, input prefix, method path, root entity.
 
     Refuses a step the map has never heard of (naming the steps it does know) and a step whose two
     copies of the root entity disagree -- see `_reconcile`.
+
+    The run tag (`--tag`) is read HERE, next to `--step`, because both decide the config name and the
+    name has one definer (`terra/steps.py.rerun`). Every mode, every reader in this file -- `make_body`,
+    the read-back, `--overwrite`, the submission call -- then reads that one name off this dict; a tag
+    that reached only `show` would print a config the submission does not run.
     """
     if not _RESOLVED:
-        r = st.rerun(_opt("--step") or st.DEFAULT_STEP)
+        r = st.rerun(_opt("--step") or st.DEFAULT_STEP, _tag())
         _reconcile(r)
         r["entity"] = _row_name(r)      # '' when the row cannot be known; `entity()` is what refuses
         _RESOLVED.update(r)
@@ -366,12 +384,26 @@ def announce(r: dict, mode: str) -> None:
     config name, the root entity and the Dockstore pin are now stated in every mode, and the upstream
     attributes are named so a rerun of a mid-chain step cannot read last run's output and call it a
     result.
+
+    The WRITTEN attribute names are stated next to the config name, in the same block, because both are
+    names the run is identified by and both are what `--tag` moves. A tagged run whose config name is
+    distinct but whose outputs still land on `*<GSVTK_NEW_SUFFIX>` has not produced a second arm at all
+    -- it has produced a fresh run that overwrites the first one's evidence, which is the shape that
+    forced a hand-built config outside this tool on 2026-10-14. Printing them is what makes the
+    difference checkable without reading the JSON body.
     """
-    print(f"[rerun] step {r['step']}  workflow {r['workflow']}  config {r['rerun_config']}\n"
+    tag = r.get("tag") or ""
+    print(f"[rerun] step {r['step']}  workflow {r['workflow']}  config {r['rerun_config']}"
+          + (f"  (--tag {tag})" if tag else "") + "\n"
           f"        root entity {r['root_entity']}  (row: {_row_line(r)})\n"
           f"        Dockstore {r['method_path']} @ {WDL_VERSION or 'GSVTK_BRANCH unset'} "
           f"-- the ref the binding check grades too\n"
           f"        image pins: {_image_provenance(r)}", file=sys.stderr)
+    outs = list(r["rerun_outputs"].values())
+    print(f"        writes {len(outs)} output attribute(s)"
+          + (f", tagged '{tag}' (--tag): " if tag else " (no --tag): ")
+          + (", ".join(outs) if outs else "nothing -- this step's profile declares no outputs"),
+          file=sys.stderr)
     chain, frozen = _upstream(r)
     if chain or frozen:
         print("        reads "
@@ -381,6 +413,18 @@ def announce(r: dict, mode: str) -> None:
         print("        prove those attributes exist first: "
               f"python terra/batch_check_inputs.py --step {r['step']}   ({mode} does not read "
               "your workspace)", file=sys.stderr)
+
+
+def _run_stem(r: dict) -> str:
+    """The stem of this run's dump files: the step, plus the tag when one was named.
+
+    Same defect as the config name, one layer down. `validate` and `submit` already name their dumps per
+    step (`rerun_submission.09.json`) because five steps sharing one file means a 07 replaces the 09
+    record you came to look at; two tagged runs of ONE step share the step name, so a second tagged run
+    would replace the first run's submission record -- the artifact you compare the arms with. With no
+    tag the stem is exactly the step, so every existing file name is unchanged.
+    """
+    return f"{r['step']}.{r['tag']}" if r.get("tag") else str(r["step"])
 
 
 def _row_name(r: dict) -> str:
@@ -465,6 +509,26 @@ def make_body() -> dict:
     r = resolved()
     b = body(r["config"])
     b["name"] = r["rerun_config"]
+    # The attribute names this run WRITES, read from `terra/steps.py` rather than edited here. The keys
+    # are the workflow's own output names and never move; only the attribute each one lands in does, and
+    # `--tag` moves it (`this.foo_new` -> `this.foo_new_TAG`). INPUTS are untouched on purpose: a rerun
+    # reads the chain's existing attributes, which is what lets two runs sit side by side over one input
+    # set. Without a tag the map is the profile's own, value for value, so the default body is the body
+    # it always was -- and the leg that compares this file's output against the pre-`--tag` file checks
+    # that claim instead of trusting it.
+    outs = dict(r["rerun_outputs"])
+    if set(outs) != set(b["outputs"]):
+        raise SystemExit(
+            f"this step's OUTPUT map is answered two ways, so nothing is POSTed:\n"
+            f"  terra/steps.py rerun_outputs({r['step']!r}, {r['tag']!r}) answers {len(outs)} "
+            f"output(s),\n"
+            f"  batch_configs.body({r['config']!r}) answers {len(b['outputs'])}.\n"
+            f"  Keys only the first states: {', '.join(sorted(set(outs) - set(b['outputs']))) or '(none)'}\n"
+            f"  Keys only the second states: {', '.join(sorted(set(b['outputs']) - set(outs))) or '(none)'}\n"
+            "  One rerun writes the second set and the read-back below grades the first, so the two are\n"
+            "  not a style question. Both are built from profiles/<module>.json's `outputs`; make them\n"
+            "  agree there, or fix whichever reader stopped reading it.")
+    b["outputs"] = outs
     # The Dockstore ENTRY, not the workflow name: `dstore()` builds both `methodPath` and `methodUri` from its
     # argument, and upstream publishes this module's WDL under a different name (see steps.dockstore_of). Using the
     # workflow name here posted a config whose method pointed at an entry Dockstore has never heard of.
@@ -706,7 +770,7 @@ def validate() -> None:
     print(json.dumps(d, indent=1))
     # Per-step file names: with five rerunnable steps, one shared `rerun_config_validation.json` means a
     # 07 validate quietly replaces the record of the 10 you meant to look at.
-    terra.dump(d, str(config.work_dir("metadata") / f"rerun_config_validation.{rd['step']}.json"))
+    terra.dump(d, str(config.work_dir("metadata") / f"rerun_config_validation.{_run_stem(rd)}.json"))
     valid = d.get("invalid") or []
     if valid:
         print("\nINVALID:")
@@ -796,7 +860,7 @@ def submit() -> None:
     d = terra.submit(tc.NS, tc.WS, tc.NS, rd["rerun_config"], row, rd["root_entity"], None,
                      confirm=True, use_call_cache=cache)
     print(json.dumps(d, indent=1)[:600])
-    terra.dump(d, str(config.work_dir("metadata") / f"rerun_submission.{rd['step']}.json"))
+    terra.dump(d, str(config.work_dir("metadata") / f"rerun_submission.{_run_stem(rd)}.json"))
 
 
 def status() -> None:
@@ -809,7 +873,7 @@ def status() -> None:
 
 
 def usage(code=0):
-    print(f"""usage: batch_rerun_step.py [--step NN] [--image KEY=REF ...] [show|create|validate|submit|status]
+    print(f"""usage: batch_rerun_step.py [--step NN] [--tag TAG] [--image KEY=REF ...] [show|create|validate|submit|status]
 
 Reruns ONE step of the batch chain with the images pinned literally into the config, so
 the run cannot inherit a stale image from a workspace attribute. The step, its workflow,
@@ -818,6 +882,19 @@ its config name, its input-key prefix and its root entity all come from terra/st
   --step NN         one of {', '.join(st.known_steps())} (default {st.DEFAULT_STEP}):
                     {', '.join(f'{s}={st.step_names()[i]}' for i, s in enumerate(st.known_steps()))}
                     Every mode takes it. It prints what it resolved to, on stderr, in every mode.
+  --tag TAG         name THIS run, so a second rerun of one step does not overwrite the first. It
+                    moves exactly two things, both printed by `show`:
+                      the config name   NN-<Workflow>-TAG      (untagged: NN-<Workflow>-rerun)
+                      the outputs       this.<attr>_TAG        (untagged: this.<attr>_new)
+                    INPUTS DO NOT MOVE: the run still reads the chain's existing frozen (`_frz`) and
+                    chain (`_new`) attributes, so a tagged run and the run beside it answer the same
+                    question from the same input. That is the point -- `submit` POSTs a config NAME, so
+                    an untagged second rerun POSTs over the first config AND writes over the first
+                    run's output attributes, and two arms cannot be compared afterwards. The tag is
+                    letters/digits/underscore (it becomes part of an attribute name), and `rerun` is
+                    refused because it spells the name the untagged run already owns.
+                    The read-back `submit` does before the POST compares the TAGGED config, and
+                    --overwrite must repeat that same tagged name.
   --entity NAME     the row to submit against. Defaults to the config key the step's profile
                     `entity_row` names (GSVTK_BATCH for the chain's sample_set steps). Required --
                     and refused rather than guessed -- for a step whose `entity_row` is `--entity`,
@@ -891,6 +968,18 @@ if __name__ == "__main__":
             if i + 1 >= len(rest):
                 raise SystemExit(f"--step wants one of {', '.join(st.known_steps())}")
             st.workflow(rest[i + 1])
+            i += 2
+        elif a == "--tag":
+            # Validated at the parser, like `--step`: a tag is a name that reaches a Terra config name and
+            # every output attribute this run writes, so a typo is a usage error here rather than a config
+            # POSTed under a mangled name. An EMPTY value is refused rather than read as "no tag": that
+            # spelling resolves to the default name, which is the overwrite the flag was typed to prevent.
+            if i + 1 >= len(rest) or not rest[i + 1].strip() or rest[i + 1].startswith("--"):
+                raise SystemExit("--tag wants a run name (letters, digits, underscore: `h2h`, `rc1`).\n"
+                                 "  An empty tag resolves to the DEFAULT config name and outputs, so the run\n"
+                                 "  overwrites the one already there -- `--tag \"$TAG\"` with TAG unset is a\n"
+                                 "  refusal, not a default. Drop --tag to take the default deliberately.")
+            st.check_tag(rest[i + 1])
             i += 2
         elif a == "--entity":
             if i + 1 >= len(rest):
