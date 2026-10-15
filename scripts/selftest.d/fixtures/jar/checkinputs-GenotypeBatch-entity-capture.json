@@ -1,0 +1,54 @@
+{
+  "_about": [
+    "HAND-AUTHORED SYNTHETIC FIXTURE for GSVTK_ENTITY_JSON (see the placeholder rule in",
+    "checkinputs-GenotypeBatch-config.json). The shape is what `terra.entity_sample()` answers",
+    "(`entities`: [{entityName, entityType, attributes}]) plus what `terra.workspace()` answers",
+    "(`workspace`: {namespace, name, attributes}) -- deliberately the shapes the LIVE readers return,",
+    "so the capture format survives the integration request that replaces this lane's page walk with a",
+    "point read: a capture taken with `fiss get_entity` or a page of `entityQuery` drops straight in.",
+    "Three states, three different attribute names, so a leg can assert a literal count on each:",
+    "PRESENT (5 row + 3 workspace), PRESENT-EMPTY (`median_cov_frz`, an empty string on the row),",
+    "ABSENT (2 row + 1 workspace). `genotyped_depth_vcf_new` is an output of this step and is NOT one of",
+    "its references: it is here so a leg can see the check grading the references and not the set-diff",
+    "of two attribute lists. EXAMPLE_SET_B exists so a leg can see the lookup is keyed by row NAME."
+  ],
+  "entities": [
+    {
+      "entityName": "EXAMPLE_SET_A",
+      "entityType": "sample_set",
+      "attributes": {
+        "sample_set_id": "EXAMPLE-PLACEHOLDER",
+        "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_SR_frz": "EXAMPLE-PLACEHOLDER",
+        "median_cov_frz": "",
+        "genotyped_depth_vcf_new": "EXAMPLE-PLACEHOLDER"
+      }
+    },
+    {
+      "entityName": "EXAMPLE_SET_B",
+      "entityType": "sample_set",
+      "_about": "the SAME references, on a row that carries all eight of them: --entity EXAMPLE_SET_B grades absent=1 where EXAMPLE_SET_A grades absent=3, which is the leg that proves the row NAME is load-bearing and not an illustrative label on the line",
+      "attributes": {
+        "sample_set_id": "EXAMPLE-PLACEHOLDER",
+        "outlier_filtered_pesr_vcf_new": "EXAMPLE-PLACEHOLDER",
+        "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+        "cutoffs_new": "EXAMPLE-PLACEHOLDER",
+        "median_cov_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+        "merged_SR_frz": "EXAMPLE-PLACEHOLDER"
+      }
+    }
+  ],
+  "workspace": {
+    "namespace": "your-namespace",
+    "name": "your-workspace",
+    "attributes": {
+      "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+      "reference_dict": "EXAMPLE-PLACEHOLDER",
+      "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+    }
+  }
+}

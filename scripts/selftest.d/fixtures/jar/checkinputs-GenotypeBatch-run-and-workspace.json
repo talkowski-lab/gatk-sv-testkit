@@ -1,0 +1,64 @@
+{
+  "_about": [
+    "HAND-AUTHORED SYNTHETIC FIXTURE (see the note in checkinputs-GenotypeBatch-config.json: real",
+    "shapes, placeholder values, never a sanitised live dump). The three answers the LAST-SUBMISSION and",
+    "WORKSPACE reads give: fapi.list_submissions, fapi.get_submission and fapi.get_workspace. Values are",
+    "placeholders rather than object paths on purpose: this file is read by the offline legs in",
+    "scripts/selftest.d/jarshape.sh, and `make -s audit` flags coordinates in tracked files.",
+    "The submission resolves every required name in checkinputs-GenotypeBatch-synthetic-womtool-inputs.json",
+    "so that check 3 is green on a seam run and the only thing moving a leg's exit code is check 2b.",
+    "The workspace attributes deliberately lack `bin_exclude`, the one WORKSPACE reference the config",
+    "binds, so the workspace half has an ABSENT of its own and cannot be graded off the row half."
+  ],
+  "submissions": [
+    {
+      "submissionId": "EXAMPLE-SUB-0001-0000-0000-000000000001",
+      "methodConfigurationName": "10-GenotypeBatch",
+      "methodConfigurationVersion": 7,
+      "submissionDate": "2026-10-13T09:00:00.000Z",
+      "workflowEntity": {
+        "entityName": "EXAMPLE_SET_A",
+        "entityType": "sample_set"
+      }
+    }
+  ],
+  "submission": {
+    "submissionId": "EXAMPLE-SUB-0001-0000-0000-000000000001",
+    "workflowEntities": {
+      "EXAMPLE-WF-0001": {
+        "entityName": "EXAMPLE_SET_A",
+        "entityType": "sample_set"
+      }
+    },
+    "workflows": [
+      {
+        "workflowId": "EXAMPLE-WF-0001",
+        "status": "Succeeded",
+        "inputResolutions": [
+          { "inputName": "GenotypeBatch.batch", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.vcf", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.training_vcf", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.rf_cutoffs", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.median_coverage", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.rd_file", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.pe_file", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.sr_file", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.contig_list", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.reference_dict", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.depth_exclusion_intervals", "value": "EXAMPLE-PLACEHOLDER" },
+          { "inputName": "GenotypeBatch.gatk_docker", "value": "EXAMPLE-PLACEHOLDER" }
+        ]
+      }
+    ]
+  },
+  "workspace": {
+    "namespace": "your-namespace",
+    "name": "your-workspace",
+    "createdBy": "example-user@example.invalid",
+    "attributes": {
+      "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+      "reference_dict": "EXAMPLE-PLACEHOLDER",
+      "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+    }
+  }
+}

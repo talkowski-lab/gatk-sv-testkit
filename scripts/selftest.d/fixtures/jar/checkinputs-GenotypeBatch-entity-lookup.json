@@ -1,0 +1,88 @@
+{
+ "_about": [
+  "HAND-AUTHORED SYNTHETIC FIXTURE for the LIVE row read (no GSVTK_ENTITY_JSON). Every value is a",
+  "PLACEHOLDER: the attributes on a real GATK-SV row are object paths, and this repo's publish audit",
+  "red-flags those, so the fixture states NAMES bound to placeholder strings and the legs grade names.",
+  "",
+  "These scenarios answer `fapi.get_entity` -- the point lookup -- not a listing. The tool used to walk",
+  "`terra.entity_sample()` pages because terra/terra.py had no attribute-level reader; it now calls",
+  "`terra.entity_attributes()`, which is one GET and returns the row's attributes, None for a 404, and",
+  "raises for anything else. The five scenarios are the five ways that endpoint can answer:",
+  "  row-found          200, attributes at the top level           -> PRESENT / PRESENT-EMPTY per name",
+  "  row-found-nested   200 with the same body nested under `entity` -> the SAME tally: a21cb3b's lesson",
+  "  present-empty      200, attributes is {}                       -> bound-to-nothing, not absence",
+  "  row-gone           404                                         -> ABSENT, the only arm allowed to say it",
+  "  lookup-500         500                                         -> UNKNOWN, never ABSENT",
+  "  body-no-attributes 200 with no attributes member at all        -> UNKNOWN, and not 'binds nothing'",
+  "`row-gone` and `lookup-500` are separate scenarios with separate legs because both mean 'do not",
+  "guess' for opposite reasons, and collapsing them is how a check starts manufacturing missing inputs."
+ ],
+ "scenarios": {
+  "row-found": {
+   "row_exists": true,
+   "entities": [
+    {
+     "page": 2,
+     "entityName": "EXAMPLE_SET_A",
+     "entityType": "sample_set",
+     "attributes": {
+      "sample_set_id": "EXAMPLE-PLACEHOLDER",
+      "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_SR_frz": "EXAMPLE-PLACEHOLDER",
+      "median_cov_frz": ""
+     }
+    }
+   ]
+  },
+  "row-found-nested": {
+   "row_exists": true,
+   "nested": true,
+   "entities": [
+    {
+     "page": 2,
+     "entityName": "EXAMPLE_SET_A",
+     "entityType": "sample_set",
+     "attributes": {
+      "sample_set_id": "EXAMPLE-PLACEHOLDER",
+      "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+      "merged_SR_frz": "EXAMPLE-PLACEHOLDER",
+      "median_cov_frz": ""
+     }
+    }
+   ]
+  },
+  "present-empty": {
+   "row_exists": true,
+   "entities": [
+    {
+     "entityName": "EXAMPLE_SET_A",
+     "entityType": "sample_set",
+     "attributes": {}
+    }
+   ]
+  },
+  "row-gone": {
+   "row_exists": false,
+   "entities": []
+  },
+  "lookup-500": {
+   "http": 500,
+   "message": "upstream refused (fixture)",
+   "entities": []
+  },
+  "body-no-attributes": {
+   "row_exists": true,
+   "body": "no-attributes",
+   "entities": [
+    {
+     "entityName": "EXAMPLE_SET_A",
+     "entityType": "sample_set"
+    }
+   ]
+  }
+ }
+}
