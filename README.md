@@ -102,6 +102,7 @@ python terra/recon.py                         # read-only look at the workspace 
 python terra/batch_freeze.py plan             # what would be copied from the baseline
 python terra/batch_freeze.py copy --write     # copy the baseline's inputs into your bucket
 python terra/batch_rerun_step.py --step 08 submit --confirm   # rerun that stage with your branch's images
+python terra/batch_rerun_step.py --step 08 --tag rc1 submit --confirm   # a second run, beside the first
 python terra/batch_status.py --costs          # check progress and cost
 terra/batch_fetch_compare.sh all              # download the outputs and compare them to the baseline
 ```
@@ -110,7 +111,10 @@ Save one good run as a baseline, rerun the stage you changed on the same inputs,
 less than running the whole pipeline twice, and you know the inputs matched. Commands that change anything
 outside your machine refuse to run until you pass `--confirm` or `--write`. `--step` picks the stage, and
 `batch_rerun_step.py` reruns any of the five batch stages 06, 07, 08, 09, 10 — printing the workflow, config
-name and root entity it resolved to before it does anything, so you see which stage you asked for. The
+name and root entity it resolved to before it does anything, so you see which stage you asked for. `--tag`
+names one run of one stage: it moves the config name (`08-FilterBatchSamples-rc1`) and the output attributes
+(`this.<attr>_new_rc1`) while the inputs keep reading the chain's existing attributes, so a second rerun sits
+beside the first instead of overwriting it. The
 single-sample stages are not on that list: the freeze loop cannot write a participant entity at all, so
 there is nothing frozen to rerun against (see [module profiles](docs/module-profiles.md)). The [Terra
 head-to-head](docs/terra-head-to-head.md) guide covers the full sequence.

@@ -90,7 +90,7 @@ PIN10="--image gatk_docker=$R/gatk:YOUR_TAG --image sv_base_mini_docker=$R/sv-ba
 PIN09="$PIN10"
 PIN07="--image sv_pipeline_docker=$R/sv-pipeline:YOUR_TAG"
 
-ok=0; fail=0; QUIET=
+ok=0; fail=0; skipped=0; QUIET=
 
 # run DESC WANT_RC NEEDLE CMD... — exit code AND a line of output, because a refusal that exits 1
 # having printed nothing has refused nothing.
@@ -332,6 +332,313 @@ PY
 run "a step key with no number is refused, not silently dropped from the map" 1 \
     "does not start with a two-digit step number" \
     env GSVTK_MODULE_DIR="$TMP/unnumbered" "$PY" terra/steps.py
+
+# ------------------------------------------ 2c. --tag TAG: two reruns of ONE step, side by side
+# The defect `--tag` removes: `rerun-*` derived ONE config name (`NN-<Wf>-rerun`) and its outputs came
+# from the profile's own `{new}` expansion, so a SECOND rerun of one step POSTed over the first config
+# AND wrote over the first run's output attributes. Two arms could not sit in one sandbox, which is the
+# head-to-head this tool exists for; on 2026-10-14 that forced a hand-built config and hand-named
+# outputs, i.e. outside the code this file grades. `--tag TAG` moves exactly two names, both derived ONCE
+# in `terra/steps.py` (`rerun`'s `rerun_config`, `rerun_outputs`) and read everywhere else:
+#
+#     config    NN-<Wf>-TAG       was  NN-<Wf>-rerun
+#     outputs   this.<attr>_TAG   was  this.<attr>_new      (the `_new` stays; the tag is APPENDED)
+#
+# and moves nothing else: inputs keep their `{frz}`/`{new}` expansions, so a tagged run reads the chain's
+# existing attributes and the two arms differ in one variable. With no flag every byte is what it was
+# before the flag -- asserted against the pre-`--tag` file at the end of this section, not assumed.
+# `h2h` is a placeholder run name; nothing in this section reaches the wire (see the header).
+RUNTAG=h2h
+echo
+echo "selftest: rerun: --tag, i.e. two runs of one step that do not overwrite each other"
+
+# Both bodies of one step, from one fixture and one set of pins, split into the two maps a reader
+# actually asks about. Written by ONE python call so the two files cannot come from two environments,
+# and compared by `cmp` below rather than by a grep for one key.
+cat > "$TMP/both_bodies.py" <<'PY'
+"""Build step 10's body twice -- no tag, then `--tag` -- and split each into its input and output maps.
+
+    python both_bodies.py IN_PLAIN IN_TAGGED OUT_PLAIN OUT_TAGGED      # prints PASS with the counts
+
+The point of writing four FILES is that the assertions after this one are `cmp` assertions. "the input
+map did not move" and "the output map did" are claims about sets of bindings, and the only recorder
+that can make them is one that compares the whole sorted map, not one that greps for a name chosen by
+the same code being graded.
+"""
+import json
+import os
+import subprocess
+import sys
+
+repo = os.environ["GSVTK_REPO_ROOT"]
+REG = "us.gcr.io/your-dev-project/test"                      # placeholder registry, as the fixture
+PINS = ["--image", "gatk_docker=%s/gatk:YOUR_TAG" % REG,
+        "--image", "sv_base_mini_docker=%s/sv-base-mini:YOUR_TAG" % REG,
+        "--image", "sv_pipeline_docker=%s/sv-pipeline:YOUR_TAG" % REG]
+
+
+def body(extra):
+    cmd = [sys.executable, os.path.join(repo, "terra", "batch_rerun_step.py")] + extra + PINS + ["show"]
+    out = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
+    assert out.returncode == 0, (out.returncode, out.stdout[:200], out.stderr[-500:])
+    return json.loads(out.stdout)
+
+
+def dump(path, mapping):
+    with open(path, "w") as fh:
+        fh.write("".join("%s = %s\n" % (k, v) for k, v in sorted(mapping.items())))
+
+
+plain, tagged = body([]), body(["--tag", os.environ["GSVTK_RUNTAG"]])
+assert plain["name"] != tagged["name"], (plain["name"], tagged["name"])
+dump(sys.argv[1], plain["inputs"]); dump(sys.argv[2], tagged["inputs"])
+dump(sys.argv[3], plain["outputs"]); dump(sys.argv[4], tagged["outputs"])
+print("PASS %d inputs, %d outputs each way (%s vs %s)"
+      % (len(plain["inputs"]), len(plain["outputs"]), plain["name"], tagged["name"]))
+PY
+# shellcheck disable=SC2086   # GSVTK_RUNTAG is a literal set a few lines above, not user input
+GSVTK_RUNTAG="$RUNTAG" "$PY" "$TMP/both_bodies.py" "$TMP/in-plain.txt" "$TMP/in-tagged.txt" \
+    "$TMP/out-plain.txt" "$TMP/out-tagged.txt" > "$TMP/both.log" 2>&1
+run "one fixture built step 10's body with and without --tag (the four files above are real)" 0 \
+    "PASS" /bin/cat "$TMP/both.log"
+bytes "the INPUT map is IDENTICAL with and without --tag: a tagged run reads the chain's attributes" \
+    "$TMP/in-plain.txt" "$TMP/in-tagged.txt"
+# The positive control on the line above: it compares two files, so it would also pass if `--tag` did
+# nothing at all. `cmp` exit 1 here says the two bodies ARE different runs, which is what makes the
+# exit-0 above a finding about inputs rather than an artefact of comparing one file with itself.
+run "and the OUTPUT map is NOT identical (so the input comparison above compared two different runs)" \
+    1 "" cmp -s "$TMP/out-plain.txt" "$TMP/out-tagged.txt"
+run "and the inputs are not an empty map either: 16+ bindings, so 'identical' is not 'both empty'" 0 \
+    "PASS" "$PY" -c "
+import sys
+text = open(sys.argv[1]).read()
+n = len([l for l in text.splitlines() if ' = ' in l])
+assert n >= 16, 'only %d input bindings in the compared map: the identity above proves nothing' % n
+assert open(sys.argv[2]).read() == text
+print('PASS %d input bindings, byte-for-byte equal both ways' % n)" "$TMP/in-plain.txt" "$TMP/in-tagged.txt"
+
+# What `show` SAYS, as opposed to what the body contains: a tagged run has to state the config name it
+# would POST and the attribute names it would write, or the operator reads one name and POSTs another.
+# shellcheck disable=SC2086
+run "show --tag names the config it would POST, and says which flag made it that name" 0 \
+    "config 10-GenotypeBatch-$RUNTAG  (--tag $RUNTAG)" \
+    "$PY" terra/batch_rerun_step.py --tag "$RUNTAG" show $PIN10
+run "and the output attribute names it would write, named rather than counted" 0 \
+    "this.genotyped_depth_vcf_new_$RUNTAG" \
+    "$PY" terra/batch_rerun_step.py --tag "$RUNTAG" show $PIN10
+run "naming the tag on that line too, so a tagged write is not mistakable for the default one" 0 \
+    "output attribute(s), tagged '$RUNTAG' (--tag)" \
+    "$PY" terra/batch_rerun_step.py --tag "$RUNTAG" show $PIN10
+run_absent "and the name the untagged run owns never appears in a tagged run's output" 0 \
+    "10-GenotypeBatch-rerun" "$PY" terra/batch_rerun_step.py --tag "$RUNTAG" show $PIN10
+# The untagged run still says both things too -- it is the same line in both modes, which is the only
+# reason a reader can compare two runs' output by reading it.
+run "show with NO --tag prints the same two answers in their default spelling" 0 \
+    "writes 10 output attribute(s) (no --tag): this.genotyped_depth_vcf_new" \
+    "$PY" terra/batch_rerun_step.py show $PIN10
+
+# Per step, both names, expected by name: a flag that works for the step it was written for and not for
+# the other four is this file's own history (`--step 08` silently reran 10), so a tag asserted on step 10
+# alone would prove as little as the old step assertion did.
+cat > "$TMP/tag_name.py" <<'PY'
+"""One step's config name under `--tag`, against a name TYPED IN THE SHELL, not read off the tool."""
+import json
+import os
+import subprocess
+import sys
+
+step, wf, tag, want = sys.argv[1:5]
+repo = os.environ["GSVTK_REPO_ROOT"]
+out = subprocess.run(
+    [sys.executable, os.path.join(repo, "terra", "batch_rerun_step.py"), "--step", step,
+     "--tag", tag, "show", "--allow-unpinned-docker"],
+    cwd=repo, capture_output=True, text=True)
+assert out.returncode == 0, (out.returncode, out.stdout[:200], out.stderr[-500:])
+body = json.loads(out.stdout)
+assert body["name"] == want, (body["name"], want)
+assert body["name"] != "%s-%s-rerun" % (step, wf), \
+    "the tag built the name the untagged run already owns: %r -- nothing was separated" % body["name"]
+line = [l for l in out.stderr.splitlines() if l.startswith("[rerun] step ")]
+assert len(line) == 1, out.stderr[:300]
+assert ("config " + want) in line[0], "the resolution line does not name the body: %s" % line[0]
+assert "(--tag " + tag + ")" in line[0], "the resolution line hides which flag named it: %s" % line[0]
+print("PASS %s -> %s" % (step, want))
+PY
+n=0
+for s in 06 07 08 09 10; do
+    wf=$("$PY" -c "import sys; sys.path.insert(0,'terra'); import steps; print(steps.workflow('$s'))")
+    inproc "step $s with --tag $RUNTAG POSTs ${s}-${wf}-${RUNTAG} (typed here; NOT ${s}-${wf}-rerun)" 0 \
+        "$TMP/tag_name.py" "$s" "$wf" "$RUNTAG" "${s}-${wf}-${RUNTAG}"
+    n=$((n + 1))
+done
+run "all five steps were checked under a tag (not a loop that ran zero times)" 0 "5" \
+    /usr/bin/printf '%s' "$n"
+
+cat > "$TMP/tag_outputs.py" <<'PY'
+"""What one step WRITES under `--tag`: same keys, EVERY value `_<tag>`, derived from the profile's map.
+
+The expectation is the rule `--tag` promises -- `this.foo_new` becomes `this.foo_new_TAG` -- typed out
+here and applied to every entry, with the untagged body of the SAME step as the reference. A leg that
+asserted only "some output changed" would pass with one attribute renamed and the other nine on top of
+the run it is supposed to sit beside.
+"""
+import json
+import os
+import subprocess
+import sys
+
+step, wf, tag = sys.argv[1:4]
+repo = os.environ["GSVTK_REPO_ROOT"]
+
+
+def body(extra):
+    out = subprocess.run(
+        [sys.executable, os.path.join(repo, "terra", "batch_rerun_step.py"), "--step", step] + extra
+        + ["show", "--allow-unpinned-docker"],
+        cwd=repo, capture_output=True, text=True)
+    assert out.returncode == 0, (out.returncode, out.stderr[-500:])
+    return json.loads(out.stdout)
+
+
+plain, tagged = body([]), body(["--tag", tag])
+assert list(tagged["outputs"]) == list(plain["outputs"]), \
+    "the workflow's output KEYS moved; --tag names attributes, not the WDL's outputs"
+untouched = [k for k in plain["outputs"] if tagged["outputs"][k] == plain["outputs"][k]]
+assert not untouched, \
+    "%s: %d/%d output(s) land on the SAME attribute with and without the tag (%s), so this run "\
+    "overwrites the one it is meant to sit beside" % (step, len(untouched), len(plain["outputs"]),
+                                                      untouched[:3])
+wrong = [(k, plain["outputs"][k], tagged["outputs"][k]) for k in plain["outputs"]
+         if tagged["outputs"][k] != plain["outputs"][k] + "_" + tag]
+assert not wrong, "not `<attribute>_TAG` for: %r" % (wrong[:3],)
+bad = [v for v in tagged["outputs"].values() if not v.startswith(("this.", "workspace."))]
+assert not bad, "a tagged output left the binding grammar it started in: %r" % (bad[:3],)
+print("PASS %s: %d/%d output attributes tagged (%s)" % (step, len(tagged["outputs"]),
+                                                        len(plain["outputs"]),
+                                                        sorted(tagged["outputs"].values())[0]))
+PY
+n=0
+for s in 06 07 08 09 10; do
+    wf=$("$PY" -c "import sys; sys.path.insert(0,'terra'); import steps; print(steps.workflow('$s'))")
+    inproc "step $s with --tag $RUNTAG writes EVERY output as <attribute>_$RUNTAG (none left on the default)" \
+        0 "$TMP/tag_outputs.py" "$s" "$wf" "$RUNTAG"
+    n=$((n + 1))
+done
+run "all five steps' output maps were checked under a tag" 0 "5" /usr/bin/printf '%s' "$n"
+
+# The tag is pasted into TWO Terra identifiers -- a config name and the tail of an attribute name -- so
+# the shapes that survive one and are refused by the other are refused here, before anything is built.
+# `--tag` with an empty value is the one that matters most: it resolves to the DEFAULT name and outputs,
+# i.e. the overwrite, arriving behind the flag typed to prevent it. Same rule this file already applies
+# to `--entity ''`.
+run "--tag with no argument is a usage error" 1 "--tag wants a run name" \
+    "$PY" terra/batch_rerun_step.py show --tag
+run "--tag with an EMPTY value is refused, not read as 'no tag' (the unset-variable trap)" 1 \
+    "An empty tag resolves to the DEFAULT config name" "$PY" terra/batch_rerun_step.py --tag "" show
+run "and it says what an empty tag would have done, not just that it is empty" 1 \
+    "overwrites the one already there" "$PY" terra/batch_rerun_step.py --tag "" show
+run "--tag with a hyphen is refused: legal in a config name, refused as an attribute name" 1 \
+    "letters, digits and underscore only" "$PY" terra/batch_rerun_step.py --tag rc-1 show
+run "--tag rerun is refused: it spells the name the untagged run already owns" 1 \
+    "an UNTAGGED rerun already uses" "$PY" terra/batch_rerun_step.py --tag rerun show
+# The same refusals on the money path, where a probe can reach them without the parser: `resolved()` is
+# what `submit` calls, and it reads argv itself.
+run "a direct call to resolved() refuses an empty --tag too (probes do not go through the parser)" 1 \
+    "resolved to an empty value" "$PY" -c "
+import sys
+sys.path.insert(0, 'terra'); sys.path.insert(0, 'kit')
+import batch_rerun_step as rr
+rr.sys.argv = ['batch_rerun_step.py', '--step', '10', '--tag', '', 'submit', '--confirm']
+rr.resolved()
+print('NO REFUSAL')"
+
+# The artifact names, one layer down: `validate`/`submit` dump per-step files, so two tagged runs of ONE
+# step share a file name and the second replaces the first run's record -- the same defect, one layer
+# down, in the artifact you compare the arms with.
+inproc "the dump file stem carries the tag, and is exactly the step when there is none" 0 -c "
+import importlib, sys
+sys.path.insert(0, 'terra'); sys.path.insert(0, 'kit')
+import batch_rerun_step as rr
+rr.sys.argv = ['batch_rerun_step.py', '--step', '10', '--tag', 'h2h', 'submit', '--confirm']
+stem = rr._run_stem(rr.resolved())
+assert stem == '10.h2h', stem
+importlib.reload(rr)
+rr.sys.argv = ['batch_rerun_step.py', '--step', '10', 'submit', '--confirm']
+assert rr._run_stem(rr.resolved()) == '10', 'the no-flag dump name moved: %r' % rr._run_stem(rr.resolved())
+print('PASS 10.h2h tagged / 10 untagged')"
+
+# ---------------- the no-flag path, compared BYTES against the pre-`--tag` file (not remembered)
+# "with no flag everything stays byte-identical to today" is a claim about bytes, and the only recorder
+# that can make it is `cmp` against the pre-change program -- run through the SAME fixture, with the
+# same pins, in the same environment. `git show`/`git archive` is read-only by construction (the same
+# discipline `batch_configs._wdl_dir_from_ref` states), and the whole base tree -- not one file -- is
+# extracted, because the tool resolves `steps.py`, `batch_configs.py` and `profiles/` relative to its
+# OWN directory: a lone pre-change file beside the new `steps.py` would grade a mix of the two.
+BASE=fa4d5c9                     # the commit this lane started from
+mkdir -p "$TMP/base"
+if git archive "$BASE" terra kit profiles 2>/dev/null | tar -x -C "$TMP/base" 2>/dev/null \
+   && [ -s "$TMP/base/terra/batch_rerun_step.py" ] \
+   && git show "$BASE:terra/steps.py" 2>/dev/null | grep -q "rerun_config"; then
+    BASE_OK=1
+else
+    BASE_OK=""
+fi
+gsvtk_guard_sites "rerun-base-blob"
+if [ -z "$BASE_OK" ]; then
+    gsvtk_note_skip "rerun-base-blob"
+    # The bump belongs beside the note: naming a region tells the declared/reached reporter WHICH sites
+    # were withheld, and the bump is what tells the phase's own tally that a skip happened. Naming without
+    # bumping is the defect CI caught -- the region fired on a shallow checkout (the frozen blob is not in a
+    # depth-1 clone), this branch printed a SKIP, and the tally still said `0 skipped`, which is a phase
+    # that cannot price its own coverage: 1 region withheld sites while its arithmetic claims none happened.
+    skipped=$((skipped + 1))
+    printf '  SKIP  no --tag is byte-identical to %s — that blob is not readable from this tree (shallow clone, exported tree). A SKIP here is not a pass in CI\n' "$BASE"
+else
+    # One env, two trees: every variable is spelled here for BOTH sides, so a difference in the bytes can
+    # only come from the code that produced them.
+    # shellcheck disable=SC2086
+    env GSVTK_CONFIG="$ROOT/$FIX" GSVTK_WORK="$TMP/work-base" GSVTK_REPO_ROOT="$ROOT" \
+        GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/" \
+        "$PY" "$TMP/base/terra/batch_rerun_step.py" show $PIN10 \
+        > "$TMP/base-body.json" 2> "$TMP/base-err.txt"
+    # shellcheck disable=SC2086
+    env GSVTK_CONFIG="$ROOT/$FIX" GSVTK_WORK="$TMP/work-base" GSVTK_REPO_ROOT="$ROOT" \
+        GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/" \
+        "$PY" "$ROOT/terra/batch_rerun_step.py" show $PIN10 \
+        > "$TMP/now-body.json" 2> "$TMP/now-err.txt"
+    # Both sides content-checked BEFORE the compare: a base tree that booted nothing would leave two
+    # files `cmp` agrees about, and the byte claim would be vacuous. Same shape as the two content
+    # controls cli.sh runs before its own byte comparison.
+    for side in base now; do
+        run "the $side program built a real step-10 body, not an empty one (the control on cmp)" 0 \
+            "PASS" "$PY" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d['name'] == '10-GenotypeBatch-rerun', d['name']
+assert len(d['inputs']) >= 16, len(d['inputs'])
+assert len(d['outputs']) == 10, len(d['outputs'])
+assert d['rootEntityType'] == 'sample_set', d['rootEntityType']
+print('PASS %s: %d inputs, %d outputs, %s' % (sys.argv[2], len(d['inputs']), len(d['outputs']),
+                                              d['name']))" "$TMP/$side-body.json" "$side"
+    done
+    bytes "no --tag is byte-identical to $BASE: the config body a step-10 rerun POSTs" \
+        "$TMP/base-body.json" "$TMP/now-body.json"
+    # And what DID change on stderr is exactly one line, stated rather than assumed: the new `writes`
+    # line. Without this leg the byte claim would cover stdout only, and a no-flag run that also started
+    # printing something wrong would still be green here.
+    run "the only stderr difference between the two trees is the new writes line" 0 "PASS" "$PY" -c "
+import sys
+old = [l for l in open(sys.argv[1]).read().splitlines() if not l.startswith('[terra]')]
+new = [l for l in open(sys.argv[2]).read().splitlines() if not l.startswith('[terra]')]
+added = [l for l in new if l not in old]
+removed = [l for l in old if l not in new]
+assert not removed, 'the no-flag path LOST a line it used to print: %r' % (removed,)
+assert len(added) == 1 and added[0].lstrip().startswith('writes '), \
+    'the no-flag path gained %d line(s), expected only the writes line: %r' % (len(added), added)
+print('PASS 1 added line (%s), 0 removed' % added[0].strip()[:58])" \
+        "$TMP/base-err.txt" "$TMP/now-err.txt"
+fi
+gsvtk_guard_sites_end "rerun-base-blob"
 
 # -------------------------------------------------------------------- 3. the pin guard fires for OTHER steps too
 # Asserting this for step 10 alone would prove nothing about 07 or 08: the guard reads the *step's*
@@ -1018,6 +1325,88 @@ for c in agree image-drift submission-only-field extra-input missing-input entit
 done
 run "all eleven read-back cases ran (not a loop that ran zero times)" 0 "11" /usr/bin/printf '%s' "$n"
 
+# The read-back, under `--tag`. This is the leg the feature would otherwise introduce a bug with:
+# `submit` POSTs a config NAME, so the agreement it checks is between the body it built and whichever
+# config the name it asks for resolves to. Ask for the untagged name while submitting the tagged body
+# and every field still "agrees" -- with somebody else's config -- and the submission runs that one.
+#
+# So the fake workspace here answers with the name it was ASKED FOR, the way a real GET does. Had this
+# leg reused `server_copy(body)` unchanged, the payload would carry the tagged name however the tool
+# asked, the `name` field would agree by construction, and a read-back pointed at the wrong config would
+# have been graded green. That fixture-agrees-with-the-test shape is this repo's oldest failure mode (see
+# `server_copy`'s own docstring), and it is why this leg does not share `readback.py`'s payload.
+cat > "$TMP/readback_tag.py" <<'PY'
+"""`submit --tag TAG` reads back `NN-<Wf>-TAG` and submits that same name. Prints PASS."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rerun_submit_lib as L
+
+TAG, WANT, DEFAULT = "h2h", "10-GenotypeBatch-h2h", "10-GenotypeBatch-rerun"
+terra, rr = L.setup("10", extra_argv=("--tag", TAG))
+body = rr.make_body()
+assert body["name"] == WANT, ("the body is not the tagged one either: %s" % body["name"])
+
+ASKED = []
+
+
+def payload(ns, ws, cns, cname):
+    ASKED.append(cname)
+    held = L.server_copy(body)
+    held["name"] = cname              # what a workspace answers is the config it was asked for
+    L.TRACE.append(("read", (ns, ws, cns, cname)))
+    return held
+
+
+terra.config_payload = payload
+refused, out = L.run_submit(rr)
+assert refused is None, \
+    "submit refused a workspace that holds exactly the body it built: %s" % refused
+assert ASKED == [WANT], \
+    "the read-back read %r, not the tagged config this body IS (%s): the agreement would have been "\
+    "checked against the wrong config" % (ASKED, WANT)
+sent = [t for t in L.TRACE if t[0] == "submit"]
+assert len(sent) == 1, L.TRACE
+args = sent[0][1]
+assert args[3] == WANT, ("the submission names %r, not %r" % (args[3], WANT))
+assert [t[0] for t in L.TRACE] == ["read", "submit"], L.TRACE
+line = [l for l in out.splitlines() if "read back" in l]
+assert len(line) == 1 and WANT in line[0], line
+assert DEFAULT not in out and DEFAULT not in str(ASKED), \
+    "the untagged name shows up in a tagged run's answer: %r" % out[:300]
+print("PASS read back %s and submitted it; %s was never named" % (ASKED[0], DEFAULT))
+PY
+inproc "submit --tag reads the TAGGED config back and submits that name (the default name is never read)" \
+    0 "$TMP/readback_tag.py"
+
+# The same claim one layer lower, at the bytes: the submission REQUEST must name the tagged config too.
+# `terra.submit` takes the name as an argument, so the leg above could pass while a later edit re-derived
+# the name for the POST only -- and the POST is the thing Terra runs.
+cat > "$TMP/wire_tag.py" <<'PY'
+"""The captured submission body names the tagged config. Prints PASS."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rerun_submit_lib as L
+
+WANT = "10-GenotypeBatch-h2h"
+terra, rr = L.setup("10", extra_argv=("--tag", "h2h"), wire=True)
+L.read_with(L.server_copy(rr.make_body()))
+refused, out = L.run_submit(rr)
+assert refused is None, refused
+assert len(L.WIRE) == 1, L.WIRE
+where, body = L.WIRE[0]
+assert body.get("methodConfigurationName") == WANT, \
+    "the POST names %r, not %r: %r" % (body.get("methodConfigurationName"), WANT, body)
+assert "10-GenotypeBatch-rerun" not in str(body), body
+print("PASS the submission POST carries methodConfigurationName=%s to %s, 0 requests sent"
+      % (WANT, where))
+PY
+inproc "the submission REQUEST Terra would receive names the tagged config (captured at the wire)" 0 \
+    "$TMP/wire_tag.py"
+
 # `create` and a config name that is already taken. Terra answers 409, and until this commit the tool
 # swallowed it and overwrote, under the same single --confirm that authorised the create. The precedent
 # is in this repo's own handoff notes: `10-GenotypeBatch-rerun` was replaced silently.
@@ -1286,7 +1675,13 @@ PY
 inproc "an unstated call cache is refused by terra.submit; fiss's true default is unreachable by omission" \
     0 "$TMP/wire_no_choice.py"
 
-printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
+if [ "$skipped" -gt 0 ]; then
+    # The skipped count is printed when it is non-zero and omitted when it is not, so the string every
+    # ledger row and handoff quotes for a full run stays byte-identical on a machine that skipped nothing.
+    printf 'rerun: %s ok, %s failed, %s skipped\n' "$ok" "$fail" "$skipped"
+else
+    printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
+fi
 # What this pair does and does not prove, stated exactly, because an earlier version of this comment
 # understated its own blindness. BOTH numbers count call SITES now, so the `for s in 06 07 08 09 10` sweep below
 # — one call site, five executions — counts ONE site on each side, and the constant this file used to carry
@@ -1309,6 +1704,6 @@ printf 'rerun: %s ok, %s failed\n' "$ok" "$fail"
 # to run the offline gate. That is why the bail line itself says a SKIP is not a pass in CI, and why the
 # declared/reached line beside it is the SAME guard as this one, run over the rerun-no-firecloud region that
 # covers the rest of this file.
-gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" 0 || fail=$((fail + 1))
+gsvtk_declared_report "rerun" "$SELF" "$((ok + fail))" "$skipped" || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 exit 0

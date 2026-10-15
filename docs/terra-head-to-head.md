@@ -113,7 +113,21 @@ python terra/batch_configs.py validate                # Terra-side typecheck of 
 # and, for the rerun path, the same two things with the same guard, for any step of the chain:
 python terra/batch_rerun_step.py --step 08 show
 python terra/batch_rerun_step.py --step 08 create --confirm [--drop-branch-only-inputs]
+# a SECOND rerun of one step names its own run, or it POSTs over the first config and writes over
+# the first run's output attributes (`--tag` is that name; the note below says what it moves):
+python terra/batch_rerun_step.py --step 08 --tag rc1 show
+python terra/batch_rerun_step.py --step 08 --tag rc1 submit --confirm
 ```
+
+**`--tag TAG` is what makes two reruns of ONE step two runs.** Without it the config name is
+`<NN>-<Workflow>-rerun` and every output lands in `*<GSVTK_NEW_SUFFIX>`, so the second rerun of a step
+overwrites the first one's config *and* its output attributes, and the head-to-head ends up reading one
+run against itself. A tag moves exactly two names, both derived once in `terra/steps.py` and printed by
+`show` — the config (`NN-<Workflow>-TAG`) and the attributes (`this.<attr>_TAG`, the `_new` kept) — and
+nothing else: inputs still read the chain's existing `_frz`/`_new` attributes, which is what lets the two
+arms answer one question from one input. `submit` reads back and compares the **tagged** config, and
+`--overwrite` must repeat that tagged name. With no flag nothing moves: the config body a rerun POSTs is
+byte-identical to the pre-`--tag` tool, asserted by a leg in `scripts/selftest.d/rerun.sh`.
 
 **`--step` is the whole story of that command, so the tool says what it resolved to.** The step decides
 the config name (`<NN>-<Workflow>-rerun`), the input-key prefix, the Dockstore method path, the root

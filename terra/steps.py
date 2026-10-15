@@ -33,6 +33,7 @@ the default step, and the refusals.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -175,6 +176,79 @@ RERUN_ROOT_ENTITY: dict[str, str] = _TABLES[1]
 RERUN_ROW_SOURCE: dict[str, str] = _TABLES[2]
 
 
+# What the rerun config's last segment is when the operator does not name one: `rerun`, so the
+# default name is `10-GenotypeBatch-rerun`. `--tag TAG` replaces this segment (it does not append to
+# it), which is why the no-flag path needs no special case: the tag IS the last segment, and its
+# default spelling is this literal. Kept here rather than in `batch_rerun_step.py` for the reason the
+# whole file exists: the config name has one definer, and a name spelled in two places is the drift
+# every leg in `scripts/selftest.d/rerun.sh` was built to catch.
+RERUN_TAG_DEFAULT = "rerun"
+
+# A tag is pasted into TWO Terra identifiers: the config name (`10-GenotypeBatch-TAG`) and the tail of
+# every output attribute this run writes (`this.foo_new_TAG`). Attribute names are the stricter of the
+# two -- a hyphen or a dot survives in a config name and is refused (or silently mangled) as an
+# attribute -- so the tag takes the intersection of what both accept: letters, digits, underscore.
+_TAG_OK = re.compile(r"[A-Za-z0-9_]+\Z")
+
+
+def check_tag(tag: str) -> str:
+    """A run tag from a command line, or a refusal naming what a tag has to be.
+
+    Called only where `--tag` WAS given: an absent flag is the documented default (`rerun()` with no
+    tag), while `--tag ""` is an unset shell variable arriving as a name, which is the `--entity ''`
+    shape this file already refuses elsewhere. An empty tag would resolve to the default config name
+    while reading like a request for a distinct run, and the run would overwrite the previous one --
+    the exact defect the flag exists to prevent, arriving through the flag meant to prevent it.
+    """
+    if not tag or not tag.strip():
+        raise SystemExit(
+            "refusing: --tag was given, and it resolved to an empty value.\n"
+            "  This is what `--tag \"$TAG\"` looks like when TAG is unset. An empty tag resolves to the\n"
+            "  DEFAULT config name and the DEFAULT output attributes, so the rerun would overwrite the\n"
+            "  run already sitting there -- which is the thing --tag is for. Name the run, or drop --tag.")
+    text = tag.strip()
+    if not _TAG_OK.match(text):
+        raise SystemExit(
+            f"--tag {tag!r} is not usable as a run name.\n"
+            "  A tag is pasted into two Terra identifiers: the method config name\n"
+            "  (`NN-<Workflow>-TAG`) and the tail of every output attribute this run writes\n"
+            "  (`this.<attribute>_TAG`). Attribute names accept letters, digits and underscore only,\n"
+            "  so a hyphen, dot, slash or space survives the config name and is refused by the\n"
+            "  attribute -- a failure at submission time, after the fleet booted. Use `h2h`, `rc1`,\n"
+            "  `2026_10_14`; a hyphen is the character that fails most often.")
+    if text == RERUN_TAG_DEFAULT:
+        raise SystemExit(
+            f"--tag {text!r} is refused: it builds the config name an UNTAGGED rerun already uses\n"
+            f"  (`NN-<Workflow>-{RERUN_TAG_DEFAULT}`), so the run would overwrite the previous one --\n"
+            "  the defect this flag exists to remove, arriving behind the flag typed to prevent it.\n"
+            "  Name the arm instead: `main`, `rc1`, `2026_10_14`.")
+    return text
+
+
+def rerun_suffix(tag: str = "") -> str:
+    """The attribute-name suffix a rerun writes: `_TAG`, or "" for the untagged default.
+
+    One spelling, read by `rerun_outputs()` and by every leg that asserts what a run writes. "" (not
+    `"_"`) for no tag is what keeps the no-flag path byte-identical to the profile's own map.
+    """
+    return f"_{tag}" if tag else ""
+
+
+def rerun_outputs(step: str, tag: str = "") -> dict:
+    """The OUTPUT map a rerun of `step` writes, with the tag applied to every attribute name.
+
+    The output half of `rerun()`'s answer, derived here for the same reason the config name is: the
+    profile states each output once (`this.<attribute>{new}`), and a second definition of the written
+    name -- one in the launcher, one in the tool that reads a run back -- is the drift this file exists
+    to prevent. Keys (the workflow's own output names) never move; only the attribute each one lands in
+    does. INPUTS are deliberately untouched here: a rerun reads the chain's existing attributes, so
+    tagging outputs while leaving inputs alone is what lets two runs sit side by side over one input.
+    """
+    spec = _PROFILE.configs.get(f"{step}-{workflow(step)}") or {}
+    suffix = rerun_suffix(tag)
+    return {k: f"{v}{suffix}" for k, v in (spec.get("outputs") or {}).items()}
+
+
 def known_steps() -> list[str]:
     """The step numbers this map knows, for argparse `choices`."""
     return sorted(STEPS)
@@ -244,18 +318,33 @@ def row_source(step: str) -> str:
     return RERUN_ROW_SOURCE.get(step, "")
 
 
-def rerun(step: str) -> dict:
+def rerun(step: str, tag: str = "") -> dict:
     """Everything a rerun of `step` needs, derived here: config name, input prefix, method path.
 
     `terra/batch_rerun_step.py` used to hold these as module-level literals for step 10 only, which
     meant "rerun 08" silently reran 10. Deriving them from this map is what makes the five steps one
     code path: the prefix, the Dockstore path and the config name are all the workflow name in a
     different coat, and the workflow name lives here.
+
+    `tag` is the optional run name (`--tag`) and it moves exactly two answers, both derived here:
+    the config name (`NN-<Wf>-TAG` instead of `NN-<Wf>-rerun`) and the output attributes (every value
+    in `rerun_outputs` gains `_TAG`). Everything else -- input map, input prefix, method path, root
+    entity, row source -- is the same run read from the same profile, because a tagged rerun is the
+    SAME question asked a second time, not a different question. With no tag the dict is what it always
+    was, byte for byte: `tag` is "", the name ends in `rerun` (`RERUN_TAG_DEFAULT`), the suffix is "".
     """
     wf = workflow(step)
+    tag = check_tag(tag) if tag else ""
     return {"step": step, "workflow": wf,
             "config": f"{step}-{wf}",                        # the name batch_configs' CONFIGS keys on
-            "rerun_config": f"{step}-{wf}-rerun",             # the name the rerun POSTs
+            # The name the rerun POSTs. `--tag` replaces the last segment rather than appending to it,
+            # so the default is this map's own default: `RERUN_TAG_DEFAULT` is what sits there when no
+            # tag is given. Tagging by APPENDING (`-rerun-TAG`) would leave two spellings of one
+            # pattern for the readers to agree on, which is the shape of the bug in the first place.
+            "rerun_config": f"{step}-{wf}-{tag or RERUN_TAG_DEFAULT}",
+            "tag": tag,                                      # '' == the untagged default run
+            "rerun_suffix": rerun_suffix(tag),               # what every OUTPUT attribute ends with
+            "rerun_outputs": rerun_outputs(step, tag),       # the attribute names this run writes
             "input_prefix": f"{wf}.",                         # the prefix of every input key
             # The Dockstore entry, not the WDL name: upstream publishes /wdl/GATKSVPipelineSingleSample.wdl as
             # `SingleSamplePipeline` (.github/.dockstore.yml:256-257), and the live golden's methodUri agrees.
