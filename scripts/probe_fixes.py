@@ -46,6 +46,9 @@ Probes (each names the defect it pins):
                          missed died with a bare StopIteration
     call_cache           call caching was a value the builder carried, not a choice the command line made;
                          batch_rerun_step.py imported it and POSTed a cache it never chose
+    submission_call_cache  the SUBMISSION request is a second body, and this tool never wrote it: fiss's
+                         create_submission defaults use_callcache=True and always states the key, so
+                         `submit` printed `useCallCache=false` under a POST that said `true`
     nested_bindings      a 3-segment (call-site) binding crashed check_maps instead of being counted and
                          named, which made the guard refuse by blowing up and left the one report about
                          un-compared bindings unreachable
@@ -153,6 +156,10 @@ class Skip(Exception):
 
 # ---------------------------------------------------------------- Terra recorder
 REQUESTS: list = []
+# The pristine fiss callables, snapshotted BEFORE the first recorder replaces them. A probe that needs
+# the real request builder cannot get it back by reloading `terra`: `import firecloud.api` re-binds the
+# SAME module object, so whatever a previous probe setattr'd onto it is still there.
+REAL: dict = {}
 
 
 class _Resp:
@@ -179,8 +186,34 @@ def install_recorder(terra) -> None:
             return _Resp()
         return f
     for n in ("create_workspace_config", "overwrite_workspace_config", "validate_config",
-              "create_submission", "list_submissions", "get_submission"):
+              "create_submission", "list_submissions", "get_submission",
+              # The rerun tool reads a method config back now (`batch_rerun_step.assert_matches_workspace`
+              # before it submits), and a probe that calls submit() must not be the one thing that
+              # reaches api.firecloud.org with someone's credentials. A recorder that answers a shape no
+              # config has is refused by that guard by name, so a probe cannot mistake it for agreement.
+              "get_workspace_config"):
+        REAL.setdefault(n, getattr(terra.fapi, n))     # see REAL above: snapshot first, then replace
         setattr(terra.fapi, n, rec(n))
+
+    # The entity pre-flight is a READ, and `_Resp` above answers 201 because everything it was written for is a
+    # POST. `terra.entity_exists` accepts 200 (row there) or 404 (row absent) and refuses to guess on anything
+    # else, so handing it a 201 makes it raise -- which is right, and which is how I found that a recorder which
+    # answers every question with "created" is not a recorder, it is a complacent one. Reads get a read answer.
+    class _ReadResp:
+        status_code = 200
+        text = '{"entityName": "probe-row", "attributes": {}}'
+
+        def json(self):
+            return {"entityName": "probe-row", "attributes": {}}
+
+    def rec_read(name):
+        def f(*a, **k):
+            REQUESTS.append((name,) + a)
+            return _ReadResp()
+        return f
+
+    REAL.setdefault("get_entity", getattr(terra.fapi, "get_entity"))
+    terra.fapi.get_entity = rec_read("get_entity")
 
 
 # ------------------------------------------------------------------ the probes
@@ -903,6 +936,144 @@ def probe_rerun_map_guard() -> str:
             f"GSVTK_BRANCH=ok-ref it graded bad-ref")
 
 
+def probe_submit_reads_back() -> str:
+    """`submit` must read the workspace config back and refuse the POST unless it IS the body it built.
+
+    The money charter's finding, recorded in docs/plan-launch-any-module.md: `terra.submit` POSTs a
+    config NAME, so what runs is the body the WORKSPACE already holds under `NN-<Wf>-rerun` -- written
+    by another branch, an earlier session, or another person -- and `submit` called none of the guards
+    this file builds. Measured as a pair at the time: `show` refused over an unpinned `*_docker` while
+    `submit --confirm` carried on printing `sv_base_mini_docker=UNPINNED`.
+
+    Four states, one code path, and the order is part of the claim:
+      (a) unpinned image -> the refusal lives in make_body(), so building the body inside submit is
+          what puts the guard on the money path; nothing is requested at all;
+      (b) the copy agrees -> the submission goes out, and the read is the request BEFORE it (this is
+          the control: it proves the three refusals below are the guard, not a path that never ran);
+      (c) the copy differs in two bindings and in `rootEntityType` -> refused, all three named, no
+          submission. `rootEntityType` stands where `useCallCache` used to: the planted difference has
+          to be a member a method config can state, or the arm tests a payload that cannot exist.
+      (d) the copy cannot be read (404) -> refused with the cure named, no submission.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    fresh({"GSVTK_PROJECT": "probe-project"}, "terra", "batch_configs")
+    terra = sys.modules["terra"]
+    install_recorder(terra)
+    (bc, r) = fresh({"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                     "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                     "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                    "batch_configs", "batch_rerun_step")
+    reg = "us.gcr.io/probe-project/gatk-sv"
+    argv_save, read_save = sys.argv, terra.config_payload
+    quiet = (contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()))
+
+    def read_as(payload=None, raises=None):
+        """Answer the read-back, recording the coordinates it was asked with."""
+        def _read(ns, name, cns, cname):
+            REQUESTS.append(("config_payload", ns, name, cns, cname))
+            if raises:
+                raise raises
+            return payload
+        terra.config_payload = _read
+
+    def pin():
+        """What the dispatch in __main__ does with `--image`: fill IMAGES before the mode runs."""
+        specs = [f"gatk_docker={reg}/gatk:PINNED", f"sv_base_mini_docker={reg}/sv-base-mini:PINNED",
+                 f"sv_pipeline_docker={reg}/sv-pipeline:PINNED"]
+        r.IMAGES = r.parse_images(specs, r.resolved()["input_prefix"])
+        r.CLI_IMAGE_KEYS = set(r.IMAGES)
+
+    def held_as(b, mutate=None):
+        """The stored copy, shaped like a REAL method config rather than like the body.
+
+        A payload read back from a workspace carries exactly `deleted, inputs, methodConfigVersion,
+        methodRepoMethod, name, namespace, outputs, prerequisites, rootEntityType` (measured; see
+        `recon-live/` and `scripts/selftest.d/golden/README.md`) and NOT `useCallCache` or
+        `deleteIntermediateOutputFiles` -- a config cannot state a submission option. Shaping the fake
+        from that list is what lets arm (c) disagree about a field the guard can actually see; a copy
+        round-tripped from the body answers whatever the body asked, which is how the guard came to be
+        listing a field no server can echo.
+        """
+        real = ("deleted", "inputs", "methodConfigVersion", "methodRepoMethod", "name",
+                "namespace", "outputs", "prerequisites", "rootEntityType")
+        h = {k: json.loads(json.dumps(b[k])) for k in real if k in b}
+        h["namespace"] = b.get("namespace") or "config-namespace"
+        h["prerequisites"] = dict(b.get("prerequisites") or {})
+        h["methodConfigVersion"] = 4                     # bumped by the server on every overwrite
+        h["deleted"] = None
+        if mutate:
+            mutate(h)
+        return h
+
+    def submit_quietly():
+        REQUESTS.clear()
+        try:
+            with quiet[0], quiet[1]:
+                r.submit()
+        except SystemExit as e:
+            return str(e)
+        return None
+
+    try:
+        sys.argv = ["batch_rerun_step.py", "submit", "--confirm"]
+        r.CONFIRMED = True
+        # (a) the money path builds the body, so the unpinned refusal reaches it.
+        r.IMAGES, r.CLI_IMAGE_KEYS = {}, set()
+        r.ALLOW_UNPINNED = False
+        refused = submit_quietly()
+        if refused is None or "image inputs are not fully pinned" not in refused:
+            raise AssertionError(f"submit() reached the money path with an unpinned *_docker: "
+                                 f"{str(refused)[:160]!r}")
+        if REQUESTS:
+            raise AssertionError(f"the image refusal came after a request: {REQUESTS}")
+        # (b) CONTROL: the copy agrees, so it submits -- after reading, which is the whole order claim.
+        pin()
+        body = r.make_body()
+        read_as(held_as(body))
+        if submit_quietly() is not None:
+            raise AssertionError("submit refused a workspace copy that agrees with its own body")
+        order = [q[0] for q in REQUESTS]
+        # The whole sequence is the contract, not just "a read happened": the config is read back, then the row is
+        # pre-flighted, and only then is the submission POSTed. Pinning all three means a future change that boots
+        # VMs before checking the entity -- or that drops the pre-flight -- shows up here instead of on a bill.
+        if order != ["config_payload", "get_entity", "create_submission"]:
+            raise AssertionError(f"expected read -> entity pre-flight -> submit, saw {order}")
+        if REQUESTS[0][1:] != ("probe-sandbox-ns", "probe-sandbox-ws", "probe-sandbox-ns",
+                              "10-GenotypeBatch-rerun"):
+            raise AssertionError(f"the read-back is not addressed at this step's config: "
+                                 f"{REQUESTS[0][1:]}")
+        # (c) one binding from another branch, plus a cache the operator did not ask for.
+        def drift(h):
+            key = [i for i in h["inputs"] if i.endswith(".gatk_docker")][0]
+            h["inputs"][key] = f'"{reg}/gatk:ANOTHER_BRANCH_TAG"'
+            h["inputs"][r.resolved()["input_prefix"] + "branch_only_input"] = "workspace.something_new"
+            h["rootEntityType"] = str(h.get("rootEntityType")) + "_set"
+        read_as(held_as(body, drift))
+        refused = submit_quietly()
+        if refused is None:
+            raise AssertionError("submit POSTed a config that is not the body it built")
+        named = [n for n in ("gatk_docker", "branch_only_input", "rootEntityType") if n in refused]
+        if len(named) != 3:
+            raise AssertionError(f"the disagreement names {named} of 3 planted differences: "
+                                 f"{refused[:300]}")
+        if "create_submission" in [q[0] for q in REQUESTS]:
+            raise AssertionError("it submitted anyway")
+        # (d) the copy cannot be read: "could not check" is not agreement.
+        read_as(raises=terra.TerraError('get_workspace_config: HTTP 404 {"message": "gone"}'))
+        refused = submit_quietly()
+        if refused is None or "create --confirm" not in refused or "Nothing was submitted" not in refused:
+            raise AssertionError(f"a 404 read did not refuse with its cure: {str(refused)[:200]}")
+        if "create_submission" in [q[0] for q in REQUESTS]:
+            raise AssertionError("it submitted a config it could not read")
+        return ("unpinned refused with 0 requests; agreeing copy read-then-submitted "
+                f"({order[0]} -> {order[1]}); 3 planted differences each named; 404 refused with "
+                "the cure")
+    finally:
+        sys.argv = argv_save
+        terra.config_payload = read_save
+
+
 def probe_adapt_drops() -> str:
     """--drop-branch-only-inputs: explicit, verified, and it must not rewrite the table.
 
@@ -1146,6 +1317,186 @@ def probe_drop_flag_guard() -> str:
             f"{key} and sends 0, with it posts {len(sent)} pruned inputs (guard said so: "
             f"{guard_agrees}); --against bad-ref on create -> refused with 0 requests, and the "
             f"GSVTK_BRANCH form posted the pruned body")
+
+
+def _profile_variant(dirname: str, mutate=None) -> Path:
+    """A copy of the tracked profile in a temp MODULE_DIR, optionally mutated.
+
+    The tracked file is never edited: a probe that has to break the thing it is testing has to break a
+    copy, or the rest of the suite reads the damage.
+    """
+    d = tmpdir(dirname)
+    doc = json.loads((ROOT / "profiles" / "genotyping.json").read_text())
+    if mutate:
+        mutate(doc)
+    (d / "genotyping.json").write_text(json.dumps(doc, indent=2))
+    return d
+
+
+def _require_refuses(r, want: list) -> str:
+    """`require()` must exit 4 and print every word that names the defect -- or the probe fails."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            r.require("probe")
+    except SystemExit as e:
+        txt = buf.getvalue() or str(e)
+        if e.code != 4:
+            raise AssertionError(f"refused with exit {e.code}, want 4 (the config layer's number): "
+                                 f"{txt[:120]}")
+        for frag in want:
+            if frag not in txt:
+                raise AssertionError(f"the refusal never says {frag!r}: {txt[:200]}")
+        return txt
+    raise AssertionError("an unusable profile was accepted: require() returned instead of refusing")
+
+
+def probe_profile_loader_refusals() -> str:
+    """Every way a profile can be valid JSON and still wrong must REFUSE, and by name.
+
+    Four classes, all of them the "valid JSON and still wrong" family docs/module-profiles.md §10 puts
+    at the top of the list, and none of them detectable by a loader that parses and moves on:
+
+      * `schema_version` this build does not implement -- the whole reason the field is mandatory is
+        that without it a stale READER and a stale FILE look identical.
+      * an orphan `_why_` -- the pairing rule is what stops a rationale rotting into a sentence about a
+        key nobody binds, and a rule no checker enforces is a comment.
+      * a suffix token on a literal -- `100{frz}` is a type error, not a string: a literal has no
+        attribute to append `_frz` to (§3 rule 3, and the reason "a value is a path iff it starts
+        `this.`/`workspace.`" is a constraint rather than a convention).
+      * a rationale key INSIDE a binding map, which would otherwise be POSTed as a binding.
+
+    THE CONTROL is the tracked `profiles/genotyping.json` itself: it loads with zero findings. Without
+    that, a loader that refuses everything -- or nothing -- passes this probe equally well.
+    """
+    import module_profile                                  # noqa: F401  (imported by fresh() below)
+    cases = []
+
+    def bump_schema(doc):
+        doc["schema_version"] = 99
+
+    def orphan_why(doc):
+        step = doc["steps"][4]
+        step["_why_GenotypeBatch.a_key_nobody_binds"] = step.pop("_why_GenotypeBatch.training_vcf")
+
+    def literal_token(doc):
+        doc["steps"][0]["inputs"]["GenerateBatchMetrics.chr_x"] = "100{frz}"
+
+    def why_inside_map(doc):
+        doc["steps"][4]["inputs"]["_why_GenotypeBatch.batch"] = "a rationale where a binding belongs"
+
+    for label, mutate, want in [
+        ("schema_version", bump_schema, ["schema_version 99 is not a version this build reads"]),
+        ("orphan _why_", orphan_why, ["orphan rationale", "_why_GenotypeBatch.a_key_nobody_binds"]),
+        ("token on a literal", literal_token, ["carries a suffix token but is not a path",
+                                               "this./workspace."]),
+        ("_why_ inside inputs", why_inside_map, ["rationale key INSIDE a binding map"]),
+    ]:
+        d = _profile_variant("profile-" + label.replace(" ", "-").replace("_", "-"), mutate)
+        (mp,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_MODULE_DIR": str(d)}, "module_profile")
+        r = mp.load()
+        if r.configs:
+            raise AssertionError(f"{label}: the tables came back populated despite the defect")
+        txt = _require_refuses(r, want)
+        cases.append(label)
+        say(txt.splitlines()[1] if len(txt.splitlines()) > 1 else "")
+
+    # THE CONTROL, and it is the tracked file rather than a fixture: the same loader, the same rules, a
+    # document that is meant to pass.
+    (mp,) = fresh({"GSVTK_PROJECT": "p"}, "module_profile")
+    good = mp.load()
+    if good.problems or len(good.configs) != 5:
+        raise AssertionError(f"the CONTROL profile does not load clean, so every refusal above is "
+                             f"meaningless: {good.problems} / {len(good.configs)} steps")
+    if good.branch_only_inputs != {"10-GenotypeBatch": {"GenotypeBatch.training_vcf"}}:
+        raise AssertionError(f"the paired `_why_*` did not survive the load: {good.branch_only_inputs}")
+    return (f"{len(cases)} unusable-profile classes each refuse with the defect named "
+            f"({', '.join(cases)}); the tracked profile is the control and loads clean")
+
+
+def probe_module_changes_output() -> str:
+    """Changing MODULE has to change what the tool prints -- the §7 behavioural gate, as a probe.
+
+    Rev 1's gate was "no module-named identifier in terra/ checks/ compare/ replay/", which greps
+    literals: `chain = json.load(open("profiles/genotyping.json"))["chain"]` passes it while staying
+    hard-wired at runtime, and it would fail 117 sites that are the *why* comments CONTRIBUTING mandates.
+    The behaviour question is the one that matters: if pointing `MODULE` at different data does not change
+    the output, the data is decoration.
+
+    Three arms, so the probe cannot pass on a loader that always refuses or always ignores:
+      1. the default module prints the five shipped steps (and their Dockstore basename);
+      2. a different profile prints a DIFFERENT chain and loses the old one -- including the caller
+         expansion, which is the one thing the profile carries that the old code carried in a dict
+         comprehension;
+      3. a module with no profile refuses at exit 4 and names EVERY field a working profile carries (the
+         first error text here named a subset, and following it produced a profile that could not drive a
+         chain).
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+
+    def shown(dir_=None, module="") -> str:
+        d = dict(GSVTK_PROJECT="p", GSVTK_TERRA_NAMESPACE="probe-ns",
+                 GSVTK_TERRA_WORKSPACE="probe-ws", GSVTK_BRANCH="probe-branch")
+        if dir_:
+            d["GSVTK_MODULE_DIR"] = str(dir_)
+        if module:
+            d["GSVTK_MODULE"] = module
+        bc = fresh(d, "module_profile", "batch_configs")[-1]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bc.show()
+        return buf.getvalue()
+
+    a = shown()
+    if "10-GenotypeBatch" not in a or a.count("===== ") != 5:
+        raise AssertionError(f"the default module does not print the five shipped steps:\n{a[:300]}")
+    if a.count("in  GenotypeBatch.") < 17:
+        raise AssertionError(f"the `@`-over-callers expansion lost a binding:\n{a[:300]}")
+
+    def other_module(doc):
+        step = doc["steps"][0]
+        doc["steps"] = [step]                     # a one-step chain is still a chain
+        step["step"] = "01-ClusterDepth"
+        step["wdl"], step["workflow"] = "DepthClustering", "ClusterDepth"
+        step["inputs"] = {"ClusterDepth.batch": "this.sample_set_id",
+                          "ClusterDepth.@_vcf": "this.clustered_@_vcf{frz}"}
+        step["outputs"] = {"ClusterDepth.clustered_depth_vcf": "this.clustered_depth_vcf{new}"}
+        for k in [k for k in step if k.startswith("_why_")]:
+            del step[k]
+        doc["callers"] = ["manta"]
+    b = shown(_profile_variant("module-other", other_module))
+    if "01-ClusterDepth" not in b or "10-GenotypeBatch" in b:
+        raise AssertionError(f"MODULE changed and the output did not:\n{b[:400]}")
+    # `dockstore()` gets the FILE basename while the bindings carry the DECLARED name, so both strings
+    # must appear here and neither may do the other's job.
+    if "gatk-sv%2FDepthClustering" not in b or "ClusterDepth.batch" not in b:
+        raise AssertionError(f"the wdl/workflow split collapsed into one name:\n{b[:400]}")
+    if "in  DepthClustering." in b:
+        raise AssertionError(f"bindings are being keyed by the file basename:\n{b[:400]}")
+    if b.count("this.clustered_manta_vcf_frz") != 1 or "wham" in b or "scramble" in b:
+        raise AssertionError(f"the caller list is not driving the expansion:\n{b[:400]}")
+
+    # Arm 3: the refusal, with the complete field list -- a subset is the defect §6 calls out.
+    bc = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch",
+                "GSVTK_MODULE": "copynumber"}, "module_profile", "batch_configs")[-1]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            bc.show()
+        raise AssertionError("a module with no profile printed something anyway")
+    except SystemExit as e:
+        txt = buf.getvalue()
+        if e.code != 4:
+            raise AssertionError(f"a missing module exited {e.code}, want 4")
+        for frag in ("copynumber.json", "schema_version", "callers", "steps", "wdl", "workflow",
+                     "rootEntityType", "inputs", "outputs", "branch_only_inputs", "entity_row", "_why_"):
+            if frag not in txt:
+                raise AssertionError(f"the refusal omits {frag!r} from the field list -- that is how a "
+                                     f"following author writes an incomplete profile")
+    return ("default module prints all 5 steps; a different MODULE prints a different chain (wdl/workflow "
+            "split kept, caller list drives the expansion); an absent module exits 4 naming all fields")
 
 
 def probe_nested_bindings() -> str:
@@ -1514,6 +1865,159 @@ def probe_call_cache() -> str:
             "rerun body, both-flags refusal named, 0 requests left the machine")
 
 
+def probe_submission_call_cache() -> str:
+    """The call-cache choice has to reach the SUBMISSION POST, not just the config body and the print.
+
+    `probe_call_cache` grades the method config, and that is the body `create` POSTs. A submission is a
+    different request, and until now this tool wrote none of it: `terra.submit` called
+    `fapi.create_submission(...)` without `use_callcache`, whose fiss default is True, and fiss puts the
+    key in the body unconditionally. So `batch_rerun_step.py submit` printed `useCallCache=false` on the
+    default while the body it was about to send said `true` -- reproduced here before the fix by
+    capturing the request at fiss's own boundary, which is the seam this probe keeps grading at: a leg
+    at `create_submission`'s arguments would have agreed with the print while the body still disagreed,
+    because the disagreement IS fiss's default applied after those arguments.
+
+    Whether Terra lets the submission value or the method-config value win is a question about a server
+    nobody here measured with this field; what is measured is that the tool printed one answer and asked
+    Terra for the other, on the one field whose wrong value still reads as a clean run -- a call served
+    from the cache never ran the image the rerun exists to test (docs/terra-head-to-head.md §5).
+
+    Three states, one seam:
+      (a) default and --no-call-cache -> the POST body says False and the line printed `false`;
+      (b) --call-cache -> both say True. This arm is the control on the capture AND on the threading:
+          the same fixture, the same seam, a different captured value, so a seam blind to the difference
+          cannot be passing by luck -- and dropping the kwarg at the call site turns it red while every
+          body-level leg stays green;
+      (c) a caller that states no choice is refused with 0 bodies captured, which is what stops fiss's
+          default returning the moment anyone adds a second submission path.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    fresh({"GSVTK_PROJECT": "probe-project"}, "terra", "batch_configs")
+    terra = sys.modules["terra"]
+    install_recorder(terra)      # the belt: every other fiss entry point counts, never sends
+    if "create_submission" not in REAL:
+        raise AssertionError("install_recorder no longer snapshots the pristine create_submission, so "
+                             "this probe has no way to grade the real request builder")
+    bc, r = fresh({"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                   "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                  "batch_configs", "batch_rerun_step")
+    reg = "us.gcr.io/probe-project/gatk-sv"
+    fapi = terra.fapi
+    fapi.create_submission = REAL["create_submission"]   # the one call this probe must NOT replace
+    REQUESTS.clear()          # the end claim is "nothing reached the recorder IN THIS PROBE"
+    argv_save, read_save = sys.argv, terra.config_payload
+    verbs = ("__post", "__get", "__put", "__delete")     # fiss's own request boundary
+    verb_save = {v: getattr(fapi, v) for v in verbs}
+    POSTED = []
+
+    class _Sent:
+        """The response a captured POST hands back, so `submit` completes the way it would have."""
+
+        status_code = 200
+        text = '{"submissionId": "captured-offline"}'
+
+        def json(self):
+            return {"submissionId": "captured-offline", "message": "captured at the wire, never sent"}
+
+    def capture(methcall, headers=None, root_url=None, **kwargs):
+        """Hold the body fiss built and stop there: the request is what this probe grades."""
+        POSTED.append((methcall, kwargs.get("json")))
+        return _Sent()
+
+    def blocked(name):
+        def f(*a, **k):
+            raise AssertionError(f"a probe that must send nothing attempted {name!r}: {a!r}")
+        return f
+
+    def agree(ns, name, cns, cname):
+        """The read-back the submission guard demands: this body, plus what only the server states."""
+        return dict(r.make_body(), methodConfigVersion=4, deleted=None,
+                    workspace={"namespace": "probe-sandbox-ns", "name": "probe-sandbox-ws"})
+
+    def run_submit():
+        POSTED.clear()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            r.submit()
+        return out.getvalue()
+
+    try:
+        r.CONFIRMED, r.ALLOW_UNPINNED = True, False
+        specs = [f"gatk_docker={reg}/gatk:PINNED", f"sv_base_mini_docker={reg}/sv-base-mini:PINNED",
+                 f"sv_pipeline_docker={reg}/sv-pipeline:PINNED"]
+        r.IMAGES = r.parse_images(specs, r.resolved()["input_prefix"])
+        r.CLI_IMAGE_KEYS = set(r.IMAGES)
+        setattr(fapi, "__post", capture)
+        for v in verbs[1:]:
+            setattr(fapi, v, blocked(v))
+        terra.config_payload = agree
+        seen = {}
+        for extra, want in (([], False), (["--no-call-cache"], False), (["--call-cache"], True)):
+            sys.argv = ["batch_rerun_step.py"] + extra + ["submit", "--confirm"]
+            out = run_submit()
+            tag = " ".join(extra) or "(no flag)"
+            if len(POSTED) != 1:
+                raise AssertionError(f"{tag}: {len(POSTED)} submission POSTs, want exactly 1: {POSTED}")
+            where, body = POSTED[0]
+            if where != "workspaces/probe-sandbox-ns/probe-sandbox-ws/submissions":
+                raise AssertionError(f"{tag}: that is not the submission endpoint: {where}")
+            if "inputs" in body:
+                raise AssertionError(f"{tag}: the submission request carries a method config: "
+                                     f"{sorted(body)}")
+            if body.get("useCallCache") is not want:
+                raise AssertionError(f"{tag}: the submission body says {body.get('useCallCache')!r}, "
+                                     f"this arm asked for {want!r}")
+            line = [l for l in out.splitlines() if "useCallCache=" in l]
+            if len(line) != 1:
+                raise AssertionError(f"{tag}: {len(line)} printed lines name the cache: {line}")
+            said = line[0].split("useCallCache=")[1].split()[0]
+            if said != ("true" if want else "false"):
+                raise AssertionError(f"{tag}: printed {said} while the POST it sent says "
+                                     f"{body['useCallCache']!r}")
+            seen[tag] = said
+        # (c) No choice stated is not no choice taken: fiss would fill in `true`, so `terra.submit`
+        # refuses and the seam captures nothing. The control is the three arms above, which POST
+        # through this same function with a choice stated.
+        POSTED.clear()
+        try:
+            terra.submit("probe-sandbox-ns", "probe-sandbox-ws", "probe-sandbox-ns",
+                         "10-GenotypeBatch-rerun", "all_samples", "sample_set", None, confirm=True)
+            raise AssertionError("an unstated call cache reached fiss, whose default is `true`")
+        except terra.TerraError as exc:
+            unnamed = [w for w in ("call-cache", "useCallCache", "Nothing was submitted")
+                       if w not in str(exc)]
+            if unnamed:
+                raise AssertionError(f"the refusal does not name {unnamed}: {str(exc)[:200]}")
+        if POSTED:
+            raise AssertionError(f"it POSTed a submission it refused to choose for: {POSTED}")
+        # "Nothing left this machine" used to be asserted over the whole request list. It can no longer be, and
+        # the reason is a feature: `submit` now reads the config back and pre-flights its entity row before it
+        # reaches the cache choice, so an unstated choice refuses AFTER two read-only calls. What must stay empty
+        # is the list of MUTATING calls -- that is the claim this probe was always making. And the read is now
+        # asserted to have happened, so a future change that skips the row check cannot pass this arm quietly.
+        mutating = [q for q in REQUESTS if q[0] in ("create_submission", "create_workspace_config",
+                                                    "overwrite_workspace_config", "validate_config",
+                                                    "list_submissions", "get_submission")]
+        if mutating:
+            raise AssertionError(f"a MUTATING request reached the recorder instead of the captured seam: "
+                                 f"{mutating}")
+        if not any(q[0] == "get_entity" for q in REQUESTS):
+            raise AssertionError("the entity pre-flight did not happen before the cache refusal; "
+                                 f"requests were {REQUESTS}")
+        return (f"default/--no-call-cache -> POST false, --call-cache -> POST true, each under a printed "
+                f"line that says the same ({seen['(no flag)']}/{seen['--call-cache']}); unstated choice "
+                "refused with 0 bodies captured")
+    finally:
+        # The seam is fiss's own module global, and every probe after this one shares it: an unrestored
+        # `__post` is a probe file whose later probes quietly stop sending -- and quietly stop noticing.
+        sys.argv = argv_save
+        terra.config_payload = read_save
+        for v, saved in verb_save.items():
+            setattr(fapi, v, saved)
+
+
 def probe_task_artifact_tail() -> str:
     """batch_peek has to READ a task's artifacts, not print where they live.
 
@@ -1600,13 +2104,17 @@ PROBES = [
     ("dstore_drift", probe_dstore_drift),
     ("map_vs_wdl", probe_map_vs_wdl),
     ("rerun_map_guard", probe_rerun_map_guard),
+    ("submit_reads_back", probe_submit_reads_back),
     ("adapt_drops", probe_adapt_drops),
     ("drop_flag_guard", probe_drop_flag_guard),
     ("listing_lie", probe_listing_lie),
     ("recon_empty_inventory", probe_recon_empty_inventory),
     ("step_lookup_names_itself", probe_step_lookup_names_itself),
     ("call_cache", probe_call_cache),
+    ("submission_call_cache", probe_submission_call_cache),
     ("task_artifact_tail", probe_task_artifact_tail),
+    ("profile_loader_refusals", probe_profile_loader_refusals),
+    ("module_changes_output", probe_module_changes_output),
     # Last: this probe injects a key into batch_configs.CONFIGS. Every other probe re-imports the module
     # through fresh() so it could not read that, but a probe that mutates shared module state has no
     # business running before the ones that do not.

@@ -11,8 +11,14 @@ source .venv/bin/activate
 
 Python 3.9+ (`kit/gsvtk-config` uses `str.removeprefix`, added in 3.9; `kit/config.sh`'s interpreter
 probe enforces the same floor). The pure-python tools (`checks/` and `kit/`) need nothing beyond
-the standard library, so they run on a bare interpreter with no venv at all. `compare/` is not one
-of them: three of its six tools import `numpy`, one `pandas`, one `pysam`. The Terra tools need two third-party packages:
+the standard library, so they run on a bare interpreter with no venv at all — **with one exception, and it is
+a layer rather than a tool**: the required-input half of `checks/terra_entity_check.py` asks a WDL which of its
+inputs are required, so it imports `miniwdl` — lazily, through `checks/wdl_inputs_check.py`. On an interpreter
+without it the tool still answers the entity, oracle and value questions and prints `capture=NO-MINIWDL` for
+the required ones, counted, with the exit code unmoved; what none of these tools may need is `firecloud`,
+which is why `terra/` is not in this sentence and why the entity checker reads one expander out of
+`terra/batch_configs.py` with `ast` instead of importing it. `compare/` is not one of these either: three of
+its six tools import `numpy`, one `pandas`, one `pysam`. The Terra tools need two third-party packages:
 
 | Package | Needed by | Note |
 |---|---|---|
@@ -23,10 +29,11 @@ Extras you opt into:
 
 | Tool | Needs | Install |
 |---|---|---|
-| `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it; see `./kit/gsvtk-config miniwdl` |
+| `checks/wdl_gate.sh`, `terra/wdl_flat.py --check`, `replay/build_inputs.py`, `checks/wdl_inputs_check.py`, and the required-input layer of `checks/terra_entity_check.py` | `miniwdl` | `python -m pip install -r requirements-dev.txt`. It is a *package*: `build_inputs.py` needs the interpreter that has it. The two CLI users resolve it themselves (`$MINIWDL` → `PATH` → the bin next to the interpreter → `./.venv/bin`), because a venv your shell never activated is still where `make setup` put it; see `./kit/gsvtk-config miniwdl`. The two python checkers want it as an **import**, so it is *their* interpreter that must have it — and `checks/terra_entity_check.py` answers the other three questions either way, grading required inputs only when `WDL` imports and printing `capture=NO-MINIWDL` beside every config when it does not |
 | `make flake` | `flake8` (used only as a pyflakes runner, `--select=F`) | `python -m pip install -r requirements-dev.txt`. `make test` SKIPs it with this named when it is absent, and CI is where it is enforced |
+| `checks/wdl_gate.sh` (the `MISSING-INPUTS` column) | `jinja2`, because gatk-sv's own `scripts/inputs/build_inputs.py` imports it | `python -m pip install -r requirements-dev.txt`. The gate looks for an interpreter that can `import jinja2` the same way it looks for miniwdl; none found is a counted `SKIPPED`, not a silent pass |
 | `checks/svshell_jq_plumbing_scan.py` | `jq` on PATH | `brew install jq` / `apt-get install jq` |
-| `terra/batch_check_inputs.py` | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar` |
+| `terra/batch_check_inputs.py`, `checks/wdl_gate.sh` (the womtool comparison only) | a womtool jar | set `WOMTOOL_JAR=/path/to/womtool.jar`. The gate's input-binding layer runs without it and prints a counted `SKIPPED` line for the part that needs it; `batch_check_inputs.py` refuses outright |
 | `compare/*` (some) | `bcftools`, `pysam`, `pandas` | `bcftools` via your package manager; the rest in requirements |
 | `compare/profile_summarize.py` | `numpy`, `pandas` | reads `gatk-sv-profile`'s bucketed `.tsv.gz` tables |
 | paired profiling | [`gatk-sv-profile`](https://github.com/broadinstitute/gatk-sv-profile) | `pip install -e <checkout>`, then `export PROFILE_BIN=...` |

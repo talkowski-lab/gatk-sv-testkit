@@ -23,20 +23,156 @@ the sibling tools in this directory already report an unusable argument (`batch_
 message, `batch_save_metadata`'s four-flag explicit-target rule), so a reader gets the sentence and an
 exit code rather than a traceback or a shrug.
 
+The MAP is not in this file: `STEPS`, `RERUN_ROOT_ENTITY` and `RERUN_ROW_SOURCE` are derived at import
+from `profiles/<module>.json`, the same read `batch_configs.CONFIGS` is built from, so a step is added in
+one place and one refusal path covers a profile that will not load. What stays here is the two lookups,
+the default step, and the refusals.
+
     python terra/steps.py        # print the map (offline: no config, no credentials, no network)
 """
 from __future__ import annotations
 
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "kit"))
+import module_profile  # noqa: E402  (the reader of profiles/<MODULE>.json; kit/ is on sys.path)
+
 # Steps 06->10 are the batch half of the joint-calling chain. The keys are the number the workspace's
 # method configs are prefixed with -- the same number batch_configs.CONFIGS keys on -- and the values
 # are the WDL/workflow names Dockstore serves at github.com/broadinstitute/gatk-sv/<name>.
-STEPS: dict[str, str] = {
-    "06": "GenerateBatchMetrics",
-    "07": "FilterBatchSites",
-    "08": "FilterBatchSamples",
-    "09": "MergeBatchSites",
-    "10": "GenotypeBatch",
-}
+#
+# That last segment is the workflow NAME, not the WDL file basename, and the two are not the same
+# thing upstream. Measured (read-only, `git -C "$GSVTK_GATK_SV_CHECKOUT" archive <ref> wdl | tar -t`
+# plus the `workflow <name>` declaration inside each file) at two refs, a branch head and origin/main:
+# 12 of the 109 WDLs that declare a top-level workflow declare a name other than their file's basename
+# -- wdl/DepthClustering.wdl declares `ClusterDepth`, wdl/PloidyEstimation.wdl declares `Ploidy`,
+# wdl/Genotype_2.wdl declares `Regenotype` (the same twelve at both refs). For the five steps below it
+# was checked per step and each one AGREES: `wdl/GenerateBatchMetrics.wdl` declares
+# `workflow GenerateBatchMetrics`, and likewise FilterBatchSites, FilterBatchSamples, MergeBatchSites
+# and GenotypeBatch. So `workflow()` may serve as that path segment for 06->10 -- and a step added to
+# this map whose file and workflow differ must carry the NAME here, because the basename would 404
+# against Dockstore (`Cannot get dockstore://... from method repo`).
+# The two tables below are DERIVED from `profiles/<module>.json`, the same file `batch_configs.CONFIGS`
+# is built from, so the step -> workflow -> root-entity triple now has one home. They were literals here
+# while that JSON carried the identical three fields per step -- docs/module-profiles.md §9.4's "collapse,
+# don't duplicate", and the reason `batch_rerun_step` carries a `_reconcile` that refuses when the two
+# copies disagree. That reconciliation is now a check on one source rather than an arbitration between
+# two, and `scripts/selftest.d/rerun.sh` pins the agreement step by step, before and after this move.
+#
+# What the profile states, verbatim: `steps[].step` (`06-GenerateBatchMetrics`), `workflow`,
+# `rootEntityType` (the cross-check, below), `entity_row` (where the row NAME comes from). The step NUMBER
+# is the two-digit prefix of `step`, the key batch_configs keys CONFIGS on; an entry whose key does not
+# start with one is refused below rather than skipped, because a step map missing a step reads exactly
+# like a chain that does not contain it.
+#
+# What is NOT copied verbatim: the root entity. `rootEntityType` used to be the answer here and it is now
+# the cross-check on an answer derived from the step's own bindings -- see `_tables`.
+_PROFILE = module_profile.load()
+
+
+def _tables(profile):
+    """`(step -> workflow, step -> root entity, step -> row source)` from the module profile.
+
+    Never an empty map. An empty one answers "no such step" to every question in this file, which is the
+    shape the whole module argues against, and it would arrive silently: `known_steps()` becomes argparse
+    `choices`, so an empty table turns into a tool that accepts no step at all.
+
+    The root entity is DERIVED, not copied: it is the single `this.<etype>_id` read in the step's own
+    binding map (`module_profile.derive_entity_type`), because that key is the one thing in the profile
+    that states which row the step runs on -- and it is the same rule `checks/terra_entity_check.py`
+    applies to upstream's launch configs, so the launcher and the checker answer from one rule rather
+    than two. The profile's typed `rootEntityType` is now the CROSS-CHECK on that answer, not the answer:
+    `batch_rerun_step._reconcile` refuses on the money path when the derived type and the stated one
+    disagree, and `rerun.sh` refuses in CI for every other reader. A profile that states a type its own
+    bindings contradict is described two ways, and which one wins decides what runs.
+    """
+    if profile.problems or not profile.configs:
+        raise SystemExit(
+            f"terra/steps.py cannot build the step map: {profile.path} gave no usable steps.\n"
+            f"  {profile.problem or 'the profile carries no steps[] entries'}\n"
+            "  Every tool in this directory reads the step map from here, so none of them run until the\n"
+            "  profile loads; `python kit/module_profile.py validate` names the field at fault.")
+    names: dict[str, str] = {}
+    roots: dict[str, str] = {}
+    rows: dict[str, str] = {}
+    for key, spec in profile.configs.items():
+        number, _, tail = str(key).partition("-")
+        if len(number) != 2 or not number.isdigit():
+            raise SystemExit(
+                f"module profile step {key!r} does not start with a two-digit step number, so it has\n"
+                f"  no key in the step map (it names {tail!r} as its workflow). Every tool matches\n"
+                f"  workspace method configs on that number, so an unnumbered entry is invisible to all\n"
+                f"  of them -- add the number, do not delete the entry.")
+        names[number] = str(spec["workflow"])
+        roots[number] = _require_derived_entity(key, spec)
+        rows[number] = profile.row_sources.get(key, "")
+    return names, roots, rows
+
+
+def _require_derived_entity(key: str, spec: dict) -> str:
+    """The entity type a step's own bindings state, or an exit that names what was looked for.
+
+    Zero and many are different refusals, because their cures are. Zero means the step reads no name key
+    at all -- so nothing in the profile states which row it runs on, and the typed `rootEntityType` is
+    the only candidate left, which is exactly the value this derivation stopped trusting. Many means the
+    bindings name two rows, and picking one is a guess with a submission behind it.
+    """
+    values = list((spec.get("inputs") or {}).values())
+    etype, found = module_profile.derive_entity_type(values)
+    if etype:
+        return etype
+    reads = sorted({v for v in values
+                    if isinstance(v, str) and v.startswith("this.")})
+    if not found:
+        raise SystemExit(
+            f"module profile step {key!r} ({spec.get('workflow')}) reads no `this.<etype>_id` name key,\n"
+            f"  so nothing in it states which entity row the step runs on.\n"
+            f"  the `this.*` reads it does carry ({len(reads)}): {', '.join(reads) or '(none)'}\n"
+            "  A member read (`this.sample_sets.cutoffs`) names the MEMBER type, not the row: that is the\n"
+            "  rule that came out wrong for 09-MergeBatchSites, which reads `this.sample_sets.<attr>`\n"
+            "  three times and `this.sample_set_set_id` once. Bind the row's own name key, or launch this\n"
+            "  step from a profile that does -- `rootEntityType` alone is no longer enough, because a type\n"
+            f"  that nothing in the config reads resolves every this.* binding to nothing at runtime.\n"
+            f"  (profile: {_PROFILE.path})")
+    raise SystemExit(
+        f"module profile step {key!r} ({spec.get('workflow')}) reads more than one entity type as\n"
+        f"  `this.<etype>_id`: {', '.join(found)}. Which row it runs on decides what a submission boots,\n"
+        f"  and the profile states {len(found)} answers, so neither one is trusted here.\n"
+        f"  (profile: {_PROFILE.path})")
+
+
+_TABLES = _tables(_PROFILE)
+STEPS: dict[str, str] = _TABLES[0]
+
+
+# The step a caller gets when it does not say: `10-GenotypeBatch`, the stage the rerun tool was
+# written for. Kept here rather than repeated as a literal in a tool's flag default, so "which step
+# is the default" has one answer in the repo.
+DEFAULT_STEP = "10"
+
+# The root entity each step is submitted against -- per-step data a rerun cannot invent. It is NOT
+# uniform: `09-MergeBatchSites` is rooted in `sample_set_set` (one row per cohort; its inputs read
+# `this.sample_sets.<attr>`, one value per member sample_set), while 06/07/08/10 are rooted in
+# `sample_set` (one row per batch). Submit against the wrong type and the batch-level `this.*`
+# bindings resolve to nothing -- at runtime, after the fleet booted, in a message that names no key
+# (docs/terra-head-to-head.md §3).
+#
+# It is no longer a second copy, and it is no longer even copied: the value is DERIVED from the step's
+# own `this.<etype>_id` read (`_tables`), and the profile's typed `rootEntityType` is the cross-check on
+# it. `batch_rerun_step._reconcile` is where the two are compared -- on the launch path, where a wrong
+# type is a submission rather than a red test -- and `rerun.sh` compares them for every other reader.
+# A disagreement is a refusal either way; it is the kind of drift that made this repo's named failure
+# class in the first place.
+RERUN_ROOT_ENTITY: dict[str, str] = _TABLES[1]
+
+# Where each step's entity ROW NAME comes from: the config-layer key its profile's `entity_row` names
+# (`BATCH` -> `GSVTK_BATCH`), or "" when the profile says nothing offline holds one. `""` is not an empty
+# answer -- it is the answer "only `--entity` can name this row", and `batch_rerun_step.entity()` is what
+# refuses it. This table is why `_row_name` no longer asks "is the type sample_set?": that question was
+# the chain's shape written into the launcher, and it answered every row outside the chain with "none".
+RERUN_ROW_SOURCE: dict[str, str] = _TABLES[2]
 
 
 def known_steps() -> list[str]:
@@ -51,12 +187,83 @@ def workflow(step: str) -> str:
     except KeyError:
         raise SystemExit(
             f"unknown step {step!r}: this map knows {', '.join(known_steps())} "
-            f"({', '.join(STEPS.values())}). Add it to terra/steps.py -- every tool reads it from here.")
+            f"({', '.join(STEPS.values())}). The map comes from the module profile "
+            f"({_PROFILE.path});\n  add the step there -- every tool reads it from here.")
+
+
+def dockstore_of(step: str) -> str:
+    """The Dockstore ENTRY a step's method resolves from -- not necessarily its workflow name.
+
+    Equal to `workflow()` for every step whose WDL is published under its own file name, which is every step of
+    the batch chain; that equality is why the distinction stayed hidden until a module where the two differ:
+    upstream publishes `/wdl/GATKSVPipelineSingleSample.wdl` as `SingleSamplePipeline`
+    (.github/.dockstore.yml:256-257), and the live golden's `methodRepoMethod.methodUri` says the same. A launch
+    that used the workflow name here would POST a config pointing at a Dockstore entry that does not exist --
+    which Terra accepts, then fails downstream. Never invented: no `dockstore` in the profile means `workflow`.
+    """
+    for name, cfg in _PROFILE.configs.items():
+        if name.startswith(f"{step}-"):
+            return str(cfg.get("dockstore") or cfg.get("workflow") or workflow(step))
+    return workflow(step)
 
 
 def step_names() -> list[str]:
     """`["06-GenerateBatchMetrics", ...]` -- the numbered chain in launch order."""
     return [f"{s}-{STEPS[s]}" for s in known_steps()]
+
+
+def root_entity(step: str) -> str:
+    """The entity type `step` is submitted against, or an exit -- never a guessed `sample_set`.
+
+    The value is derived from the step's bindings at import (see `_tables`), so the two ways this can
+    fail are both refusals by then: a profile whose step reads no name key, or reads two, exits there
+    naming what was looked for. What is left is a step the map does not carry at all. Defaulting that to
+    the majority type would submit it against the wrong row and empty every `this.*` binding, which is the
+    exact defect this table exists to prevent, so it is a refusal naming the step and the file to fix.
+    """
+    try:
+        return RERUN_ROOT_ENTITY[step]
+    except KeyError:
+        raise SystemExit(
+            f"step {step} ({workflow(step)}) has no rootEntityType in the module profile "
+            f"({_PROFILE.path}),\n  so nothing can be submitted against it.\n"
+            f"  Known: {', '.join(f'{k}={v}' for k, v in sorted(RERUN_ROOT_ENTITY.items()))}.\n"
+            "  The value is derived from the step's own `this.<etype>_id` read, so the entry to add or "
+            "fix is\n  the step in that profile (its `rootEntityType` is the cross-check, not the source).\n"
+            "  Guessing `sample_set` is not a fallback: 09-MergeBatchSites is `sample_set_set`, and a "
+            "wrong\n  type resolves every this.* binding to nothing at runtime, after the VMs booted.")
+
+
+def row_source(step: str) -> str:
+    """The config key that names `step`'s row, or "" when only the operator can name it.
+
+    Never a refusal: "no offline source" is a legal answer and a common one (the cohort row of a
+    `sample_set_set` step), and the tool that needs the row is the one that has to say so. An unknown
+    step is not asked about here -- `rerun()` resolves the step first, which is where that refusal lives.
+    """
+    return RERUN_ROW_SOURCE.get(step, "")
+
+
+def rerun(step: str) -> dict:
+    """Everything a rerun of `step` needs, derived here: config name, input prefix, method path.
+
+    `terra/batch_rerun_step.py` used to hold these as module-level literals for step 10 only, which
+    meant "rerun 08" silently reran 10. Deriving them from this map is what makes the five steps one
+    code path: the prefix, the Dockstore path and the config name are all the workflow name in a
+    different coat, and the workflow name lives here.
+    """
+    wf = workflow(step)
+    return {"step": step, "workflow": wf,
+            "config": f"{step}-{wf}",                        # the name batch_configs' CONFIGS keys on
+            "rerun_config": f"{step}-{wf}-rerun",             # the name the rerun POSTs
+            "input_prefix": f"{wf}.",                         # the prefix of every input key
+            # The Dockstore entry, not the WDL name: upstream publishes /wdl/GATKSVPipelineSingleSample.wdl as
+            # `SingleSamplePipeline` (.github/.dockstore.yml:256-257), and the live golden's methodUri agrees.
+            # For every chain step the two are equal, which is why this only shows up with the second module --
+            # and it shows up as a config pointing at a Dockstore entry that does not exist.
+            "method_path": f"github.com/broadinstitute/gatk-sv/{dockstore_of(step)}",
+            "root_entity": root_entity(step),
+            "row_source": row_source(step)}                   # '' == only --entity names the row
 
 
 def match_configs(step: str, names) -> list[str]:
@@ -101,5 +308,8 @@ def config_name(step: str, names) -> str:
 
 if __name__ == "__main__":
     print("# terra/steps.py: the step -> workflow map (the only copy)")
+    print("# step  workflow                         root entity   rerun config              row source")
     for s in known_steps():
-        print(f"{s}  {STEPS[s]}")
+        r = rerun(s)
+        print(f"{s}     {r['workflow']:<32} {r['root_entity']:<13} {r['rerun_config']:24} "
+              f"{r['row_source'] or module_profile.ROW_SOURCE_OPERATOR}")

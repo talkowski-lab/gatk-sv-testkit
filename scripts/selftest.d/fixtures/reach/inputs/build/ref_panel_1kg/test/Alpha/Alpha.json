@@ -1,0 +1,4 @@
+{
+  "Alpha.in_file": "gs://acme-test/scratch/in.vcf",
+  "Alpha.gatk_docker": "us.gcr.io/acme-test/gatk-sv/gatk:2026-09-17-v1.1.1-67b318e7"
+}

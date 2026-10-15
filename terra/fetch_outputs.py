@@ -170,6 +170,29 @@ def resolve(name: str, outs: dict):
            "(GAP-REVIEW-manta-tloc.md §2.4).", 3)
 
 
+CACHE_MARK = "/cacheCopy/"
+
+
+def cache_report(outs: dict) -> tuple:
+    """`(cached, fresh)`: declared outputs whose object path is a Cromwell call-cache copy.
+
+    A path carrying `/cacheCopy/` means Cromwell served that call from cache: the bytes exist, the manifest can hash
+    them, and nothing in this run produced them. Every downstream use of a fetch is a comparison, and a comparison whose
+    arm was served from cache did not execute the code under test -- which is why a launch sets `useCallCache: false`
+    (see `call_cache_line()` in `batch_configs.py`; the old hardcoded `True` is what this function exists to catch). So
+    this is reported as a count with names, not silently absorbed into "33 outputs fetched".
+
+    It reads the metadata's own paths rather than asking Cromwell for its cache directory, because the question is
+    per-output: a run with `useCallCache: false` can still contain a `cacheCopy` path if the metadata belongs to a
+    different workflow id than the one asked about, and that is exactly the confusion worth naming out loud.
+    """
+    cached, fresh = [], []
+    for key, value in sorted(outs.items()):
+        flat = json.dumps(value) if not isinstance(value, str) else value
+        (cached if CACHE_MARK in flat else fresh).append(key)
+    return cached, fresh
+
+
 def values_of(key: str, value, status) -> list:
     """Declared value -> the list of gs:// objects it names, or a refusal / an empty list.
 
@@ -291,6 +314,13 @@ def main(argv: list, run=subprocess.run) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve every name and print the plan, INCLUDING the exact command each "
                          "object would be fetched with; download nothing, write nothing")
+    ap.add_argument("--cache-report", action="store_true",
+                    help="before fetching anything, count the declared outputs whose path is a Cromwell call-cache "
+                         "copy (/cacheCopy/) and name them. A cached call did not run on this submission, so its "
+                         "artifacts are evidence about the code that produced them earlier, not about this run")
+    ap.add_argument("--refuse-cached", action="store_true",
+                    help="--cache-report, and exit 7 if ANY resolved output is cache-served: for an A/B, one cached "
+                         "arm is not a result, and finding that out after downloading 40 GB is a bad afternoon")
     ap.add_argument("--verify", action="store_true",
                     help="do not fetch: re-hash what the manifest at --manifest recorded and report "
                          "drift, missing files and unreadable records")
@@ -344,6 +374,26 @@ def main(argv: list, run=subprocess.run) -> int:
     src = Path(a.metadata).expanduser() if a.metadata else default_metadata_file()
     meta = load_metadata(src)
     outs = outputs_map(meta, src)
+
+    if a.cache_report or a.refuse_cached:
+        cached, fresh = cache_report(outs)
+        asked = bool(a.all or a.output)
+        print(f"call cache: {len(cached)} of {len(cached) + len(fresh)} declared output(s) resolve to a path under "
+              f"{CACHE_MARK}, {len(fresh)} to a path this run wrote")
+        for key in cached[:12]:
+            print(f"  CACHED  {key}")
+        if len(cached) > 12:
+            print(f"  ... ({len(cached) - 12} more)")
+        if a.refuse_cached and cached:
+            refuse(f"{len(cached)} output(s) resolve into a call-cache copy, so this submission did not produce "
+                   f"them.\n  An arm served from cache is not a re-run: name the workflow id you meant, or re-submit "
+                   f"with call caching off (the launcher default is off; see CALL_CACHE_FLAG in batch_configs.py).", 7)
+        if not asked:
+            # A verdict on its own: `--cache-report` / `--refuse-cached` with nothing to fetch is a pre-flight, and it
+            # answers it. Falling through to "say what to fetch" would make the clean answer look like a usage error.
+            print("  (asked for no artifact, so nothing was fetched -- this was the check)" if not cached
+                  else "  (asked for no artifact: the count above is the finding)")
+            return 0
 
     if a.all and a.output:
         refuse("--all and --output together is a contradiction: say which", 2)

@@ -41,6 +41,24 @@ Planted differences (the test expectations, in one place):
                                      (tar-in-tar recursion is implemented in tar_manifest.py and is
                                      NOT covered by these fixtures.)
   profile_a.tsv.gz / profile_b.tsv.gz  gzipped same-schema twins, as gatk-sv-profile writes them
+  body_a.vcf / body_b.vcf.gz   the SAME 3 record lines: B adds two volatile header lines
+                               (##bcftools_viewCommand with Date= and a temp path, ##fileDate) and is
+                               gzipped while A is plain  -> identical record bodies, different bytes,
+                               different md5, different size. This pair IS the defect: byte comparison
+                               can only answer NO.
+  body_c.vcf                   body_a's records with INFO/AC recomputed on the middle one (AC 3 -> 4)
+                               -> 1 record body differs, named by INFO key
+  body_empty.vcf               the same header, no records at all -> NOTHING COMPARED (exit 2)
+  gd_a.tsv.gz / gd_b.tsv.gz    4 vs 5 rows keyed on (sample, GD_ID), the four GD buckets planted apart:
+                               1 key only in A (PANEL4/GD_ONLY_A), 1 key only in B (PANEL3/GD_C), 1
+                               PANEL cn_state 2 -> 1 with a posterior that really moved, 1 posterior
+                               rewritten in another key order and precision (NOT a change), 1
+                               duplicate key on B, 1 '.' dosage cell, and the case row (NA12878/GD_A)
+                               untouched -> exit 1 with `CASE NA12878 … -> CLEAN`
+  gd_rekey.tsv.gz              the same 2 loci under re-minted GD_IDs -> disjoint keys, refused at 2
+  baf_a.txt.gz / baf_b.txt.gz  long-format evidence table (CHROM POS BAF SAMPLE): A carries 3 samples
+                               over 6 rows, B lost every PANEL2 row -> census 3 vs 2, which is the
+                               shape of the merged-BAF bug (a matrix that silently lost a side)
 """
 from __future__ import annotations
 
@@ -210,6 +228,56 @@ def main() -> int:
         "payload/added.txt": "only in B\n",
     })
 
+    # ---- VCF record-body equality: the same bodies under a rewritten header ----------------------
+    body_head = ("##fileformat=VCFv4.2\n"
+                 "##contig=<ID=20,length=64444167>\n"
+                 "##INFO=<ID=SVTYPE,Number=1,Type=String,Description=\"Type\">\n"
+                 "##INFO=<ID=AC,Number=1,Type=Integer,Description=\"Allele count\">\n"
+                 "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n")
+    body_chrom = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tcase\tmom\n"
+    body_rows = ("20\t1000\tSV_1\tN\t<DEL>\t.\tPASS\tSVTYPE=DEL;AC=3\tGT\t0/1\t0/0\n"
+                 "20\t2000\tSV_2\tN\t<DUP>\t60\tPASS\tSVTYPE=DUP;AC=1\tGT\t0/0\t0/1\n"
+                 "20\t3000\tSV_3\tN\t<INV>\t.\tLowGQ\tSVTYPE=INV;AC=2\tGT\t0/1\t0/1\n")
+    volatile = ("##bcftools_viewCommand=view -Oz -o /tmp/tmp.FIXTURE1/out.vcf; Date=20261007T000000\n"
+                "##fileDate=20261007\n")
+    w("body_a.vcf", body_head + body_chrom + body_rows)
+    # The same three records, a header that a re-run rewrote by itself, and a different container.
+    with gzip.open(os.path.join(a.directory, "body_b.vcf.gz"), "wt") as fh:
+        fh.write(body_head + volatile + body_chrom + body_rows)
+    w("body_c.vcf", body_head + body_chrom
+      + body_rows.replace("SVTYPE=DUP;AC=1", "SVTYPE=DUP;AC=4"))
+    w("body_empty.vcf", body_head + body_chrom)
+
+    # ---- GD calls table: the four buckets of "the calls changed", planted apart -------------------
+    gd_head = ("sample\tGD_ID\tchrom\tstart\tend\tsvtype\tcn_state\tcn_probabilities\tis_carrier"
+               "\tqual_score\tdosage_bins_at_median\n")
+    gd_rows_a = (
+        "NA12878\tGD_A\tchr1\t1000\t2000\tDEL\t2\t{\"2\": 0.98, \"1\": 0.02}\tTrue\t12.5\t3\n"
+        "PANEL4\tGD_ONLY_A\tchr1\t3000\t4000\tDUP\t1\t{\"1\": 0.9, \"2\": 0.1}\tTrue\t9\t2\n"
+        "PANEL1\tGD_A\tchr1\t1000\t2000\tDEL\t2\t{\"2\": 0.98, \"1\": 0.02}\tTrue\t11\t3\n"
+        "PANEL2\tGD_B\tchr2\t5000\t6000\tDEL\t1\t{\"1\": 0.60, \"2\": 0.30}\tTrue\t7.25\t2\n")
+    gd_rows_b = (
+        "NA12878\tGD_A\tchr1\t1000\t2000\tDEL\t2\t{\"1\": 0.02, \"2\": 0.98}\tTrue\t12.5\t3\n"
+        "PANEL1\tGD_A\tchr1\t1000\t2000\tDEL\t1\t{\"1\": 0.55, \"2\": 0.45}\tTrue\t11\t3\n"
+        "PANEL1\tGD_A\tchr1\t1000\t2000\tDEL\t1\t{\"1\": 0.55, \"2\": 0.45}\tTrue\t11\t3\n"
+        "PANEL2\tGD_B\tchr2\t5000\t6000\tDEL\t1\t{\"2\": 0.3, \"1\": 0.6}\tTrue\t7.25\t.\n"
+        "PANEL3\tGD_C\tchr3\t7000\t8000\tDUP\t3\t{\"3\": 0.99}\tTrue\t4\t4\n")
+    gd_rekey = ("NA12878\tGD_NEW_1\tchr1\t1000\t2000\tDEL\t2\t{\"2\": 1.0}\tTrue\t12.5\t3\n"
+                "PANEL1\tGD_NEW_2\tchr1\t1000\t2000\tDEL\t2\t{\"2\": 1.0}\tTrue\t11\t3\n")
+    for name, body in (("gd_a.tsv.gz", gd_rows_a), ("gd_b.tsv.gz", gd_rows_b),
+                       ("gd_rekey.tsv.gz", gd_rekey)):
+        with gzip.open(os.path.join(a.directory, name), "wt") as fh:
+            fh.write(gd_head + body)
+
+    # ---- evidence-matrix census: a merged BAF table that silently lost a sample -------------------
+    baf_head = "#CHROM\tPOS\tBAF\tSAMPLE\n"
+    baf_rows_a = "".join(f"chr1\t{i * 100}\t0.5\t{s}\n" for s in ("NA12878", "PANEL1", "PANEL2")
+                         for i in (1, 2))
+    baf_rows_b = "".join(ln for ln in baf_rows_a.splitlines(keepends=True) if "PANEL2" not in ln)
+    for name, body in (("baf_a.txt.gz", baf_rows_a), ("baf_b.txt.gz", baf_rows_b)):
+        with gzip.open(os.path.join(a.directory, name), "wt") as fh:
+            fh.write(baf_head + body)
+
     prof_a = ("metric\tn_baseline_v111\tn_new_java\nmean_gq\t66.48\t7.28\nmedian_gq\t88\t9\n")
     prof_b = ("metric\tn_baseline_v111\tn_new_java\nmean_gq\t66.48\t7.30\nmedian_gq\t88\t9\n")
     for name, text in (("profile_a.tsv.gz", prof_a), ("profile_b.tsv.gz", prof_b)):
@@ -220,7 +288,10 @@ def main() -> int:
     print("planted: 2 moved GQ cells, 2 moved RD_CN cells, 1 moved PCC cell, 1 dropped site, "
           "1 added site, 1 duplicate VID per VCF, 1 moved matrix cell, 1 added and 1 dropped sample "
           "in the matrix, 1 changed table cell, 1 one-sided table column, 1 duplicate key in each "
-          "table, 1 added bundle member, 1 same-size byte change")
+          "table, 1 added bundle member, 1 same-size byte change, 1 volatile-header-only VCF pair "
+          "(plain vs gz) with 1 recomputed INFO/AC and 1 header-only VCF, 1 GD key dropped and 1 "
+          "added with 1 panel cn_state shift, 1 posterior rewritten and 1 posterior moved, 1 "
+          "duplicate GD key, 1 re-keyed GD table, 1 evidence-table sample lost")
     return 0
 
 

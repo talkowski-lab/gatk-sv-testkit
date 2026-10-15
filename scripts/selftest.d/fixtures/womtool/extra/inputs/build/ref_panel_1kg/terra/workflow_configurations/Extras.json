@@ -1,0 +1,9 @@
+{
+  "Extras.vcf": "${this.filtered_vcf}",
+  "Extras.MakeThing.cpu": 4,
+  "Extras.MakeThing.threads": 2,
+  "Extras.attrs.cpu": 4,
+  "Extras.more_attrs": {"cpu": 2, "unknown_member": true},
+  "Extras.note": "${this.note}",
+  "Extras.this_key_does_not_exist_in_the_wdl": "${this.sample_name}"
+}

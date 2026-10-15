@@ -63,6 +63,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/../../kit/config.sh"
+# The --image guard is shared by all three launchers in this directory (see image_ref.sh). Test for
+# the file rather than sourcing it bare: this script runs `set -uo pipefail`, NOT -e, so a missing
+# file sourced without a test would print one line and CONTINUE into the create call unscreened.
+IMAGE_REF_SH="$SCRIPT_DIR/image_ref.sh"
+[ -f "$IMAGE_REF_SH" ] \
+    || { printf '%b' "run_in_image.sh: the shared --image guard is missing at $IMAGE_REF_SH,\n  and booting a VM without it is exactly what that file exists to prevent.\n" >&2; exit 2; }
+. "$IMAGE_REF_SH"
 
 NL='
 '
@@ -154,40 +161,12 @@ done
 [ -n "$IMAGE" ] || die "no --image given: name the image you want executed.\n  e.g.  --image \$(./kit/gsvtk-config get IMAGE_REPO)/sv-shell:<branch>-<sha6>\n        built by docker/gatk-sv-build.sh   (docs/static-checks.md has the other two checks)\n"
 
 # ---------------------------------------------- guard: a mis-assembled image reference
-# The `rc=125 ... not found` class (GAP-REVIEW-manta-tloc.md §4). `docker pull` reports a name it
-# cannot find and exits 125; a runner that scores that rc scores nothing. Every check below is a
-# shape that cannot occur in a reference copied out of a tag listing, so a real reference never
-# trips it -- and each names the specific shape it saw, rather than "invalid".
-image_ref_problem() {
-    # Reports the FIRST problem only: two reasons read as one run-on sentence (measured), and the
-    # first one is what the person should fix.
-    local ref="$1"
-    case "$ref" in
-        *[[:space:]]*) printf 'contains whitespace -- a reference is one token'; return ;;
-        *://*) printf 'carries a URI scheme; the form is host/repo:tag'; return ;;
-        *=*) printf 'contains "=", so this looks like a KEY=value column copied whole'; return ;;
-        *,* | *\;*) printf 'contains a list separator; --image takes exactly one reference'; return ;;
-        -*) printf 'starts with "-", which docker reads as a flag'; return ;;
-        *'//'*) printf 'contains a doubled slash: two names joined, not one'; return ;;
-        */ | ':' | *: | /*) printf 'has a dangling separator (a leading/trailing "/" or a trailing ":")'; return ;;
-        *'*'* | *'?'*) printf 'contains a glob character the shell left unexpanded (nothing matched it)'; return ;;
-    esac
-    # Docker repository names are lowercase. An uppercase letter in the name half means this came
-    # from prose or a log heading, not from a tag listing. [[:upper:]], not [A-Z]: in a UTF-8 locale
-    # the range also matches lowercase, which made every honest reference look mis-assembled.
-    case "${ref%:*}" in
-        *[[:upper:]]*) printf 'has an uppercase letter in the repository name; docker names are lowercase' ;;
-    esac
-}
-REF_PROBLEM="$(image_ref_problem "$IMAGE")"
-if [ -n "$REF_PROBLEM" ]; then
-    printf '%b' "run_in_image.sh: refusing \"--image $IMAGE\": it $REF_PROBLEM.\n\
-  That is the class that reaches a VM as \`rc=125 ... not found\`: the build log printed the\n\
-  registry PREFIX and the image NAME as separate columns and the copy kept the space (or lost a\n\
-  slash). Join them into one string with nothing between them, or re-read the reference from\n\
-  \`gcloud container images list-tags <repo>\`. Nothing was created.\n" >&2
-    exit 2
-fi
+# The `rc=125 ... not found` class (GAP-REVIEW-manta-tloc.md §4) and the root-shell character
+# boundary are screened by `image_ref.sh`, one copy for the three launchers that write this reference
+# into a startup script running as root. Every arm there is a shape that cannot occur in a reference
+# copied out of a tag listing, so a real reference never trips it, and each names the specific shape
+# it saw rather than "invalid".
+image_ref_guard "$0" "$IMAGE"
 
 # ------------------------------------------------------ guard: what is to be executed
 [ -n "$PROBE$OVERLAY$RUN_LINES$COPY_SPECS" ] \

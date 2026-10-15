@@ -8,21 +8,58 @@
 SHELL      := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 .DEFAULT_GOAL := help
-.PHONY: help setup test syntax helpsweep undefmods flake smoke selftest lint audit audit-history clean-work
+.PHONY: help setup test verify-commit syntax helpsweep undefmods flake smoke selftest lint audit audit-history clean-work
 
 PYTHON ?= python3
+#
+# Resolve the interpreter once, here. `make help` has promised "default: python3, then ./.venv" since the
+# venv landed, but only two targets ever implemented it -- each carried its own `import firecloud` /
+# `import flake8` probe -- and `test` never did. So on a box whose python3 lacks numpy the gate graded the
+# MACHINE rather than the code: `make verify-commit` came back with 5 of 8 phases red and every red line
+# ending in "vcf_paired_diff.py needs numpy", while the same tree passed in the venv. A gate whose verdict
+# depends on which python the shell happens to find is not measuring the branch.
+#
+# The probe picks an interpreter by what it can actually import, and only switches when the candidate is
+# genuinely present. When nothing satisfies it, the original interpreter stays and the phases name the
+# missing module themselves, which is the honest red. The switch is announced on stderr: a silent
+# interpreter swap hides a broken environment better than any failure does.
+# The four are the IMPORT names of the declared dependencies (requirements.txt: firecloud, google-auth,
+# numpy, pandas, pysam) that the gate's phases actually import at run time -- `google-auth` is omitted
+# because it imports as `google.auth`, not as a module named after it, and `miniwdl` is excluded on purpose:
+# it is NOT declared, `checks/wdl_inputs_check.py:157` says it imports WDL lazily for a reason, and the venv
+# on this box does not have it, which is why the required-input half of B4 counts as a skip rather than a
+# pass. Probing for it would have made the gate red for an optional tool.
+PY_NEEDED := numpy pandas firecloud pysam
+ifneq ($(origin PYTHON),command line)
+override PYTHON := $(shell \
+  _imp() { "$$1" -c "import $$2" >/dev/null 2>&1; }; \
+  want='$(PYTHON)'; ok=1; \
+  for m in $(PY_NEEDED); do _imp "$$want" "$$m" || ok=0; done; \
+  if [ "$$ok" = 0 ] && [ -x .venv/bin/python ]; then \
+    vok=1; for m in $(PY_NEEDED); do _imp .venv/bin/python "$$m" || vok=0; done; \
+    if [ "$$vok" = 1 ]; then \
+      printf 'make: PYTHON=%s cannot import the gate dependencies (%s); using ./.venv/bin/python instead. Pin one explicitly with make ... PYTHON=/path/to/python\n' "$$want" "$(PY_NEEDED)" >&2; \
+      printf '.venv/bin/python\n'; exit; \
+    fi; \
+  fi; \
+  printf '%s\n' "$$want")
+endif
 GSVTK  := ./kit/gsvtk-config
 
 # ----------------------------------------------------------------- file sets
-SH_FILES := $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
-                   examples/*.sh kit/*.sh scripts/*.sh)
+# `gsvtk` (no extension) is the entry point and matches no wildcard, so it is named explicitly:
+# everything that dispatches to the other tools has to parse before the other tools do.
+SH_FILES := gsvtk $(wildcard docker/*.sh terra/*.sh checks/*.sh checks/image-check/*.sh \
+                   examples/*.sh kit/*.sh scripts/*.sh scripts/selftest.d/*.sh)
 PY_FILES := $(wildcard kit/*.py terra/*.py checks/*.py compare/*.py replay/*.py \
                    scripts/*.py examples/*.py docs/archive/as-run/*.py)
 
 # Tools that accept --help AND are safe to invoke with no config file, no credentials, no
 # data and no network: every one of these only prints usage and exits.
 HELP_SAFE    := checks/svshell_contract_check.py checks/svshell_jq_plumbing_scan.py \
-                compare/artifact_tally.py \
+                checks/terra_entity_check.py \
+                compare/artifact_tally.py compare/vcf_body_diff.py \
+                compare/gd_calls_diff.py compare/sample_census.py \
                 compare/compare_batch_tables.py compare/diff_rd_states.py \
                 compare/table_diff.py compare/matrix_diff.py compare/site_set_diff.py \
                 compare/lineset_diff.py compare/json_diff.py compare/tar_manifest.py \
@@ -35,13 +72,20 @@ HELP_PYSAM   := compare/pair_level_concordance.py
 # checks/wdl_reach.py is here because its --help works without miniwdl but importing the module does
 # not: it builds its graph out of the AST. The sweep skips this whole list when miniwdl is absent,
 # which is honest -- a --help it cannot reach is not a --help it ran.
-HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py
+HELP_MINIWDL := replay/build_inputs.py checks/wdl_semantics.py checks/wdl_reach.py \
+                checks/wdl_inputs_check.py
 HELP_TERRA   := $(wildcard terra/*.py)
-HELP_SH      := checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_compare.sh \
+# ./gsvtk is here because it is the one command a newcomer types, and the sweep runs it with
+# GSVTK_CONFIG pointing at an EMPTY file and no credentials: an entry point whose --help needs a
+# profile is an entry point that fails the first thing a user does with it.
+HELP_SH      := gsvtk checks/wdl_gate.sh docker/gatk-sv-build.sh terra/batch_fetch_compare.sh \
                 examples/replay_reference_run.sh
 # NOT in any sweep, on purpose (they are still syntax-checked):
 #   docker/remote-build.sh      runs ON THE BUILDER VM; invoking it starts a real build
 #   checks/image-check/*.sh     boot a GCE VM and take no --help (they name the image first)
+#   checks/image-check/image_ref.sh
+#                               a sourced shim, no main; each of the three launchers above tests for
+#                               the file before sourcing it, so a missing guard is a refusal
 #   examples/run_*.sh           drivers, not CLIs; --help would launch java/bcftools
 #   kit/config.sh               a sourced shim, no main; asserted in `make selftest`
 
@@ -52,11 +96,20 @@ help:
 	@echo "  setup       create ./.venv and install requirements.txt (offline-safe, idempotent);"
 	@echo "              add requirements-dev.txt (miniwdl, flake8) for the FULL gate"
 	@echo "  test        the offline gate: syntax + undef-mods + pyflakes + --help sweep + real runs"
-	@echo "              + publish audit + 85 selftests; needs no config file, no credentials, no"
-	@echo "              network. The audit scans the GIT-TRACKED set, so stage first: a leak in an"
-	@echo "              untracked file passes this gate and fails it one commit later. A missing"
+	@echo "              + publish audit + the selftest phases, each printing its own tally (config"
+	@echo "              layer, ./gsvtk CLI, rerun, profiles, womtool/CI-parity); needs no config"
+	@echo "              file, no credentials, no network. The audit scans the GIT-TRACKED set, so"
+	@echo "              stage first: an untracked leak passes this gate and fails it one commit later."
+	@echo "              A missing"
 	@echo "              optional dependency prints a SKIP naming the file to install, and the pinned"
 	@echo "              probe count fails on skipped probes instead of passing on a smaller number"
+	@echo "  verify-commit  run the gate against a COMMIT (REV=HEAD) in a throwaway detached worktree, so a"
+	@echo "              green run describes the commit rather than whatever my working directory happens to"
+	@echo "              hold. Costs another full gate (womtool alone is ~17 min on a dev machine), so it is"
+	@echo "              deliberately NOT a 'test' phase. GSVTK_VERIFY_MAKE picks the inner target (syntax,"
+	@echo "              flake, test). It proves uncommitted edits cannot leak; it does NOT prove machine"
+	@echo "              independence — the caller's interpreter, credentials, gatk-sv checkout and womtool"
+	@echo "              jar all stay reachable from the fresh tree (docs/methodology.md)."
 	@echo "  syntax      bash -n every .sh, py_compile every .py (this is also 'lint')"
 	@echo "  lint        alias of syntax: no STYLE checker on purpose (no whitespace opinions)"
 	@echo "  flake       pyflakes bug sweep (undefined names, dead values); SKIPs if flake8 absent"
@@ -67,6 +120,7 @@ help:
 	@echo "              reported, DANGLING is advisory. PUBLISH=1 fails on HISTORY: run it before push"
 	@echo "  clean-work  show what the work directory holds and what WOULD be deleted"
 	@echo
+	@echo "  Entry point: ./gsvtk --help  (the whole kit by subcommand; the map is docs/cli.md)"
 	@echo "  Interpreter: PYTHON=/path/to/python make test   (default: python3, then ./.venv)"
 	@echo "  Run docs first: docs/config.md, docs/setup.md, then './kit/gsvtk-config doctor'."
 
@@ -106,6 +160,45 @@ test:
 	else echo "make test: FAIL — see the FAIL lines above"; fi; \
 	exit $$rc
 
+# Verify a COMMIT instead of a working directory. Twice in one day a green `make test` was a true statement
+# about this directory and a FALSE statement about HEAD: a commit silently reverted a finished lane's shell
+# change, every gate run afterwards said PASS, two of them were pushed, and a clean checkout of HEAD then
+# failed 15 womtool assertions the dirty tree had been hiding. This target cannot report that way, because the
+# tree it grades is created from a revision and holds nothing I forgot to commit.
+#
+# What it does NOT prove, so that nobody reads a green run as "works on a clean machine": the caller's
+# interpreter, cloud credentials, gatk-sv checkout and womtool jar all live OUTSIDE the repo and stay
+# reachable from the fresh tree. Worse, they are INHERITED rather than scrubbed: an exported GSVTK_CONFIG or
+# GSVTK_GATK_SV_CHECKOUT retargets the graded run, so a verification run at 33c0358 found the operator's real
+# gatk-sv checkout by normal config discovery and ran the ref-pinned cross-check instead of skipping it. The
+# target now prints the inherited values on its first line, because a log that does not say which checkout it
+# graded cannot be audited later. A fresh tree removes uncommitted STATE, not the MACHINE and not the
+# ENVIRONMENT.
+#
+#   make verify-commit                                              # REV=HEAD, inner target `test`
+#   make verify-commit REV=<sha> GSVTK_VERIFY_MAKE=syntax           # one cheap target, one commit
+#
+# It is not a `test` phase: it costs a whole extra gate (womtool.sh alone measured 16m48s on the parent's
+# machine). Every git call here reads /dev/null: the first run of this target hung for ten minutes inside
+# `git worktree remove` during cleanup, with the graded result already printed, because a git command given no
+# stdin will wait for one. Ctrl-C between the worktree add and its removal still leaves the tree behind;
+# `git worktree prune` plus `rm -rf $${TMPDIR:-/tmp}/gsvtk-verify.*` clears it.
+verify-commit:
+	@rev=$${REV:-HEAD}; what=$${GSVTK_VERIFY_MAKE:-test}; \
+	case "$$what" in ''|*[!A-Za-z0-9_-]*) echo "  FAIL  GSVTK_VERIFY_MAKE must be ONE make target name (letters, digits, _ and -); got: [$${what:-empty}]"; exit 1;; esac; \
+	py='$(PYTHON)'; case "$$py" in /*) : ;; */*) py="$$PWD/$$py" ;; esac; \
+	printf 'verify-commit: grading %s with "%s" in a fresh tree, PYTHON=%s\n' "$$rev" "$$what" "$$py"; \
+	printf 'verify-commit: config INHERITED from this shell — GSVTK_CONFIG=%s, GSVTK_GATK_SV_CHECKOUT=%s, GSVTK_ENTITY_REF=%s. A fresh tree does not scrub these, so they retarget what is graded; when one reads <unset> the tree runs its own discovery and the phase SKIP lines are the authority on what it found.\n' "$${GSVTK_CONFIG:-<unset>}" "$${GSVTK_GATK_SV_CHECKOUT:-<unset>}" "$${GSVTK_ENTITY_REF:-<default>}"; \
+	wt=$$(mktemp -d "$${TMPDIR:-/tmp}/gsvtk-verify.XXXXXX"); rmdir "$$wt"; \
+	git worktree add --detach "$$wt" "$$rev" >/dev/null </dev/null || { echo "  FAIL  cannot make a detached worktree at $$rev (git's reason is above, if any)"; exit 1; }; \
+	st=0; start=$$(date +%s); \
+	$(MAKE) -C "$$wt" --no-print-directory $$what PYTHON="$$py" || st=1; \
+	end=$$(date +%s); \
+	git worktree remove -f "$$wt" >/dev/null 2>&1 </dev/null || rm -rf "$$wt"; \
+	git worktree prune >/dev/null 2>&1 </dev/null; \
+	printf 'verify-commit: rev=%s inner=%s rc=%s wall=%ss  (fresh tree = no uncommitted state, NOT a different machine)\n' "$$rev" "$$what" "$$st" "$$((end - start))"; \
+	exit $$st
+
 syntax:
 	@fail=0; n=0; \
 	for f in $(SH_FILES); do n=$$((n+1)); \
@@ -121,6 +214,12 @@ syntax:
 # --help on every tool, with an empty profile and a throwaway work directory, so a tool
 # that only works when configured is a BUG this catches (that was a real regression: a
 # --help path that called require() and died). Missing optional dependencies SKIP.
+#
+# run() dispatches by extension: an extension-less file matches no wildcard and would fall to the
+# Python arm, so `gsvtk` is named. That is not pedantry — the fall-through asked python to compile
+# bash and the sweep reported `FAIL gsvtk ... SyntaxError: closing parenthesis ')' does not match
+# opening parenthesis '{' on line 72`, a bug report about the interpreter, not about the CLI.
+# Naming it also execs it the way a user does (shebang + exec bit), which `bash x.sh` never proves.
 helpsweep:
 	@tmp="$$(mktemp -d)"; : > "$$tmp/empty.env"; \
 	py="$(PYTHON)"; \
@@ -135,8 +234,9 @@ helpsweep:
 	    skip=$$((skip+1)); return 0; \
 	  fi; \
 	  case "$$t" in \
-	    *.sh) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
-	    *)    out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
+	    gsvtk) out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" "./$$t" --help 2>&1)"; rc=$$? ;; \
+	    *.sh)  out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" bash "$$t" --help 2>&1)"; rc=$$? ;; \
+	    *)     out="$$(GSVTK_CONFIG="$$tmp/empty.env" GSVTK_WORK="$$tmp/work" $$py "$$t" --help 2>&1)"; rc=$$? ;; \
 	  esac; \
 	  if [ $$rc -eq 0 ]; then ok=$$((ok+1)); printf '  ok    %-42s\n' "$$t"; \
 	  else fail=$$((fail+1)); printf '  FAIL  %-42s exit %s\n' "$$t" "$$rc"; \
@@ -223,8 +323,58 @@ smoke:
 # never ran, and every assertion reported ok whatever it tested (proved with a two-line Makefile:
 # `check "..." false` printed ok). The script also runs a canary that fails the gate if its own
 # harness ever goes vacuous again; keep new assertions there for that reason.
+#
+# Why ONE loop over a named list, not one recipe line per phase
+# ------------------------------------------------------------
+# Eight recipe lines were eight chances to learn about exactly one of them. make stops at the first
+# recipe line that exits nonzero, so a run against three red phases reported the first and charged
+# you the wall time of the phases it never reached -- on the slow half of the gate, where
+# scripts/selftest.d/womtool.sh alone measured 16m48s (docs/methodology.md). `test` above already
+# refuses that shape for its own targets for the same reason; this is the same rc-accumulation one
+# level down. Every phase still prints its own tally and owns its exit code; the recipe only keeps
+# going, remembers which names went red, and fails once at the end naming all of them.
+# scripts/selftest.sh asserts this loop keeps going (its gate-loop leg runs the recipe over three
+# stand-in phases, red/green/red, and requires both red names back).
+#
+# The wiring is one entry per phase: `name:script`. A phase is a script that takes the interpreter
+# as $1, prints its own tally and exits nonzero on any failure (a counted SKIP exits 0 and says a
+# SKIP here is not a pass in CI), so adding a phase is one entry in the list below. What each one
+# covers: config = the config layer, both checkers' parsing, the probes, both audits, the shipped
+# skill and the docs' structure; cli = the ./gsvtk entry point; rerun = rerunning any step of the
+# batch chain; profiles = module profiles, golden vs loader; womtool = CI's womtool half, bindings
+# vs the rendered JSONs; reach = reach's image buckets on a synthetic tree; jarshape = womtool's
+# inputs shape, graded with and without a jar; entity = terra launch configs, name key vs the
+# shipped entity table.
+#
+# No trailing comments on those lines, and not for tidiness. In an assignment, make reads `#` as a
+# comment running to the end of the WHOLE continued value, so a comment on any line but the last
+# silently deletes every phase after it from the gate — coverage shrinking by editing a comment.
+# `make -n selftest` prints the list make actually parsed, and the wiring leg in
+# scripts/selftest.sh fails by name if a phase in scripts/selftest.d/ is not in the list.
+SELFTEST_PHASES := config:scripts/selftest.sh \
+                   cli:scripts/selftest.d/cli.sh \
+                   rerun:scripts/selftest.d/rerun.sh \
+                   profiles:scripts/selftest.d/profiles.sh \
+                   womtool:scripts/selftest.d/womtool.sh \
+                   reach:scripts/selftest.d/reach.sh \
+                   jarshape:scripts/selftest.d/jarshape.sh \
+                   entity:scripts/selftest.d/entity.sh
+
 selftest:
-	@$(SHELL) scripts/selftest.sh "$(PYTHON)"
+	@total=$(words $(SELFTEST_PHASES)); rc=0; red=""; nred=0; n=0; \
+	for spec in $(SELFTEST_PHASES); do \
+	  n=$$((n+1)); name="$${spec%%:*}"; script="$${spec#*:}"; \
+	  printf '\n== selftest phase %s/%s: %s (%s)\n' "$$n" "$$total" "$$name" "$$script"; \
+	  $(SHELL) "$$script" "$(PYTHON)"; st=$$?; \
+	  if [ $$st -eq 0 ]; then printf '  ok    %s\n' "$$name"; \
+	  else rc=1; nred=$$((nred+1)); red="$$red $$name"; \
+	       printf '  FAIL  %s (exit %s; its tally is above)\n' "$$name" "$$st"; fi; \
+	done; \
+	echo; \
+	if [ $$rc -eq 0 ]; then printf 'selftest phases: %s ran, 0 red\n' "$$n"; \
+	else printf 'selftest phases: %s of %s red:%s\n' "$$nred" "$$n" "$$red"; \
+	     printf '             every phase ran; fix them all before re-running the gate\n'; fi; \
+	exit $$rc
 
 lint: syntax
 

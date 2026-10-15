@@ -1,0 +1,9 @@
+{
+  "CrossCheck.vcf": "gs://nowhere-at-all/x.vcf.gz",
+  "CrossCheck.MakeThing.cpu": 4,
+  "CrossCheck.MakeThing.threads": 2,
+  "CrossCheck.attrs": {"label": "pinned", "n": 1, "unknown_member": true},
+  "CrossCheck.defaulted": "a defaulted input is still an input",
+  "CrossCheck.extra_note": 2,
+  "CrossCheck.this_key_does_not_exist_at_all": true
+}

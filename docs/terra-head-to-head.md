@@ -110,10 +110,51 @@ python terra/batch_configs.py show                    # print every resolved inp
 python terra/batch_configs.py check --against main    # those keys vs that ref's WDL, offline
 python terra/batch_configs.py create                  # POST/overwrite the configs in YOUR workspace
 python terra/batch_configs.py validate                # Terra-side typecheck of the Dockstore WDL
-# and, for the rerun path, the same two things with the same guard:
-python terra/batch_rerun_step.py show
-python terra/batch_rerun_step.py create --confirm [--drop-branch-only-inputs]
+# and, for the rerun path, the same two things with the same guard, for any step of the chain:
+python terra/batch_rerun_step.py --step 08 show
+python terra/batch_rerun_step.py --step 08 create --confirm [--drop-branch-only-inputs]
 ```
+
+**`--step` is the whole story of that command, so the tool says what it resolved to.** The step decides
+the config name (`<NN>-<Workflow>-rerun`), the input-key prefix, the Dockstore method path, the root
+entity and where that row's NAME comes from, and every one of those comes from `terra/steps.py` — the same
+map `batch_check_inputs.py`, `batch_save_metadata.py` and `batch_status.py` read. Until it did, the rerun
+tool held five step-10-shaped literals of its own, and asking it for step 08 got you `10-GenotypeBatch`
+with no complaint. Every mode now starts by naming what it picked. Real output, from a profile holding
+only placeholders, offline (`show` mutates nothing):
+
+```text
+$ python terra/batch_rerun_step.py --step 09 show
+[rerun] step 09  workflow MergeBatchSites  config 09-MergeBatchSites-rerun
+        root entity sample_set_set  (row: UNRESOLVED: `entity_row` is --entity, so pass --entity <name>)
+        Dockstore github.com/broadinstitute/gatk-sv/MergeBatchSites @ your-branch-under-test -- the ref the binding check grades too
+        image pins: gatk_docker=profile/env   sv_base_mini_docker=UNPINNED   sv_pipeline_docker=profile/env
+        reads chain outputs of: 06-GenerateBatchMetrics, 08-FilterBatchSamples
+        prove those attributes exist first: python terra/batch_check_inputs.py --step 09   (show does not read your workspace)
+image inputs are not fully pinned -- a submit with these runs whatever the workspace
+  attribute points at today, which is exactly what this tool exists to prevent:
+    unpinned:  MergeBatchSites.sv_base_mini_docker
+  pass --image KEY=REF for each one (see --help), or --allow-unpinned-docker if you
+  genuinely want the attribute-resolved images for this rerun.
+```
+
+That is `show` refusing to print a body it would not submit, and the lines above it are each an answer it
+used to leave to inference. The root-entity line now names the row SOURCE as well as the type: `entity_row`
+is the profile's field for where a row name comes from, and `--entity` in that field is its way of saying
+nothing offline holds one — so the row has to be typed, and this tool says so instead of filling it in.
+The `image pins:` line names where each `*_docker` ref came from (section 4). And the upstream attributes
+a mid-chain step reads are derived from `batch_configs`' own `outputs` maps, so a rerun of 09 knows it
+consumes 06's and 08's output and names the command that can prove those attributes are in your
+workspace. `show` cannot see your workspace and does not claim to.
+
+The last five steps of the batch chain are 06 GenerateBatchMetrics, 07 FilterBatchSites, 08
+FilterBatchSamples, 09 MergeBatchSites, 10 GenotypeBatch, and `--step` defaults to 10. Single-sample /
+participant-rooted modules are **not** rerunnable here, by decision rather than by omission: the freeze
+loop cannot write a participant entity at all (docs/module-profiles.md §11 q3), so there is no frozen
+row for such a step to read — a `--step` that accepted them would be a claim nothing can check.
+What is no longer a reason is the row machinery: a step's entity type is derived from its own name key and
+its row source is a profile field, so a step rooted in some other entity type is data, not a code change.
+The blocker is the frozen inputs, not the row.
 
 The configs are generated from one table, so a binding cannot drift between steps. Each config
 binds the frozen inputs plus **the image you built** plus the Dockstore tag for the rest of the
@@ -182,10 +223,40 @@ Two non-obvious details that cost real debugging time when wrong:
 
 - **The root entity differs by step, and it is not what you would guess.** `09-MergeBatchSites`
   is submitted against `sample_set_set`; `06`, `07`, `08` and `10-GenotypeBatch` against
-  `sample_set` (`batch_configs.py`'s `rootEntityType` per config is the authority, and it agrees
-  with gatk-sv's own `GenotypeBatch.json.tmpl`, which binds `GenotypeBatch.batch` to
-  `${this.sample_set_id}`). Submit against the wrong one and the batch-level `this.*` bindings
-  resolve to nothing, usually at runtime, after VMs booted.
+  `sample_set`. Submit against the wrong one and the batch-level `this.*` bindings resolve to
+  nothing, usually at runtime, after VMs booted.
+  **What was believed:** that `batch_configs.py`'s `rootEntityType` per config was the authority and
+  `terra/steps.py` copied it. **What replaced it** (Stage C, docs/plan-launch-any-module.md): the type is
+  derived from the step's own **name key** — the single `this.<etype>_id` its bindings read, the same rule
+  `checks/terra_entity_check.py` applies to upstream's launch configs — and the profile's typed
+  `rootEntityType` is now the cross-check on that answer. It still agrees with gatk-sv's own
+  `GenotypeBatch.json.tmpl`, which binds `GenotypeBatch.batch` to `${this.sample_set_id}`, and 09 is the
+  case that decided the rule: that step reads `this.sample_sets.<attr>` three times and
+  `this.sample_set_set_id` once, so the member-collection rule derives `sample_sets` — with confidence,
+  and wrongly. `batch_rerun_step.py` refuses a step whose derived type and stated type disagree, on the
+  launch path, where the body's `rootEntityType` and the submission's `entityType` argument have to say
+  the same thing; `scripts/selftest.d/rerun.sh` compares them for every other reader.
+- **Where the row NAME comes from is profile data now (`entity_row`).** The rerun tool used to ask *is the
+  root entity `sample_set`?* and, if so, read `GSVTK_BATCH` — the chain's shape written into the launcher,
+  which answered every other row type with “none”, whatever the profile said. A step now states its
+  source: a config key (`"entity_row": "BATCH"` for the chain's four `sample_set` steps) or `"--entity"`
+  for “nothing offline holds this row” — which is 09, whose row is a cohort and no key holds one. The
+  visible consequence is unchanged in behaviour and clearer in wording: `--step 09 submit` **refuses**
+  unless you pass `--entity <name>`, and the refusal names the field and the flag instead of blaming
+  `GSVTK_BATCH`. Guessing a cohort row is exactly the accepted submission that binds nothing, and the
+  refusal comes before the target resolution, so it also sends nothing. `python terra/steps.py` prints
+  each step's type and row source side by side; `kit/module_profile.py --print` prints the same sources
+  from the reader.
+- **The WDL file basename is not always the workflow name.** A Dockstore method path ends in the
+  workflow *name*. Measured in a gatk-sv checkout (`git archive <ref> wdl`, then the `workflow`
+  declaration inside each file) at a branch head and at `origin/main`: 12 of the 109 WDLs that declare
+  a top-level workflow declare a name other than their file's basename — `wdl/DepthClustering.wdl`
+  declares `ClusterDepth`, `wdl/PloidyEstimation.wdl` declares `Ploidy`, `wdl/Genotype_2.wdl` declares
+  `Regenotype`. All five rerunnable steps were checked individually and each one agrees
+  (`wdl/MergeBatchSites.wdl` declares `workflow MergeBatchSites`), which is why the step→workflow map
+  can serve as the last path segment for 06→10 — and why a step added to that map whose file and
+  workflow differ must carry the workflow **name**, or Rawls answers `Cannot get dockstore://... from
+  method repo`.
 - **`GSVTK_BATCH` must name a real `sample_set`.** It defaults to `all_samples`, the entity in
   gatk-sv's reference-panel workspace; rename it and every `this.<attr>` binding silently empties.
   It is read by every tool on this path, including `fetch_baseline.py --entity` (which writes the
@@ -226,10 +297,35 @@ that Terra's `localize()` does not supply.
 `terra/batch_rerun_step.py` refuses every mode **except `show`** while no image is pinned:
 either `--image KEY=REF` per call, or an explicit `GSVTK_IMAGE_REPO`/`GSVTK_GATK_IMAGE_REPO` in the
 profile. A value merely *derived* from your project does not count, because "derived from the
-project" is not a statement about which code ran. `show` is deliberately allowed unpinned so you
-can inspect the body before deciding. Unpinned images are the one class of mistake that otherwise
+project" is not a statement about which code ran; an explicit one with no tag does not count either,
+since `.../sv-pipeline` floats to whatever is current at pull time.
+
+**A step's own profile can name every image it binds.** It used to be that the profile could name two of the four
+— `GSVTK_GATK_IMAGE_REPO` pinning `gatk_docker` and `GSVTK_IMAGE_REPO` pinning `sv_pipeline_docker`, with no route
+at all for `sv_base_mini_docker` or `linux_docker`, so 06/08/09/10 always needed at least one `--image`. That is
+superseded: a step's `"images"` map (`docs/module-profiles.md` §3 rule 11) takes a tagged ref or the `--image`
+marker per `*_docker` key, and 14 keys is no more work than 2. The two env keys still work and stay the coarse
+route. Precedence is `--image` > step `images` > env key. `show` states which source each pin came from, on the
+`image pins:` line: `--image`, `profile`, `profile/env`, `UNPINNED`, or a workspace attribute under
+`--allow-unpinned-docker`. That line exists because a profile ref and a per-call ref land in the body as
+the same quoted string, and a ref that has sat in a config file since your last branch is weaker
+evidence than one you stated now -- so it is named as what it is rather than being allowed to look like
+fresh evidence. `show` is deliberately allowed unpinned so you
+can inspect the body before deciding. `submit` honours the same flag — it does not become create-only — but
+it **prints the exempted keys by name before the POST**, so a submission record answers "which images were
+not pinned, and who authorised it" without anyone re-deriving it from the argv it was given. Unpinned images
+are the one class of mistake that otherwise
 looks like a successful submission followed by an `ImagePullBackupFailed` on every shard, or
 worse, a green run of someone else's code.
+
+**The guard reads the step you named, not a fixed list.** Each step declares its own `*_docker`
+inputs, and they are not the same set: 07 declares one (`sv_pipeline_docker`), 08 declares three
+including `linux_docker`, and 06/09/10 declare `gatk_docker`, `sv_pipeline_docker` and
+`sv_base_mini_docker`. So `--step 07 show` refuses over one key and `--step 08 show` over three, and
+the keys it prints are that workflow's (`FilterBatchSamples.linux_docker`, not `GenotypeBatch.*`):
+pointing a body at inputs another workflow never declared is the extra-input rejection at submission.
+A pinned-but-UNTAGGED path is refused in the same breath — `.../sv-pipeline` with no `:` floats to
+whatever is current at pull time, which is not a statement about which code ran.
 
 ## 5. Run, wait, price
 
@@ -242,8 +338,16 @@ python terra/batch_status.py --costs                  # quick per-submission cos
 
 What `batch_rerun_step.py` guarantees is about *images*: every `*_docker` input is pinned literally
 into the config it POSTs, so a rerun cannot inherit whatever the workspace attribute happened to
-point at. It does **not** re-read live workflow outputs, `batch_check_inputs.py --step 10` is the
-tool that checks bindings against the last submission's actual `inputResolutions`.
+point at. Those guarantees are per step now, not per GenotypeBatch: the config name, the input
+prefix, the Dockstore URI, the root entity and the submission row all come from `terra/steps.py`, the
+submission line names the step, the row and `useCallCache` before the fleet boots — and that line IS the
+value the submission POSTs, because both are read off the one body the read-back just compared (they used
+to be two different things: the request carried fiss's default `true` under a printed `false`, which is
+row C1 of [gap-ledger.md](gap-ledger.md)). The metadata it
+dumps is named per step (`rerun_submission.09.json`), because five steps sharing one file means a 07
+overwrites the 10 record you came to look at. It does **not** re-read live workflow outputs,
+`batch_check_inputs.py --step 10` is the tool that checks bindings against the last submission's actual
+`inputResolutions`.
 
 ### Two arms, one variable
 
@@ -270,7 +374,11 @@ Two ways that design degenerates silently, both cheap to avoid:
 - **`useCallCache: true`.** Cromwell reuses call outputs when command and inputs match, which is what
   you want across retries and not what you want between arms if a tag is mutable. Pin both images by
   digest or commit-SHA tag, which is what the pinning guard in this tool already refuses to let you
-  skip for `*_docker`.
+  skip for `*_docker`. And know that the field lives in TWO places: the method config, and the submission
+  request that runs it. `--call-cache` / `--no-call-cache` decides one value that `submit` both prints and
+  POSTs, so the line it prints before the fleet boots is evidence about the request and not only about the
+  config — read it as such, because a submission whose calls were served from the other arm's outputs
+  still goes green.
 
 ```bash
 python terra/batch_save_metadata.py --outdir "$GSVTK_WORK/metadata"   # discovery, then full dumps
@@ -420,6 +528,25 @@ curl -s "https://dockstore.org/api/ga4gh/trs/v2/tools/$ID/versions/<branch>/WDL/
   `gsutil cat` the task's `gcs_localization.sh` and see the CRAMs in it. Pass a `Boolean` computed at
   the call site when you only need presence.
 
+**Two more omissions, both found by trusting a client that was not wrong, only incomplete.**
+
+- `GET …/methodconfigs` answers `[]` for a workspace that holds configs, from fiss **and** from raw
+  REST, until you add `?allRepos=true` — then the same call returned 6 of 6. This is the case the
+  two-client agreement above does not catch: both clients agree on the empty answer, so
+  `workspace_configs()` reports nothing and raises nothing. Verified against
+  `broad-firecloud-dsde-methods/GATK-Structural-Variants-Single-Sample-mw-fix966`.
+- A finished submission's `outputFiles` is **empty**, so its outputs cannot be enumerated from the
+  submission record at all. Derive the paths from saved Cromwell metadata (`outputs`) and swap the
+  submission/Cromwell uuids. `gsutil ls -R` over the run tree is not a fallback: call caching leaves
+  thousands of `cacheCopy` objects there and one such listing ran past 300 s without finishing.
+
+And the one that reads like a missing entity: the submission POST takes `entityType`/`entityName`
+at the **top level** and returns them **nested** under `submissionEntity`, so the 400 it throws and
+the `None` it reads back are the same trap from two directions (`troubleshooting.md` carries both
+rows). Nothing about `BatchEvidenceMerging` is unlaunchable for the same reason — that WDL is simply
+absent from `.github/.dockstore.yml`, so it has no Dockstore handle, and the only published route
+to it is `GatherBatchEvidence`, which drags the gCNV models, CNMops files and all five callsets.
+
 ## 9. Reading one task's artifacts, and fetching an output by its name
 
 Two `curl`-shaped jobs that every review hand-rolled, now tools. Both are provable offline because
@@ -435,7 +562,10 @@ rewrote independently). The tally and the `rc`-object liveness signal are the ru
 ```
 
 `--metadata` takes a local Cromwell dump, so the whole path runs with no network and no credentials;
-which is also how `--selftest` proves it (54 assertions). What it prints: the `rc` read from the file,
+which is also how `--selftest` proves it — 58 `ok` lines at this commit, counted off
+`./.venv/bin/python ./terra/batch_peek.py --selftest | awk '/^  ok/{n++} END{print n}'` (the venv because
+`terra/` imports `firecloud`, and the count because this page said 54 when the phase was smaller; the tool
+itself prints only `all selftest assertions passed`, so a reader has to count the verdicts). What it prints: the `rc` read from the file,
 the **tail** of `stderr` with the drop counted (`TAIL 25 shown, first 375 not printed`), the **rendered
 `script`** block the backend actually executed, and which `attempt-N` directories exist. The attempt
 layout is what turns "unstable image" into "preempted": `rc=141` under `attempt-1` and `rc=0` under

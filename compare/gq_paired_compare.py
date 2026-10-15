@@ -24,6 +24,11 @@ people run:
   * duplicate VIDs used to be folded together silently (last writer wins, no count). They are now
     counted and printed, and the first record wins.
   * an uncompressed VCF raised `gzip.BadGzipFile`; the file type is read from the bytes now.
+  * a pair sharing VIDs whose shared samples are ALL `GQ=.` fell through to the statistics with an empty
+    selection, `np.percentile` raised, and the crash exited 1 — which `scripts/selftest.sh:88-90` defines
+    as "compared and found a difference". Zero comparable cells is now the same named refusal as zero
+    shared VIDs (exit 2, `NOTHING_COMPARED`, the cell count in the message), because a comparator that
+    compared nothing may not report either a result or a finding.
 """
 from __future__ import annotations
 
@@ -110,22 +115,45 @@ def main() -> int:
     if [s for s in (sA or []) if s in posB] != [s for s in (sB or []) if s in posA]:
         print("#   (the two headers list the shared samples in a different ORDER — irrelevant here, "
               "cells are paired by name)")
-    if not shared or not common_samples:
-        print(f"# NOTHING COMPARED: shared VIDs {len(shared)}, shared sample names "
-              f"{len(common_samples)}")
+
+    comparable = 0
+
+    def refuse(why):
+        """Exit 2: NOTHING was compared.
+
+        Exit 2 and not 1, because `scripts/selftest.sh:88-90` defines 1 as "compared and found a
+        difference": a comparison that found nothing must not arrive wearing the exit code of a finding,
+        and it must not arrive as a traceback either (which is what happened before this helper existed —
+        `np.percentile` on an empty slice raised, and the crash exited 1).
+        """
+        print(f"# NOTHING COMPARED: {why}")
         artifact.write(a.json_out, artifact.envelope(
             "gq_paired_compare",
-            {**artifact.input_file(a.label_a, a.vcf_a, records=recA),
-             **artifact.input_file(a.label_b, a.vcf_b, records=recB)},
+            {**artifact.input_file(a.label_a, a.vcf_a, records=recA, sites=len(A)),
+             **artifact.input_file(a.label_b, a.vcf_b, records=recB, sites=len(B))},
             {"join": "VID", "samples": "by name", "field": a.field, "scale": a.scale, "cap": a.cap},
             {"shared_vids": len(shared), "samples_matched": len(common_samples),
+             "comparable_cells": comparable,
              "duplicate_vids": {a.label_a: dupA, a.label_b: dupB}},
             verdict="NOTHING_COMPARED", compared_something=False))
         return 2
 
+    if not shared or not common_samples:
+        return refuse(f"shared VIDs {len(shared)}, shared sample names {len(common_samples)}")
+
     x = np.stack([A[v][ia] for v in shared])
     y = np.stack([B[v][ib] for v in shared])
     ok = ~(np.isnan(x) | np.isnan(y))
+    comparable = int(ok.sum())
+    if comparable == 0:
+        # The zero-shared-VID refusal above was reached by a join that found no rows; this is the join
+        # that found rows and NO COMPARABLE CELL — every (site, sample) pair missing the field on one
+        # side, e.g. two VCFs sharing VIDs whose shared samples are all `GQ=.`. Before this it fell
+        # through to the statistics and died there.
+        return refuse(f"{len(shared)} shared VID(s) x {len(common_samples)} shared sample(s) = "
+                      f"{x.size} cell(s), and 0 of them carry {a.field} on BOTH sides "
+                      f"(A missing {int(np.isnan(x).sum())}, B missing {int(np.isnan(y).sum())}) — "
+                      f"nothing compared, not a difference found")
     xa, yb = x[ok], y[ok]
     print(f"# paired cells {ok.sum()} of {x.size} ({ok.mean():.4%}); "
           f"A missing {int(np.isnan(x).sum())}, B missing {int(np.isnan(y).sum())}")

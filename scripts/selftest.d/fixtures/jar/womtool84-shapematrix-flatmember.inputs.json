@@ -1,0 +1,10 @@
+{
+  "ShapeProbe.plain_req": "hello",
+  "ShapeProbe.file_req": "gs://nowhere/a.txt",
+  "ShapeProbe.array_req": ["gs://nowhere/b.txt"],
+  "ShapeProbe.map_req": {"k": "v"},
+  "ShapeProbe.struct_req": {"label": "x"},
+  "ShapeProbe.array_of_struct_req": [{"label": "y"}],
+  "ShapeProbe.named_optional_member_req": {"optional": "z", "count": 1},
+  "ShapeProbe.struct_opt.label": "flat-member-on-an-optional-struct"
+}

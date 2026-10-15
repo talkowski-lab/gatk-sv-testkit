@@ -43,6 +43,11 @@ compare_*/
 __pycache__/
 *.py[cod]
 .venv*/
+# `.venv*/` needs a DIRECTORY, so it does not match the `.venv` SYMLINK that exists in a linked git
+# worktree (where the interpreter is shared rather than copied). Left unignored, `git add -A` stages it
+# as mode 120000 and its blob content IS the absolute path of whoever made the worktree -- a machine
+# coordinate entering the tracked set, which is what `make audit` exists to stop. Name it exactly.
+.venv
 venv/
 .mypy_cache/
 .ruff_cache/
@@ -86,3 +91,12 @@ audit.local.txt
 # pushed), while the history audit keeps finding whatever those commits and blobs already published.
 docs/archive/
 docs/handoff/
+
+# Tool-local state: editor/agent settings, lock files, per-machine project config. Not repo content --
+# and while untracked they were enough to make `git status` report a dirty tree, which is the check
+# worktree isolation runs before handing a review or implementation lane its own checkout.
+.claude/
+.serena/
+
+# live captures: coordinates of a real workspace must not reach HEAD (see the coordinate leg in scripts/selftest.sh)
+recon-live/

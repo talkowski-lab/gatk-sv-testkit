@@ -50,7 +50,11 @@ finish() {
     echo "$MARKER"
     echo "$MARKER" >&3 2>/dev/null || true                 # bypass tee
     echo "$MARKER" >> "$LOG" 2>/dev/null || true           # bypass the pipe entirely
-    rm -f "$GSV_PIDFILE" 2>/dev/null || true
+    # Only the builder that WROTE the pidfile may remove it. A successor refused by the lock below
+    # still lands in finish(), and used to clear the live builder's pidfile; the laptop tests liveness
+    # with `kill -0 $(cat /tmp/gsv-build.pid)`, so the healthy build then read as dead and the next
+    # poll stopped the VM out from under a build that was still pushing layers.
+    if [ "$(cat "$GSV_PIDFILE" 2>/dev/null || true)" = "$$" ]; then rm -f "$GSV_PIDFILE" 2>/dev/null || true; fi
     if [ "$SHUTDOWN_PENDING" = "true" ]; then
         if grep -isq google /sys/class/dmi/id/product_name 2>/dev/null; then
             echo "Shutting down in 180s; full log: $LOG (plus the GCP serial ring)."

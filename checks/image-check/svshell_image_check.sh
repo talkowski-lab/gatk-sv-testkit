@@ -14,16 +14,36 @@
 #   5. run checks/svshell_jq_plumbing_scan.py --tree on the extracted tree, on the VM host
 #      (python3 + apt jq), because the fragile part is jq plumbing and we only need jq
 #
-# Nothing is mutated: read-only image pull, read-only repo. Exit 0 only if the marker says
-# SUCCESS and the md5s matched.
+# Nothing is mutated: read-only image pull, read-only repo. The exit codes do not all mean "verified":
+#   0  PROVEN      both md5 expectations were supplied AND matched -- byte identity is proven
+#   0  SCAN_CLEAN  the scan ran clean with no expectations supplied -- byte identity NOT PROVEN. An exit 0
+#                  that is deliberately not a proof, so a caller cannot report "the image is the tested
+#                  one" from a run that never had the bytes to compare against.
+#   0  SUCCESS     legacy marker, no md5s -- treat as SCAN_CLEAN
+#   1  FAILURE     the scan, the jar, or an md5 said no
+#   3  no marker   the run never reached a verdict (timeout); the VM is kept and the log is named
 #
 # Usage: svshell_image_check.sh --image REF   (required; see docs/static-checks.md) [--expect-driver-md5 MD5] [--expect-fixture-md5 MD5]
 #                               [--project P] [--zone Z] [--machine M] [--disk GB] [--keep]
+#                               [--timeout MIN]  ceiling on the serial-port wait, default 40 min. It is in
+#                               the code and was NOT in this list: docs/static-checks.md documented the
+#                               flag while `--help` refused to name it, so the knob that exists because the
+#                               two image launchers had different ceilings was discoverable only by reading
+#                               the source.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCANNER="${SCRIPT_DIR}/../svshell_jq_plumbing_scan.py"
 . "$SCRIPT_DIR/../../kit/config.sh"
+# The --image guard is the one this directory shares (image_ref.sh). This launcher writes the reference
+# into a startup script that runs as ROOT on the VM: an `IMAGE="__IMAGE__"` line, whose quotes a `"` in
+# the reference escaped (measured before the guard was shared -- see that file for the captured bytes).
+# The file is tested for, not just sourced: a missing guard must be a refusal, not a bash error line
+# the script walks past into `gcloud compute instances create`.
+IMAGE_REF_SH="$SCRIPT_DIR/image_ref.sh"
+[ -f "$IMAGE_REF_SH" ] \
+    || { printf '%b' "svshell_image_check.sh: the shared --image guard is missing at $IMAGE_REF_SH,\n  and a VM booted without it proves nothing about the reference it pulled.\n" >&2; exit 2; }
+. "$IMAGE_REF_SH"
 
 PROJECT="${GSVTK_PROJECT:-}"
 ZONE="${GSVTK_ZONE:-us-central1-a}"
@@ -35,19 +55,31 @@ IMAGE=""
 EXPECT_DRIVER_MD5=""
 EXPECT_FIXTURE_MD5=""
 KEEP=0
-TIMEOUT_S=2400
+TIMEOUT_S=2400    # default, printed before booting; --timeout MIN overrides it (see the arg loop)
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --image) IMAGE="$2"; shift 2;;
     --expect-driver-md5) EXPECT_DRIVER_MD5="$2"; shift 2;;
     --expect-fixture-md5) EXPECT_FIXTURE_MD5="$2"; shift 2;;
+    # Copied from the sibling (run_in_image.sh:140-141), including its refusal of a non-integer, so the
+    # two launchers a person alternates between stop disagreeing about a flag they already know. It
+    # exists because TIMEOUT_S was hardcoded at 2400: a caller who wants a short answer, and a selftest
+    # leg that must not outlast the suite it lives in, had no way to ask for one. Default unchanged.
+    --timeout) case "${2:-}" in '' | *[!0-9]*)
+                  printf 'svshell_image_check.sh: --timeout must be an integer number of minutes, not "%s".\n' "${2:-}" >&2; exit 2;;
+                esac
+                TIMEOUT_S=$(( $2 * 60 )); shift 2;;
     --project) PROJECT="$2"; shift 2;;
     --zone) ZONE="$2"; shift 2;;
     --machine) MACHINE="$2"; shift 2;;
     --disk) DISK_GB="$2"; shift 2;;
     --keep) KEEP=1; shift;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0;;
+    # Print the leading comment block, not a fixed line range. `sed -n '2,21p'` printed 20 lines whatever
+    # the header had grown to: adding the exit-code legend pushed the Usage text out of the window, so
+    # `--help` stopped mentioning its own flags while `bash -n` stayed green and every doc claim about
+    # those flags still graded clean. The block is now self-bounding, so a header edit cannot shrink help.
+    -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 && /^[[:space:]]*$/ {next} NR>1 {exit}' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -55,6 +87,10 @@ done
 # printf '%b', not echo: bash's echo prints \n literally, so the second quoted line here was
 # parsed as a COMMAND and `exit 2` was never reached -- a usage error came out as exit 1.
 [ -n "$IMAGE" ] || { printf '%b' "no --image given: an unnamed image cannot be evidence.\n  e.g.  --image \$(./kit/gsvtk-config get IMAGE_REPO)/sv-shell:<branch>-<sha6>\n        built by docker/gatk-sv-build.sh   (see docs/static-checks.md)\n" >&2; exit 2; }
+# A reference that is only NON-EMPTY is not a screened one. The instance name is derived from it two
+# lines later and the startup script is written from it three lines after that, so this is the last
+# place a bad one can be refused without anything existing.
+image_ref_guard "$0" "$IMAGE"
 gsvtk_require PROJECT >/dev/null
 
 SHORT="${IMAGE##*:}"; SHORT="${SHORT:0:12}"
@@ -144,6 +180,13 @@ python3 /tmp/scan.py --tree /tmp/extracted/sv_shell --list-keys || finish FAILUR
 echo "### SVSCAN_DONE"
 echo "### shipped jar: GenotypeSVs long-name surface (the defect this image must close)"
 docker run --rm "$IMAGE" java -jar /opt/gatk.jar GenotypeSVs --help > /tmp/gatk_help.txt 2>&1 || true
+# An empty help file is not a verdict about flags. The `|| true` above swallows a failing docker run and a
+# missing jar alike, so without this guard the loop below prints three `absent` rows off ZERO BYTES and
+# line 177 concludes "the gatk pin is stale" -- a finding about the image, produced by a measurement that
+# never ran. jar_flag_probe.sh split this shape in ebfbe18 (IMAGE_ABSENT / NO_HELP are "not a finding");
+# the sibling inherits the split now. The exit stays 1 -- the check could not verify the thing it exists to
+# verify -- but the reason says which failure it was, instead of blaming a pin nobody read.
+[ -s /tmp/gatk_help.txt ] || finish FAILURE "jar --help produced NOTHING -- no verdict about flags is available from it"
 HAVE_DEPTH=no; HAVE_PESR=no
 for f in rd-depth-table rd-pesr-table rd-table; do
   if grep -qE -- "--$f([^-a-z]|$)" /tmp/gatk_help.txt; then st=PRESENT; else st=absent; fi
@@ -151,7 +194,6 @@ for f in rd-depth-table rd-pesr-table rd-table; do
   [ "$f" = "rd-pesr-table" ] && [ "$st" = PRESENT ] && HAVE_PESR=yes
   echo "###   --$f : $st"
 done
-grep -c "rd-depth-table" /tmp/gatk_help.txt >/dev/null || true
 if [ "$HAVE_DEPTH" != yes ] || [ "$HAVE_PESR" != yes ]; then
   finish FAILURE "jar in the shipped image does not accept --rd-depth-table/--rd-pesr-table; the gatk pin is stale"
 fi
@@ -189,6 +231,22 @@ gcloud compute instances create "$INSTANCE" --project "$PROJECT" --zone "$ZONE" 
   --boot-disk-auto-delete --scopes cloud-platform --labels created-by=svshell-check \
   --metadata-from-file "startup-script=$STARTUP" >/dev/null
 
+# Registered the moment the VM exists, and reached on Ctrl-C too — this is `jar_flag_probe.sh:78-79`
+# copied, not invented: that file's comment records the identical incident, an 8-vCPU VM left billing
+# because the only cleanup was an EXIT trap around `rm -f` and a `set -e` between create and delete.
+# An interrupt, or one transient gcloud blip in the <=40-minute wait, used to leave the VM running and
+# print nothing. `--keep` is respected: a VM asked for by name is a VM asked to stay.
+VM_DELETED=0
+cleanup_vm() {
+  [ "$KEEP" -eq 1 ] && return 0
+  [ "$VM_DELETED" -eq 1 ] && return 0
+  VM_DELETED=1
+  timeout 300 gcloud compute instances delete "$INSTANCE" --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 \
+    || printf '  CLEANUP FAILED -- this VM may still be running. Delete it with:\n    gcloud compute instances delete %s --project=%s --zone=%s --quiet\n' "$INSTANCE" "$PROJECT" "$ZONE" >&2
+}
+trap 'rm -f "$STARTUP"; cleanup_vm' EXIT
+trap 'trap - EXIT; rm -f "$STARTUP"; cleanup_vm; exit 130' INT TERM
+
 deadline=$(( $(date +%s) + TIMEOUT_S ))
 RESULT=""
 echo "==> waiting for the result marker (timeout $((TIMEOUT_S/60)) min)"
@@ -197,7 +255,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   gcloud compute instances get-serial-port-output "$INSTANCE" --project "$PROJECT" \
     --zone "$ZONE" --port 1 --start 0 > "$LOG" 2>/dev/null || true
   if grep -q "SVSHELL_IMAGE_CHECK=" "$LOG"; then
-    RESULT=$(grep -o "SVSHELL_IMAGE_CHECK=[A-Z]*" "$LOG" | tail -1)
+    RESULT=$(grep -o "SVSHELL_IMAGE_CHECK=[A-Z][A-Z_]*" "$LOG" | tail -1)
     break
   fi
   echo "    ... $(du -h "$LOG" | cut -f1) of serial log"
@@ -207,9 +265,27 @@ echo "==> serial log: $LOG ($(du -h "$LOG" | cut -f1))"
 # GCE prefixes startup-script stdout with "startup-script: ", so anchoring on "^###" finds nothing
     grep -aE "### " "$LOG" | sed 's/.*startup-script: //' | sed 's/^/    /' | sort -u | tail -40 || true
 
+# No marker means this script never learned what ran. Deleting at this point is what makes the run
+# unrecoverable: the laptop keeps $LOG, but the instance is the only place the COMPLETE serial output
+# can still be re-fetched from (`--start 0` on a deleted VM returns nothing), and the old message then
+# printed `RESULT: TIMEOUT — VM svchk-…` for a VM this very script had just deleted. So a scan that
+# actually PROVEN itself could read as a timeout, once, and take the proof with it. Both siblings
+# answer this way already (run_in_image.sh:512-517, jar_flag_probe): NOT SCORED, VM KEPT, delete
+# command handed over. Raising KEEP here is deliberate and it also disarms the EXIT trap, which would
+# otherwise delete on the way out. What is kept is an instance that powered itself off, so the cost of
+# the evidence is a idle disk, not vCPU-minutes -- and the delete command is printed so it is not left
+# by accident. What this does NOT fix: the wait still runs to the full ceiling after the VM is gone.
+if [ "$KEEP" -eq 0 ] && [ -z "$RESULT" ]; then
+  echo "==> no result marker captured, so this run is NOT SCORED. $INSTANCE is being KEPT so the serial output stays re-fetchable."
+  echo "    Re-read it with:  gcloud compute instances get-serial-port-output $INSTANCE --project=$PROJECT --zone=$ZONE --port 1 --start 0"
+  echo "    Done with it?     gcloud compute instances delete $INSTANCE --project=$PROJECT --zone=$ZONE --quiet"
+  KEEP=1
+fi
+
 if [ "$KEEP" -eq 0 ]; then
   gcloud compute instances delete "$INSTANCE" --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 || \
     echo "WARN could not delete $INSTANCE; cleanup: gcloud compute instances delete $INSTANCE --project $PROJECT --zone $ZONE --quiet"
+  VM_DELETED=1     # the EXIT trap must not run a second delete and print a WARN about nothing
 else
   echo "==> keeping $INSTANCE (asked with --keep); serial log at $LOG"
 fi
@@ -219,5 +295,5 @@ case "$RESULT" in
   SVSHELL_IMAGE_CHECK=SCAN_CLEAN) echo "RESULT: SCAN CLEAN, BYTE IDENTITY NOT PROVEN — the md5s were not both supplied. Re-run with --expect-driver-md5 AND --expect-fixture-md5 (from the ref you tested) if you need this as evidence about shipped bytes."; exit 0;;
   SVSHELL_IMAGE_CHECK=SUCCESS) echo "RESULT: SUCCESS (legacy marker) — treat as SCAN_CLEAN: byte identity is only proven with both --expect-* md5s"; exit 0;;
   SVSHELL_IMAGE_CHECK=FAILURE) echo "RESULT: FAILURE — see the ### lines above"; exit 1;;
-  *) echo "RESULT: TIMEOUT — no marker after $((TIMEOUT_S/60)) min; VM $INSTANCE (log $LOG)"; exit 3;;
+  *) echo "RESULT: TIMEOUT — no marker after $((TIMEOUT_S/60)) min; VM $INSTANCE KEPT (log $LOG), delete command above"; exit 3;;
 esac

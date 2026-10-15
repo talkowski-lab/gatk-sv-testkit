@@ -1,0 +1,5 @@
+{
+  "DroppedList.batch": "${this.sample_set_id}",
+  "DroppedList.tracks": ["{{ fixtures.genome_tracks | tojson }}", "${workspace.sv_base_mini_docker}"],
+  "DroppedList.tracks": "${this.median_cov}"
+}

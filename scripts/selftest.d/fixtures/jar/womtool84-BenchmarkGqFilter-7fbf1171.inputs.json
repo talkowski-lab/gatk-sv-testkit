@@ -1,0 +1,21 @@
+{
+  "BenchmarkGqFilter.data_label": "String",
+  "BenchmarkGqFilter.truth_overlap_info": "File",
+  "BenchmarkGqFilter.pickled_variant_properties": "File? (optional)",
+  "BenchmarkGqFilter.ped_file": "File? (optional)",
+  "BenchmarkGqFilter.comparison_scores": "Array[WomCompositeType {\n pickled_scores_file -> File?\nlabel -> String\npassing_score -> Int\nvcf_index -> File\nproperty -> String\nvcf -> File \n}]",
+  "BenchmarkGqFilter.benchmark_args": "Array[String] (optional, default = [])",
+  "BenchmarkGqFilter.make_figures": "Array[String] (optional, default = [\"precision-recall\", \"inheritance\", \"variants-per-sample\", \"violation-curve\", \"scores-histogram\", \"hardy-weinberg\"])",
+  "BenchmarkGqFilter.ConcatBenchmarkPdfs.benchmark_figure_filename": "String (optional, default = \"quality-benchmark.pdf\")",
+  "BenchmarkGqFilter.sv_utils_docker": "String",
+  "BenchmarkGqFilter.original_scores": {
+    "pickled_scores_file": "File? (optional)",
+    "label": "String",
+    "passing_score": "Int",
+    "vcf_index": "File",
+    "property": "String",
+    "vcf": "File"
+  },
+  "BenchmarkGqFilter.samtools_cloud_docker": "String"
+}
+

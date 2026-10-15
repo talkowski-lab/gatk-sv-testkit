@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Assert every comparator emits the same artifact envelope.
 
-`compare/artifact.py` documents the shape; this script is why the shape is not a suggestion. Twelve
-of the thirteen comparators can be pointed at the synthetic fixture pair (compare/make_fixtures.py),
-so each one is run here with `--json`, and the resulting file must carry:
+`compare/artifact.py` documents the shape; this script is why the shape is not a suggestion. Every
+comparator that can be pointed at the synthetic fixture pair (compare/make_fixtures.py) is run here
+with `--json`, and the resulting file must carry:
 
     tool            the name the tool knows it has
     argv            the invocation that produced this, so a stale artifact can be re-run
@@ -40,6 +40,9 @@ CASES = {
     "gq_paired_compare": ["$F/geno_a.vcf", "$F/geno_same.vcf", "--field", "GQ", "--scale", "1/1"],
     "gq_scale_compare": ["$F/geno_a.vcf", "$F/geno_b.vcf", "--fields", "GQ"],
     "diff_rd_states": ["$F/geno_b.vcf", "--baseline", "$F/geno_a.vcf"],
+    "vcf_body_diff": ["$F/body_a.vcf", "$F/body_c.vcf"],
+    "gd_calls_diff": ["$F/gd_a.tsv.gz", "$F/gd_b.tsv.gz", "--case-sample", "NA12878"],
+    "sample_census": ["$F/baf_a.txt.gz", "--expect", "3"],
 }
 NOT_COVERED = ("profile_summarize (needs a gatk-sv-profile run dir; `make smoke` runs it on real data)",
                "compare_batch_tables (needs two run dirs; `make smoke` runs it on real data)")
