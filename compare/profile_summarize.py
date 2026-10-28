@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Site-weighted summary of a gatk-sv-profile paired run.
+
+`gatk-sv-profile run --vcf-a ... --vcf-b ...` writes per-module bucketed tables under
+<out>/<module>/tables/*.tsv.gz (+ .parquet twins) but prints no headline number. This script
+aggregates them with one fixed rule:
+
+  * restrict to rows with n_sites > 0 (bucketed tables are sparse and mostly empty)
+  * weight each bucket's value by its site count
+  * each side is filtered and weighted by its own counts (sharing A's mask would drop B-only buckets)
+  * report both directions (A-side weights = n_sites_<label-a>, B-side = n_sites_<label-b>)
+  * NaN means "metric undefined for that bucket" -> dropped, and the drop is counted
+
+Known limitation (upstream): `gatk-sv-profile` explodes each site once per algorithm
+(`explode_algorithm_buckets`), so summing a bucket table counts multi-caller sites more than once.
+The effect on genotype rates is small, but for "what fraction of baseline sites came back" use
+`compare/site_set_diff.py` or `compare/pair_level_concordance.py` instead.
+
+NB `gatk-sv-profile` **embeds the label values in its column names**
+(`--label-a baseline` -> `n_sites_baseline`, `pct_matched_baseline`, ...), so the
+column suffixes here are derived from the labels. Pass the same labels used for the profile run;
+labels that pandas would mangle are not supported.
+
+Sanity check: a callset compared against itself must give 1.0000 everywhere.
+
+Usage:
+    python compare/profile_summarize.py /tmp/profile_selftest
+    ... profile_summarize.py DIR --label-a baseline --label-b new
+
+Exit status: 0 on success, 2 if a required table is missing.
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+import artifact
+
+# metric table -> path relative to the profile output directory
+TABLES = {
+    "genotype_concordance": "genotype_concordance/tables/concordance_metrics.tsv.gz",
+    "genotype_exact_match": "genotype_exact_match/tables/genotype_match_rates.tsv.gz",
+    "site_overlap": "site_overlap/tables/overlap_metrics.tsv.gz",
+}
+
+
+def wavg(values, weights):
+    """Site-weighted mean over non-NaN pairs; returns (mean, n_used_rows, n_dropped_nan)."""
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    ok = ~np.isnan(values)
+    if not ok.any():
+        return None, 0, int((~ok).sum())
+    return float(np.average(values[ok], weights=weights[ok])), int(ok.sum()), int((~ok).sum())
+
+
+def col(df, base, label, where):
+    """Resolve a label-suffixed column, or exit listing the real columns."""
+    name = f"{base}_{label}"
+    if name not in df.columns:
+        raise SystemExit(f"ERROR: column {name!r} absent from {where}.\n"
+                         f"       actual columns: {list(df.columns)}\n"
+                         f"       -> pass --label-a/--label-b matching the profile run's labels")
+    return df[name]
+
+
+def summarize(outdir, label_a, label_b, json_out=None):
+    missing = [k for k, rel in TABLES.items() if not os.path.isfile(os.path.join(outdir, rel))]
+    if missing:
+        print(f"ERROR: missing table(s) for {missing} under {outdir}", file=sys.stderr)
+        print("Expected a completed `gatk-sv-profile run` output dir.", file=sys.stderr)
+        return 2
+    metrics = {"concordance": {}, "exact_match": {}, "site_overlap": {}}
+
+    print(f"# site-weighted summary of {outdir}")
+    print(f"#   A = {label_a}   B = {label_b}")
+    print("#   rule: rows with n_sites>0 only; weight = that row's site count\n")
+
+    c = pd.read_csv(os.path.join(outdir, TABLES["genotype_concordance"]), sep="\t")
+    print(f"## genotype_concordance ({len(c)} bucket rows read; each side weighted on its own n_sites)")
+    for metric in sorted(c.metric.unique()):
+        s = c[c.metric == metric]
+        sa = s[col(s, "n_sites", label_a, metric) > 0]
+        sb = s[col(s, "n_sites", label_b, metric) > 0]
+        a, na, da = wavg(col(sa, "mean_value", label_a, metric), col(sa, "n_sites", label_a, metric))
+        b, nb, db = wavg(col(sb, "mean_value", label_b, metric), col(sb, "n_sites", label_b, metric))
+        fmt = lambda v: "  n/a " if v is None else f"{v:.4f}"
+        print(f"  {metric:32s} A-side {fmt(a)} ({na:4d} rows, {da:4d} NaN dropped)"
+              f"   B-side {fmt(b)} ({nb:4d} rows, {db:4d} NaN dropped)")
+        metrics["concordance"][metric] = {"a_side": a, "b_side": b, "a_rows": na, "b_rows": nb,
+                                         "a_nan_dropped": da, "b_nan_dropped": db}
+    # A-side weights answer "of the baseline's calls, how much agrees", and vice versa.
+    print("  (A-side = fraction of baseline genotype calls agreeing; B-side = same from the new side)")
+
+    e = pd.read_csv(os.path.join(outdir, TABLES["genotype_exact_match"]), sep="\t")
+    e = e[e.n_sites > 0]
+    print(f"\n## genotype_exact_match ({len(e)} non-empty rows; excludes no-call cells)")
+    for rate_col, nice in [
+        ("mean_exact_match_rate", "both-called exact match"),
+        ("mean_het_to_homref_rate", "drift het -> homref"),
+        ("mean_het_to_homalt_rate", "drift het -> homalt"),
+        ("mean_homref_to_het_rate", "drift homref -> het"),
+        ("mean_homalt_to_het_rate", "drift homalt -> het"),
+    ]:
+        # NaN here means the transition never occurred in that bucket, i.e. rate 0.
+        d = int(e[rate_col].isna().sum())
+        filled = e[rate_col].fillna(0.0)
+        fv = float(np.average(filled, weights=e.n_sites))
+        print(f"  {nice:24s} {fv:.6f}   (NaN -> 0 assumed; {d} of {len(e)} rows NaN)")
+        metrics["exact_match"][nice] = {"value": fv, "nan_rows": d, "total_rows": len(e),
+                                       "nan_treated_as": 0.0}
+
+    o = pd.read_csv(os.path.join(outdir, TABLES["site_overlap"]), sep="\t")
+    oa = o[col(o, "n_total", label_a, "site_overlap") > 0]
+    ob = o[col(o, "n_total", label_b, "site_overlap") > 0]
+    a, _, _ = wavg(col(oa, "pct_matched", label_a, "site_overlap"), col(oa, "n_total", label_a, "site_overlap"))
+    b, _, _ = wavg(col(ob, "pct_matched", label_b, "site_overlap"), col(ob, "n_total", label_b, "site_overlap"))
+    print(f"\n## site_overlap (A-side {len(oa)} / B-side {len(ob)} non-empty rows)")
+    # sum-ratio cross-check: the bucket table double-counts multi-algorithm sites
+    sa, sb_ = int(col(o, "n_total", label_a, "site_overlap").sum()), int(col(o, "n_total", label_b, "site_overlap").sum())
+    ma, mb = int(col(o, "n_matched", label_a, "site_overlap").sum()), int(col(o, "n_matched", label_b, "site_overlap").sum())
+    print(f"  pct_matched A->B {a:.4f}   B->A {b:.4f}")
+    print(f"  sum-ratio cross-check  A->B {ma/sa:.4f} ({ma}/{sa})   B->A {mb/sb_:.4f} ({mb}/{sb_})"
+          f"   [n_total sums exceed record counts when a site carries >1 algorithm]")
+    metrics["site_overlap"] = {"pct_matched_a_to_b": a, "pct_matched_b_to_a": b,
+                               "sum_ratio_a_to_b": ma / sa if sa else None,
+                               "sum_ratio_b_to_a": mb / sb_ if sb_ else None,
+                               "n_total_sums": {label_a: sa, label_b: sb_},
+                               "n_matched_sums": {label_a: ma, label_b: mb}}
+    artifact.write(json_out, artifact.envelope(
+        "profile_summarize", {"profile_run_dir": str(outdir)},
+        {"weighting": "site-weighted; rows with n_sites>0 only; each side filtered and weighted on "
+                      "its OWN counts",
+         "known_limitation": "gatk-sv-profile explodes each site once per algorithm, so bucket sums "
+                             "double-count multi-caller sites; use the pair/matcher count for "
+                             "'what fraction came back'",
+         "tables": TABLES},
+        metrics,
+        verdict="AGGREGATED from a gatk-sv-profile run — the bucketing caveat above travels with the "
+                "number",
+        compared_something=bool(metrics["concordance"] or metrics["site_overlap"])))
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("outdir", help="gatk-sv-profile output directory")
+    p.add_argument("--label-a", default="baseA")
+    p.add_argument("--label-b", default="baseB")
+    p.add_argument("--json", dest="json_out", help="write the machine-readable artifact here")
+    args = p.parse_args()
+    return summarize(os.path.abspath(args.outdir), args.label_a, args.label_b, args.json_out)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

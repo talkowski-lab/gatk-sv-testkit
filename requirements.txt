@@ -1,0 +1,12 @@
+# Third-party packages imported by tools in this repo, one line per package with its consumer.
+#
+# Deliberately unpinned: this toolkit runs inside other people's environments. External binaries
+# (jq, bcftools, gsutil, gcloud, java) are not pip dependencies; see docs/setup.md.
+
+firecloud         # terra/terra.py -> firecloud.api: every Terra call (submissions, configs, entities)
+                  # NOTE the PyPI name is `firecloud`; `pip install fiss` does not exist.
+google-auth       # terra/terra.py: ADC session used for every authenticated request
+numpy             # compare/gq_scale_compare.py,
+                  # compare/profile_summarize.py: distribution and per-field statistics
+pandas            # compare/profile_summarize.py: reads gatk-sv-profile's bucketed .tsv.gz tables
+pysam             # compare/pair_level_concordance.py: reads the two VCFs directly, no profiler

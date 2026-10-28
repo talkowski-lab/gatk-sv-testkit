@@ -1,0 +1,38 @@
+{
+  "refs": [
+    {
+      "ref": "main",
+      "sha": "8fea3adca5355829c07f0b0b0d9a4ff3a69f11bc",
+      "role": "branch",
+      "verdict": "compatible",
+      "checked": "2026-10-28",
+      "checks": {
+        "dockstore GenerateBatchMetrics": "listed",
+        "dockstore FilterBatchSites": "listed",
+        "dockstore FilterBatchSamples": "listed",
+        "dockstore MergeBatchSites": "listed",
+        "dockstore GenotypeBatch": "listed",
+        "dockstore SingleSamplePipeline": "listed",
+        "profile genotyping": "112 compared, 0 disagree, 17 expected",
+        "profile single_sample": "125 compared, 0 disagree, 2 expected",
+        "layout": "11 of 11 paths present"
+      }
+    },
+    {
+      "ref": "v1.1.1",
+      "sha": "b5d5049c1327464056e27123442e44c2948c8bda",
+      "role": "baseline",
+      "verdict": "compatible",
+      "checked": "2026-10-28",
+      "checks": {
+        "dockstore GenerateBatchMetrics": "listed",
+        "dockstore FilterBatchSites": "listed",
+        "dockstore FilterBatchSamples": "listed",
+        "dockstore MergeBatchSites": "listed",
+        "dockstore GenotypeBatch": "listed",
+        "dockstore SingleSamplePipeline": "listed",
+        "layout": "9 of 9 paths present"
+      }
+    }
+  ]
+}

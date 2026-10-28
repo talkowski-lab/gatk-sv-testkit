@@ -1,0 +1,27 @@
+# Optional: the WDL analyzers and linters needed to run the offline gate (`make test`) with nothing
+# skipped. Not needed to build, replay or compare anything.
+#
+#   pip install -r requirements-dev.txt
+#
+# When these are absent the gate reports a named SKIP instead of failing, so a contributor working
+# only on the Terra side does not need them. Missing packages from requirements.txt are still failures.
+
+
+miniwdl           # provides both the `miniwdl` CLI used by checks/wdl_gate.sh and the `WDL`
+                  # module imported by replay/build_inputs.py. Both name the missing
+                  # dependency instead of crashing, so the rest of the repo still runs
+                  # without it.
+
+flake8           # `make flake` runs ONLY its pyflakes checks (--select=F): undefined names and
+                 # values that are computed then dropped; no style rules. `make setup` does not
+                 # install it, so `make flake` SKIPs locally; CI enforces it.
+
+jinja2           # imported by gatk-sv's own input renderer, which checks/wdl_inputs_check.py and
+                 # checks/wdl_gate.sh run to render the input JSONs CI validates.
+
+pytest>=7        # `make pytest`: the unit tests under tests/ and every tool's built-in --selftest.
+
+# Not pip-installable, and therefore not listed here either:
+#   womtool.jar  - set WOMTOOL_JAR=/path/to/womtool.jar for terra/batch_check_inputs.py
+#                  (a GitHub release artifact of broadinstitute/womtool, not a package)
+#   jq, bcftools, gsutil, gcloud, JDK 17+  - see docs/setup.md

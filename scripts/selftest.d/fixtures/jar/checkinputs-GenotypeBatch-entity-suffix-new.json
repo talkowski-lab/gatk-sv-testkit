@@ -1,0 +1,37 @@
+{
+ "_about": [
+  "HAND-AUTHORED SYNTHETIC FIXTURE: the AGREEING control for the suffix-disagreement note.",
+  "This is the complete capture unchanged in substance: the chain outputs sit under `_new`, where the",
+  "config looks, and NO attribute anywhere carries a competing suffix. A run against it grades every",
+  "reference and must print NO suffix-disagreement line -- which is the arm that stops the diagnostic",
+  "from becoming noise on a healthy sandbox (an absence-only workspace must not be told about suffixes",
+  "either, so the disagreeing arm is fired by the row's own names, never by absence alone)."
+ ],
+ "entities": [
+  {
+   "entityName": "EXAMPLE_SET_A",
+   "entityType": "sample_set",
+   "attributes": {
+    "sample_set_id": "EXAMPLE-PLACEHOLDER",
+    "outlier_filtered_pesr_vcf_new": "EXAMPLE-PLACEHOLDER",
+    "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+    "cutoffs_new": "EXAMPLE-PLACEHOLDER",
+    "median_cov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_SR_frz": "EXAMPLE-PLACEHOLDER"
+   }
+  }
+ ],
+ "workspace": {
+  "namespace": "your-namespace",
+  "name": "your-workspace",
+  "attributes": {
+   "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+   "reference_dict": "EXAMPLE-PLACEHOLDER",
+   "depth_exclusion_intervals_unused": "EXAMPLE-PLACEHOLDER",
+   "bin_exclude": "EXAMPLE-PLACEHOLDER",
+   "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+  }
+ }
+}

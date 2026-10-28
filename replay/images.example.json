@@ -1,0 +1,7 @@
+{
+  "_about": "Copy per arm: the docker inputs of SVShell/GATKSVPipelineSingleSample mapped to the exact image each one should run. Build the images with docker/gatk-sv-build.sh; the tag it prints is <branch>-<sha6>.",
+  "_why_explicit": "These are literals on purpose. Left as workspace-attribute references, a rerun silently inherits whatever the attribute pointed at, and you measure the old code while believing you measured the new one.",
+  "sv_pipeline_docker": "us.gcr.io/YOUR_PROJECT/YOUR_NAMESPACE/gatk-sv/sv-pipeline:BRANCH-SHA6",
+  "sv_shell_docker": "us.gcr.io/YOUR_PROJECT/YOUR_NAMESPACE/gatk-sv/sv-shell:BRANCH-SHA6",
+  "_gatk_note": "Do NOT add gatk_docker for sv-shell arms: /opt/gatk.jar inside an sv-shell image is built at that Dockerfile's own GATK pin, which is the thing worth checking (checks/wdl_gate.sh and checks/image-check/ tell you whether the pin is stale)."
+}

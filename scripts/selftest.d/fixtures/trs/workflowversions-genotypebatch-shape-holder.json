@@ -1,0 +1,14 @@
+[
+ {
+  "workflowPath": "github.com/broadinstitute/gatk-sv/GenotypeBatch",
+  "name": "dev_genotype_scale",
+  "reference": "dev_genotype_scale",
+  "commitID": "62d7f80d0b32eca55ca5eaeae770cf56eccbfeca"
+ },
+ {
+  "workflowPath": "github.com/broadinstitute/gatk-sv/GenotypeBatch",
+  "name": "main",
+  "reference": "main",
+  "commitID": "743dd9d41edeee98bdd97cde0638a89a4432cfe7"
+ }
+]

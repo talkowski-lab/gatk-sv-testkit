@@ -1,0 +1,127 @@
+{
+ "_about": [
+  "HAND-AUTHORED SYNTHETIC FIXTURE, not a capture. The config names, entity types and `outputs` maps are",
+  "the real ones profiles/genotyping.json carries for the batch chain; the rest is placeholder, and no",
+  "value here is a workspace coordinate (`make -s audit`). Shape is what",
+  "`GET .../methodconfigs` answers terra.workspace_configs() through (`_about` aside: the `methodconfigs`",
+  "wrapper is one of the shapes terra/_as_items accepts, so the capture and the live read cannot",
+  "disagree about it). It is how scripts/selftest.d/jarshape.sh grades check 2c -- the EXPECTED output",
+  "suffix, derived from the stored configs, with no network and no credentials.",
+  "",
+  "Every numbered config writes `_new`, the shipped suffix: this capture is the AGREEMENT arm, the",
+  "one that must change nothing about what the tool prints."
+ ],
+ "methodconfigs": [
+  {
+   "namespace": "your-namespace",
+   "name": "06-GenerateBatchMetrics",
+   "entityType": "sample_set",
+   "methodName": "GenerateBatchMetrics",
+   "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/GenerateBatchMetrics",
+    "methodVersion": "your-branch-under-test"
+   },
+   "methodConfigVersion": 7,
+   "inputs": {},
+   "outputs": {
+    "GenerateBatchMetrics.metrics": "this.metrics_new",
+    "GenerateBatchMetrics.metrics_file_batchmetrics": "this.metrics_file_batchmetrics_new",
+    "GenerateBatchMetrics.ploidy_table": "this.ploidy_table_new"
+   }
+  },
+  {
+   "namespace": "your-namespace",
+   "name": "07-FilterBatchSites",
+   "entityType": "sample_set",
+   "methodName": "FilterBatchSites",
+   "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/FilterBatchSites",
+    "methodVersion": "your-branch-under-test"
+   },
+   "methodConfigVersion": 7,
+   "inputs": {},
+   "outputs": {
+    "FilterBatchSites.sites_filtered_depth_vcf": "this.sites_filtered_depth_vcf_new",
+    "FilterBatchSites.sites_filtered_manta_vcf": "this.sites_filtered_manta_vcf_new",
+    "FilterBatchSites.sites_filtered_scramble_vcf": "this.sites_filtered_scramble_vcf_new",
+    "FilterBatchSites.sites_filtered_wham_vcf": "this.sites_filtered_wham_vcf_new",
+    "FilterBatchSites.cutoffs": "this.cutoffs_new",
+    "FilterBatchSites.scores": "this.scores_new",
+    "FilterBatchSites.RF_intermediate_files": "this.RF_intermediate_files_new",
+    "FilterBatchSites.sites_filtered_sv_counts": "this.sites_filtered_sv_counts_new",
+    "FilterBatchSites.sites_filtered_sv_count_plots": "this.sites_filtered_sv_count_plots_new",
+    "FilterBatchSites.sites_filtered_outlier_samples_preview": "this.sites_filtered_outlier_samples_preview_new",
+    "FilterBatchSites.sites_filtered_outlier_samples_with_reason": "this.sites_filtered_outlier_samples_with_reason_new",
+    "FilterBatchSites.sites_filtered_num_outlier_samples": "this.sites_filtered_num_outlier_samples_new"
+   }
+  },
+  {
+   "namespace": "your-namespace",
+   "name": "08-FilterBatchSamples",
+   "entityType": "sample_set",
+   "methodName": "FilterBatchSamples",
+   "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/FilterBatchSamples",
+    "methodVersion": "your-branch-under-test"
+   },
+   "methodConfigVersion": 7,
+   "inputs": {},
+   "outputs": {
+    "FilterBatchSamples.outlier_filtered_depth_vcf": "this.outlier_filtered_depth_vcf_new",
+    "FilterBatchSamples.outlier_filtered_depth_vcf_index": "this.outlier_filtered_depth_vcf_index_new",
+    "FilterBatchSamples.outlier_filtered_manta_vcf": "this.outlier_filtered_manta_vcf_new",
+    "FilterBatchSamples.outlier_filtered_scramble_vcf": "this.outlier_filtered_scramble_vcf_new",
+    "FilterBatchSamples.outlier_filtered_wham_vcf": "this.outlier_filtered_wham_vcf_new",
+    "FilterBatchSamples.outlier_filtered_pesr_vcf": "this.outlier_filtered_pesr_vcf_new",
+    "FilterBatchSamples.outlier_filtered_pesr_vcf_index": "this.outlier_filtered_pesr_vcf_index_new",
+    "FilterBatchSamples.filtered_batch_samples_file": "this.filtered_batch_samples_file_new",
+    "FilterBatchSamples.outlier_samples_excluded_file": "this.outlier_samples_excluded_file_new"
+   }
+  },
+  {
+   "namespace": "your-namespace",
+   "name": "09-MergeBatchSites",
+   "entityType": "sample_set_set",
+   "methodName": "MergeBatchSites",
+   "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/MergeBatchSites",
+    "methodVersion": "your-branch-under-test"
+   },
+   "methodConfigVersion": 7,
+   "inputs": {},
+   "outputs": {
+    "MergeBatchSites.merge_batch_sites_vcf": "workspace.merge_batch_sites_vcf_new",
+    "MergeBatchSites.merge_batch_sites_vcf_index": "workspace.merge_batch_sites_vcf_index_new"
+   }
+  },
+  {
+   "namespace": "your-namespace",
+   "name": "10-GenotypeBatch",
+   "entityType": "sample_set",
+   "methodName": "GenotypeBatch",
+   "methodRepoMethod": {
+    "sourceRepo": "dockstore",
+    "methodPath": "github.com/broadinstitute/gatk-sv/GenotypeBatch",
+    "methodVersion": "your-branch-under-test"
+   },
+   "methodConfigVersion": 7,
+   "inputs": {},
+   "outputs": {
+    "GenotypeBatch.genotyped_depth_vcf": "this.genotyped_depth_vcf_new",
+    "GenotypeBatch.genotyped_depth_vcf_index": "this.genotyped_depth_vcf_index_new",
+    "GenotypeBatch.genotyped_pesr_vcf": "this.genotyped_pesr_vcf_new",
+    "GenotypeBatch.genotyped_pesr_vcf_index": "this.genotyped_pesr_vcf_index_new",
+    "GenotypeBatch.genotyping_rd_depth_table": "this.genotyping_rd_depth_table_new",
+    "GenotypeBatch.genotyping_rd_pesr_table": "this.genotyping_rd_pesr_table_new",
+    "GenotypeBatch.genotyping_pe_table": "this.genotyping_pe_table_new",
+    "GenotypeBatch.genotyping_sr_table": "this.genotyping_sr_table_new",
+    "GenotypeBatch.genotyping_sr_cutoff_diagnostics": "this.genotyping_sr_cutoff_diagnostics_new",
+    "GenotypeBatch.regeno_coverage_medians": "this.regeno_coverage_medians_new"
+   }
+  }
+ ]
+}

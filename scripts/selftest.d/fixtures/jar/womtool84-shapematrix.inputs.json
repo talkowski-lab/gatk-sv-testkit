@@ -1,0 +1,24 @@
+{
+  "ShapeProbe.map_req": "Map[String, String]",
+  "ShapeProbe.array_of_struct_req": "Array[WomCompositeType {\n label -> String\nmaybe -> File? \n}]",
+  "ShapeProbe.plain_req": "String",
+  "ShapeProbe.struct_opt": "WomCompositeType {\n label -> String\nmaybe -> File? \n}? (optional)",
+  "ShapeProbe.defaulted": "String (optional, default = \"hi\")",
+  "ShapeProbe.struct_req": {
+    "label": "String",
+    "maybe": "File? (optional)"
+  },
+  "ShapeProbe.struct_defaulted": {
+    "label": "String",
+    "maybe": "File? (optional)"
+  },
+  "ShapeProbe.plain_opt": "String? (optional)",
+  "ShapeProbe.array_req": "Array[File]",
+  "ShapeProbe.file_req": "File",
+  "ShapeProbe.array_opt": "Array[String]? (optional)",
+  "ShapeProbe.named_optional_member_req": {
+    "optional": "String",
+    "count": "Int"
+  }
+}
+

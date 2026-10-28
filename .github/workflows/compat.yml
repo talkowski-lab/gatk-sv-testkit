@@ -1,0 +1,55 @@
+name: compat
+
+# Is this kit still compatible with gatk-sv? Checks gatk-sv `main` as a branch ref, the newest release
+# tag as a baseline ref, and every ref compat.json records, in its recorded role. Reads gatk-sv with git
+# only; nothing is written. docs/compatibility.md says what each role requires.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - profiles/**
+      - compat.json
+      - scripts/check_compat.py
+      - scripts/derive_profile.py
+      - kit/module_profile.py
+
+permissions:
+  contents: read
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: clone gatk-sv
+        run: git clone --quiet --filter=blob:none https://github.com/broadinstitute/gatk-sv.git "$RUNNER_TEMP/gatk-sv"
+
+      - name: check
+        env:
+          GSVTK_GATK_SV_CHECKOUT: ${{ runner.temp }}/gatk-sv
+        run: |
+          rc=0
+          latest="$(git -C "$GSVTK_GATK_SV_CHECKOUT" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+(\.[0-9]+)*$' | head -1)"
+          {
+            echo "origin/main branch"
+            [ -n "$latest" ] && echo "$latest baseline"
+            python -c 'import json; [print(e["ref"], e["role"]) for e in json.load(open("compat.json"))["refs"]]' \
+              | sed 's#^main #origin/main #'
+          } | sort -u | while read -r ref role; do
+            echo "::group::$ref ($role)"
+            python scripts/check_compat.py check --ref "$ref" --role "$role" || echo "FAILED $ref $role" >> "$RUNNER_TEMP/failed"
+            echo "::endgroup::"
+          done
+          if [ -s "$RUNNER_TEMP/failed" ]; then
+            cat "$RUNNER_TEMP/failed"
+            rc=1
+          fi
+          exit $rc

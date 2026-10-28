@@ -1,0 +1,1 @@
+WARNING: Unexpected input provided: ShapeProbe.struct_opt.label (expected inputs: [ShapeProbe.map_req, ShapeProbe.array_of_struct_req, ShapeProbe.plain_req, ShapeProbe.struct_opt, ShapeProbe.defaulted, ShapeProbe.struct_req, ShapeProbe.struct_defaulted, ShapeProbe.plain_opt, ShapeProbe.array_req, ShapeProbe.file_req, ShapeProbe.array_opt, ShapeProbe.named_optional_member_req])

@@ -1,0 +1,39 @@
+{
+ "_about": [
+  "HAND-AUTHORED SYNTHETIC FIXTURE (real shapes, PLACEHOLDER values): the DISAGREEING sandbox.",
+  "Identical to checkinputs-GenotypeBatch-entity-capture-complete.json except that this sandbox's chain",
+  "outputs sit under `_h2h` instead of `_new` -- which is exactly what a rerun launched with `--tag h2h`",
+  "leaves, or a workspace whose GSVTK_NEW_SUFFIX was exported for one run and not this one. Every other",
+  "row/attribute the step-10 config reads is present, so the ONLY thing wrong with this workspace is the",
+  "suffix the config asks for. batch_check_inputs must say that, not 'missing input'.",
+  "Values are PLACEHOLDER strings: real attribute values are object paths, and printing them would put",
+  "workspace coordinates in a terminal, a CI log and any file this check gets shelled into."
+ ],
+ "entities": [
+  {
+   "entityName": "EXAMPLE_SET_A",
+   "entityType": "sample_set",
+   "attributes": {
+    "sample_set_id": "EXAMPLE-PLACEHOLDER",
+    "merged_pesr_vcf_frz": "EXAMPLE-PLACEHOLDER",
+    "median_cov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_bincov_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_PE_frz": "EXAMPLE-PLACEHOLDER",
+    "merged_SR_frz": "EXAMPLE-PLACEHOLDER",
+    "outlier_filtered_pesr_vcf_h2h": "EXAMPLE-PLACEHOLDER",
+    "cutoffs_h2h": "EXAMPLE-PLACEHOLDER"
+   }
+  }
+ ],
+ "workspace": {
+  "namespace": "your-namespace",
+  "name": "your-workspace",
+  "attributes": {
+   "primary_contigs_list": "EXAMPLE-PLACEHOLDER",
+   "reference_dict": "EXAMPLE-PLACEHOLDER",
+   "depth_exclusion_intervals_unused": "EXAMPLE-PLACEHOLDER",
+   "bin_exclude": "EXAMPLE-PLACEHOLDER",
+   "gatk_docker": "\"EXAMPLE-PLACEHOLDER\""
+  }
+ }
+}

@@ -1,0 +1,2224 @@
+#!/usr/bin/env python3
+"""Offline probes for defects a review of this toolkit confirmed, and for their fixes.
+
+Each probe drives a guard through the invocation that used to defeat it, asserts that the guard
+fires, and runs a positive control proving the guarded path was reachable at all.
+
+Nothing here contacts Terra or GCE, needs credentials, or writes outside one temp directory: the
+Terra layer is replaced with a recorder that counts requests. Inherited `GSVTK_*` variables are
+cleared before the first probe so no probe reads this machine's setup (`--env` keeps them).
+
+    python scripts/probe_fixes.py            # all probes, tally + nonzero on any failure
+    python scripts/probe_fixes.py -v         # also print each probe's own detail lines
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import importlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "kit"))
+sys.path.insert(0, str(ROOT / "terra"))
+
+VERBOSE = False
+_PROFILE_N = 0
+TMP = Path(tempfile.mkdtemp(prefix="gsvtk-probe-"))
+
+
+def say(msg: str) -> None:
+    if VERBOSE:
+        print(f"        {msg}")
+
+
+def tmpdir(name: str) -> Path:
+    p = TMP / name
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+@contextlib.contextmanager
+def env(**kv):
+    """Set (or with None, unset) environment variables for the block."""
+    old = {k: os.environ.get(k) for k in kv}
+    for k, v in kv.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def fresh(profile: dict, *modules: str):
+    """Point GSVTK_CONFIG at `profile` and (re)import `modules` so they read it.
+
+    Config is read at import time, so changing a key means re-importing. WORK always points at the
+    temp tree so a probe never writes into a real $GSVTK_WORK.
+    """
+    import config
+    global _PROFILE_N
+    _PROFILE_N += 1
+    i = _PROFILE_N
+    path = TMP / f"profile-{i}.env"
+    lines = dict(profile)
+    lines.setdefault("GSVTK_WORK", str(TMP / "work"))
+    path.write_text("".join(f"{k}={v}\n" for k, v in lines.items()))
+    os.environ["GSVTK_CONFIG"] = str(path)
+    importlib.reload(config)
+    mods = []
+    for name in modules:
+        mods.append(importlib.reload(sys.modules[name])
+                    if name in sys.modules else importlib.import_module(name))
+    return mods
+
+
+def have(dep: str) -> bool:
+    try:
+        return importlib.util.find_spec(dep) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+class Skip(Exception):
+    """A probe whose optional dependency is not installed (not a failure); `remedy` names the fix."""
+
+    def __init__(self, reason, remedy="make setup / pip install -r requirements.txt"):
+        super().__init__(reason)
+        self.remedy = remedy
+
+
+# ---------------------------------------------------------------- Terra recorder
+REQUESTS: list = []
+# Pristine fiss callables, snapshotted before the recorder replaces them. Reloading `terra` does not
+# restore them: `firecloud.api` is the same module object.
+REAL: dict = {}
+
+
+class _Resp:
+    status_code = 201
+    text = '{"name":"recorded"}'
+
+    def json(self):
+        return {"name": "recorded", "invalid": [], "extraInputs": []}
+
+
+def install_recorder(terra) -> None:
+    """Replace every fiss call the rerun tool makes with a counter, so "nothing sent" is observable."""
+    def rec(name):
+        def f(*a, **k):
+            # Keep raw args so probes can inspect the bodies that would have been sent.
+            REQUESTS.append((name,) + a)
+            return _Resp()
+        return f
+    for n in ("create_workspace_config", "overwrite_workspace_config", "validate_config",
+              "create_submission", "list_submissions", "get_submission",
+              "abort_submission",
+              # read back by batch_rerun_step before it submits
+              "get_workspace_config"):
+        REAL.setdefault(n, getattr(terra.fapi, n))     # see REAL above: snapshot first, then replace
+        setattr(terra.fapi, n, rec(n))
+
+    # Reads get a 200: terra.entity_exists accepts only 200/404 and raises on the POST-style 201.
+    class _ReadResp:
+        status_code = 200
+        text = '{"entityName": "probe-row", "attributes": {}}'
+
+        def json(self):
+            return {"entityName": "probe-row", "attributes": {}}
+
+    def rec_read(name):
+        def f(*a, **k):
+            REQUESTS.append((name,) + a)
+            return _ReadResp()
+        return f
+
+    REAL.setdefault("get_entity", getattr(terra.fapi, "get_entity"))
+    terra.fapi.get_entity = rec_read("get_entity")
+
+
+# ------------------------------------------------------------------ the probes
+def probe_rerun_guards() -> str:
+    """batch_rerun_step must refuse an unresolved target and the shared baseline workspace."""
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import terra
+    install_recorder(terra)
+    base_ns = importlib.reload(importlib.import_module("config")).get("BASELINE_NAMESPACE")
+    base_ws = importlib.import_module("config").get("BASELINE_WORKSPACE")
+    if not (base_ns and base_ws):
+        raise Skip("baseline workspace defaults are unset in this profile")
+
+    no_target = {"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch"}
+    sandbox = dict(no_target, GSVTK_TERRA_NAMESPACE="probe-sandbox-ns",
+                   GSVTK_TERRA_WORKSPACE="probe-sandbox-ws")
+    baseline = dict(no_target, GSVTK_TERRA_NAMESPACE=base_ns, GSVTK_TERRA_WORKSPACE=base_ws)
+
+    refused = []
+    # (a) unresolved target: validate and submit must exit 4 naming a key, sending nothing.
+    (bc, r) = fresh(no_target, "batch_configs", "batch_rerun_step")
+    r.CONFIRMED = r.ALLOW_UNPINNED = True
+    for mode in ("validate", "submit"):
+        REQUESTS.clear()
+        try:
+            getattr(r, mode)()
+            raise AssertionError(f"{mode}() reached the network with no target resolved")
+        except SystemExit as e:
+            if e.code != 4:
+                raise AssertionError(f"{mode}() exited {e.code}, expected 4 (name the missing key)")
+            if REQUESTS:
+                raise AssertionError(f"{mode}() sent {len(REQUESTS)} request(s): {REQUESTS}")
+        refused.append(mode)
+
+    # (b) target IS the shared baseline workspace: create must refuse before any request.
+    (bc, r) = fresh(baseline, "batch_configs", "batch_rerun_step")
+    r.CONFIRMED = r.ALLOW_UNPINNED = True
+    REQUESTS.clear()
+    try:
+        r.create()
+        raise AssertionError("create() POSTed a method config into the shared baseline workspace")
+    except (SystemExit, terra.TerraError) as e:
+        if "baseline workspace" not in str(e):
+            raise AssertionError(f"create() refused for the wrong reason: {str(e)[:120]}")
+        if REQUESTS:
+            raise AssertionError(f"create() sent {len(REQUESTS)} request(s): {REQUESTS}")
+    refused.append("create(shared baseline)")
+
+    # POSITIVE CONTROL: the same create() against a real sandbox posts exactly one config.
+    (bc, r) = fresh(sandbox, "batch_configs", "batch_rerun_step")
+    r.CONFIRMED = r.ALLOW_UNPINNED = True
+    REQUESTS.clear()
+    r.create()
+    if len(REQUESTS) != 1:
+        raise AssertionError(f"control: sandbox create sent {len(REQUESTS)} requests, expected 1")
+    say(f"control: posted {REQUESTS[0][0]} into {REQUESTS[0][1]}/{REQUESTS[0][2]}")
+    return f"{len(refused)} states refused with 0 requests, control posted 1"
+
+
+def probe_stage_batch_row() -> str:
+    """stage_inputs must read the configured sample_set row, not one hardcoded batch name."""
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    manifest = {"steps": {}, "entities": {"sample_set": {
+        "probe_batch": {"cutoffs": "gs://probe-bucket/probe.cutoffs",
+                        "median_cov": "gs://probe-bucket/probe_medianCov.transposed.bed"},
+        "other_batch": {"cutoffs": "gs://probe-bucket/other.cutoffs"}}}}
+
+    (si,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_BATCH": "probe_batch"}, "stage_inputs")
+    if si.BATCH != "probe_batch":
+        raise AssertionError(f"stage_inputs.BATCH is {si.BATCH!r}, not the configured GSVTK_BATCH")
+    want = si.collect(manifest, set(), ["cutoffs", "median_cov"])
+    if set(want) != {"cutoffs", "median_cov"}:
+        raise AssertionError(f"configured batch selected {sorted(want)}, expected both attributes")
+    if want["cutoffs"] != "gs://probe-bucket/probe.cutoffs":
+        raise AssertionError(f"selected the wrong object: {want['cutoffs']}")
+    say(f"control: selected {len(want)} objects from row 'probe_batch'")
+
+    # An absent batch must select nothing AND say so.
+    (si,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_BATCH": "absent_batch"}, "stage_inputs")
+    buf = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            want2 = si.collect(manifest, set(), ["cutoffs"])
+    except SystemExit as e:
+        code, want2 = e.code, {}
+    out = buf.getvalue() + f" exit={code}"
+    if want2:
+        raise AssertionError("a batch row that does not exist selected objects anyway")
+    if code not in (1, 2):
+        raise AssertionError(f"a missing batch row exited {code!r}: selecting nothing on a wrong "
+                             f"GSVTK_BATCH must stop the run, not exit 0")
+    if "absent_batch" not in out or "probe_batch" not in out:
+        raise AssertionError(f"the refusal did not name the batch and the rows present: {out!r}")
+    return f"configured row -> {len(want)} objects; absent row -> exit {code} naming the rows"
+
+
+def probe_adopt_fallback() -> str:
+    """When the hardlink cannot be made, the local copy must be COPIED, not raise TypeError."""
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    (si,) = fresh({"GSVTK_PROJECT": "p"}, "stage_inputs")
+    src = tmpdir("adopt_src")
+    binlog = tmpdir("adopt_bin")
+    dest_dir = tmpdir("adopt_dest")
+    cand = src / "probe.cutoffs"
+    cand.write_bytes(b"probe" * 10)
+    log = binlog / "calls.log"
+    log.write_text("")
+    stub = binlog / "gsutil"
+    # Records its argv, then behaves like `gsutil -m cp -n SRC DEST` for our one use.
+    stub.write_text("#!/bin/sh\n"
+                    "printf '%s\\n' \"$*\" >> \"$GSV_STUB_LOG\"\n"
+                    "[ \"$1\" = \"-m\" ] && shift\n"
+                    "if [ -f \"$3\" ] && [ ! -e \"$4\" ]; then cp \"$3\" \"$4\"; fi\n"
+                    "exit 0\n")
+    stub.chmod(0o755)
+
+    si.remote_size = lambda uri: cand.stat().st_size
+    si.verify_against_remote = lambda local, uri, size: "crc32c:ok"
+    uri = "gs://probe-bucket/probe.cutoffs"
+    os.environ["GSV_STUB_LOG"] = str(log)
+    with env(PATH=f"{binlog}{os.pathsep}{os.environ['PATH']}"):
+        # (1) hardlink works -> adoption links, and the copy path is never touched.
+        dest_ok = dest_dir / "linked.cutoffs"
+        got = si.adopt_from_local(uri, [str(src)], str(dest_ok))
+        if not got or got["path"] != str(cand):
+            raise AssertionError(f"hardlink adoption returned {got!r}")
+        if os.stat(dest_ok).st_ino != os.stat(cand).st_ino:
+            raise AssertionError("control: adoption did not hardlink the candidate")
+        if log.read_text().strip():
+            raise AssertionError("control: gsutil ran even though the hardlink succeeded")
+        say("control: hardlinked (same inode), no copy attempted")
+
+        # (2) force the EXDEV that a --link-dir on another volume really produces.
+        real_link = os.link
+
+        def exdev(*a, **k):
+            raise OSError(18, "Invalid cross-device link", a[0] if a else "")
+        os.link = exdev
+        try:
+            dest_copy = dest_dir / "copied.cutoffs"
+            log.write_text("")
+            got2 = si.adopt_from_local(uri, [str(src)], str(dest_copy))
+        finally:
+            os.link = real_link
+        calls = [l for l in log.read_text().splitlines() if l.strip()]
+        if not got2:
+            raise AssertionError("cross-device adoption returned nothing")
+        if len(calls) != 1 or "cp" not in calls[0] or str(dest_copy) not in calls[0]:
+            raise AssertionError(f"cross-device adoption ran gsutil {calls}, expected one cp to "
+                                 f"{dest_copy}")
+        if not dest_copy.exists():
+            raise AssertionError("the copy fallback did not produce the destination file")
+    return "linked when possible (0 copies), copied via gsutil when os.link fails (1 call)"
+
+
+def _wdl_repo(name: str, second_task: str) -> Path:
+    """A synthetic gatk-sv-shaped checkout: <repo>/wdl/{Entry,B,C}.wdl."""
+    repo = tmpdir(name)
+    wdl = repo / "wdl"
+    wdl.mkdir(exist_ok=True)
+    (wdl / "Entry.wdl").write_text(
+        'version 1.0\nimport "B.wdl"\nimport "C.wdl"\n\nworkflow Entry {\n  call Dup\n'
+        f"  call {second_task}\n}}\n")
+    (wdl / "B.wdl").write_text("version 1.0\n\ntask Dup {\n  command {}\n}\n")
+    (wdl / "C.wdl").write_text(f"version 1.0\n\ntask {second_task} {{\n  command {{}}\n}}\n")
+    return repo
+
+
+def probe_wdl_flat_dup() -> str:
+    """Two different files declaring one name must be refused, not emitted twice."""
+    dup = _wdl_repo("flat_dup", "Dup")
+    (wf,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_GATK_SV_CHECKOUT": str(dup)}, "wdl_flat")
+    try:
+        wf.flatten("Entry")
+        raise AssertionError("flattened a document declaring task Dup twice")
+    except SystemExit as e:
+        msg = str(e)
+        if "B.wdl" not in msg or "C.wdl" not in msg:
+            raise AssertionError(f"refused without naming both files: {msg[:160]}")
+        say(f"refused: {msg.splitlines()[0]}")
+
+    ok = _wdl_repo("flat_ok", "Other")
+    (wf,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_GATK_SV_CHECKOUT": str(ok)}, "wdl_flat")
+    text = wf.flatten("Entry")
+    tasks = [l for l in text.splitlines() if l.startswith("task ")]
+    wfs = [l for l in text.splitlines() if l.startswith("workflow ")]
+    if len(tasks) != 2 or len(wfs) != 1:
+        raise AssertionError(f"control: expected 2 tasks + 1 workflow, got {len(tasks)} + {len(wfs)}")
+    return f"collision refused naming both files; control flattened {len(tasks)} tasks"
+
+
+def probe_publish_guard() -> str:
+    """attrs must refuse to publish without a PASSED verify on record -- all three states."""
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    (bf,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"}, "batch_freeze")
+    d = tmpdir("publish")
+    missing = d / "nope.json"
+    bad = d / "failed.json"
+    bad.write_text(json.dumps({"verified": False, "mismatches": [{"attr": "merged_PE"}]}))
+    corrupt = d / "corrupt.json"
+    corrupt.write_text("{not json")
+    good = d / "good.json"
+    good.write_text(json.dumps({"verified": True, "mismatches": []}))
+
+    n_refused = 0
+    for label, path in (("no manifest", missing), ("failed verify", bad), ("unreadable", corrupt)):
+        try:
+            bf.publish_guard(str(path))
+            raise AssertionError(f"publish_guard let {label} through")
+        except SystemExit as e:
+            if "verify" not in str(e):
+                raise AssertionError(f"{label}: refusal does not name `verify`: {str(e)[:100]}")
+            n_refused += 1
+            say(f"refused {label}")
+    bf.publish_guard(str(good))                                  # must NOT raise
+    bf.publish_guard(str(missing), allow_unverified=True)         # explicit escape, prints a note
+    return f"{n_refused} unproven states refused; verified:true and --allow-unverified pass"
+
+
+def _load_config_copy(name: str):
+    """Load kit/gsvtk-config as a second, independently patchable module instance."""
+    path = ROOT / "kit" / "gsvtk-config"
+    spec = importlib.util.spec_from_loader(name, importlib.machinery.SourceFileLoader(name, str(path)))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def probe_miniwdl_resolver() -> str:
+    """The checker must be found in the project venv, not reported absent.
+
+    Covers running `.venv/bin/python` without an activated venv, where `shutil.which` sees nothing.
+    The synthetic venv checks need nothing installed; only the final CLI check needs a real miniwdl,
+    and it skips when none is installed (miniwdl comes from requirements-dev.txt).
+    """
+    fake = tmpdir("fake_repo/.venv/bin")
+    fake.mkdir(parents=True, exist_ok=True)
+    exe = fake / "miniwdl"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    empty = tmpdir("empty_repo")
+    mod = _load_config_copy("gsvtk_config_probe")
+    orig_repo, orig_exe = mod.REPO_ROOT, sys.executable
+    try:
+        with env(PATH=str(tmpdir("empty_path")), MINIWDL=None):
+            mod.REPO_ROOT = tmpdir("fake_repo")
+            sys.executable = str(fake / "python")            # sibling-of-interpreter candidate
+            found = mod.find_miniwdl()
+            if found != str(exe):
+                raise AssertionError(f"resolver returned {found!r}, expected the venv script {exe}")
+            say(f"resolved through the venv: {found}")
+
+            sys.executable = str(empty / "python")            # nothing anywhere
+            mod.REPO_ROOT = empty
+            none = mod.find_miniwdl()
+            if none:
+                raise AssertionError(f"resolver invented a path: {none!r}")
+
+            with env(MINIWDL=str(exe)):                       # explicit override wins
+                if mod.find_miniwdl() != str(exe):
+                    raise AssertionError("MINIWDL override ignored")
+    finally:
+        mod.REPO_ROOT, sys.executable = orig_repo, orig_exe
+    cli = subprocess.run([sys.executable, str(ROOT / "kit" / "gsvtk-config"), "miniwdl"],
+                         capture_output=True, text=True)
+    if cli.returncode != 0:
+        raise AssertionError(f"`gsvtk-config miniwdl` exited {cli.returncode}: {cli.stderr[:120]}")
+    if not cli.stdout.strip():
+        # "not installed anywhere" is a correct answer; the assertions above already ran.
+        raise Skip("miniwdl", remedy="pip install -r requirements-dev.txt")
+    if not os.access(cli.stdout.strip(), os.X_OK):
+        raise AssertionError(f"the CLI resolver printed a non-executable: {cli.stdout!r}")
+    return f"venv sibling resolved, absent -> '' , override honoured; CLI -> {cli.stdout.strip()}"
+
+
+def probe_help_writes_nothing() -> str:
+    """`--help` must not create scratch directories (it is what import-time path building did)."""
+    tools = ["terra/wdl_flat.py", "examples/recompute_het_population.py"]
+    if have("firecloud"):
+        tools += ["terra/batch_configs.py", "terra/batch_freeze.py", "terra/stage_inputs.py",
+                  "terra/recon.py"]
+    work = TMP / "help_work"
+    profile = TMP / "help_profile.env"
+    profile.write_text("GSVTK_PROJECT=probe-project\n")
+    ran = 0
+    for t in tools:
+        r = subprocess.run([sys.executable, str(ROOT / t), "--help"], capture_output=True,
+                           text=True, env=dict(os.environ, GSVTK_WORK=str(work),
+                                               GSVTK_CONFIG=str(profile)))
+        if r.returncode != 0:
+            raise AssertionError(f"{t} --help exited {r.returncode}: {(r.stderr or r.stdout)[:160]}")
+        ran += 1
+    if work.exists():
+        left = sorted(str(p.relative_to(work)) for p in work.rglob("*"))
+        raise AssertionError(f"--help created {work} ({left}) while only printing usage")
+    # POSITIVE CONTROL: the same WORK really is writable/creatable when a tool needs it.
+    r = subprocess.run([sys.executable, str(ROOT / "kit" / "gsvtk-config"), "work", "runs/probe"],
+                       capture_output=True, text=True,
+                       env=dict(os.environ, GSVTK_WORK=str(work), GSVTK_CONFIG=str(profile)))
+    if r.returncode != 0 or not Path(r.stdout.strip()).is_dir():
+        raise AssertionError(f"control: gsvtk-config work did not create the directory ({r.stdout!r})")
+    shutil.rmtree(work, ignore_errors=True)
+    return f"{ran} tools print usage, 0 directories created; control created one"
+
+
+def probe_dstore_drift() -> str:
+    """batch_rerun_step rebuilds the Dockstore URI by hand; it must equal batch_configs'."""
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    (bc, r) = fresh({"GSVTK_PROJECT": "p", "GSVTK_BRANCH": "v1.1.1"}, "batch_configs",
+                    "batch_rerun_step")
+    bc.BRANCH = "probe-branch-sha"
+    a, b = r.dstore("probe-branch-sha"), bc.dockstore("GenotypeBatch")
+    if a != b:
+        raise AssertionError(f"dstore() drifted from dockstore(): {a} != {b}")
+    if "%2F" not in a["methodUri"] or a["methodUri"].count("%2F") != 3:
+        raise AssertionError(f"methodUri is not the %-encoded form Rawls expects: {a['methodUri']}")
+    if r.dstore("other-version") == a:
+        raise AssertionError("control: the version is not actually part of the constructed URI")
+    return f"identical for one version, {a['methodUri'].count('%2F')} %2F encodings, differs on another"
+
+
+
+def _fixture_wdl(dirpath: Path, drop, add_required: bool) -> None:
+    """A one-workflow WDL tree declaring what the config under test binds.
+
+    `drop` removes one declared input so its binding becomes EXTRA; `add_required` adds an unbound
+    required File so the MISSING direction is exercised too.
+    """
+    bc = sys.modules["batch_configs"]
+    declared = sorted(k.split(".")[-1] for k in bc.CONFIGS["10-GenotypeBatch"]["inputs"]
+                      if k.startswith("GenotypeBatch."))
+    declared = [d for d in declared if d != drop]
+    body = "\n".join(f"    File {d}" if d != "batch" else "    String batch" for d in declared)
+    # Declare the config's outputs too (leaf names, deduped) so the output check stays quiet.
+    outs = list(dict.fromkeys(k.split(".")[-1] for k in bc.CONFIGS["10-GenotypeBatch"]["outputs"]))
+    out_block = "  output {\n" + "".join(f"    File {o} = probe_task.out\n" for o in outs) + "  }\n"
+    if add_required:
+        body += "\n    File probe_required_unbound"
+    (dirpath / "wdl").mkdir(parents=True, exist_ok=True)
+    (dirpath / "wdl" / "GenotypeBatch.wdl").write_text(
+        "version 1.1\n"
+        "workflow GenotypeBatch {\n"
+        "  input {" + "\n" + body + "\n  }\n"
+        "  call probe_task\n"
+        + out_block +
+        "}\n"
+        'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
+        '  runtime { docker: "x" }\n}\n')
+
+
+def _fixture_tree(dirpath: Path, drop: str | None = None) -> None:
+    """Every workflow the toolkit builds, each declaring exactly the keys its config binds.
+
+    `preflight()` compares all configs, and in a one-file tree the others report CANNOT CHECK, which
+    would make any refusal ambiguous. `drop` removes one declared input.
+    """
+    bc = sys.modules["batch_configs"]
+    (dirpath / "wdl").mkdir(parents=True, exist_ok=True)
+    for name, spec in bc.CONFIGS.items():
+        wf = spec["workflow"]
+        lines = []
+        for k, val in spec["inputs"].items():
+            leaf = k.split(".")[-1]
+            if leaf == drop:
+                continue
+            kind = "Int" if str(val).isdigit() else "String" if leaf == "batch" else "File"
+            lines.append(f"    {kind} {leaf}")
+        (dirpath / "wdl" / f"{wf}.wdl").write_text(
+            "version 1.1\n"
+            f"workflow {wf} {{\n"
+            "  input {" + "\n" + "\n".join(lines) + "\n  }\n"
+            "  call probe_task\n"
+            '  output {\n' + "".join(f"    File {k.split('.')[-1]} = probe_task.out\n"
+                                     for k in dict.fromkeys(spec["outputs"])) + '  }\n'
+            "}\n"
+            'task probe_task {\n  command <<< echo x > out >>>\n  output { File out = "out" }\n'
+            '  runtime { docker: "x" }\n}\n')
+
+
+def probe_map_vs_wdl() -> str:
+    """batch_configs must refuse to POST keys the target ref's WDL does not declare.
+
+    CONFIGS reflects one branch's WDL signature while GSVTK_BRANCH only picks the Dockstore URL, so a
+    branch-only input (`GenotypeBatch.training_vcf`) pointed at main is rejected by Rawls at submission.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch"},
+          "terra", "batch_configs")
+    install_recorder(sys.modules["terra"])
+    out = io.StringIO()
+
+    # Control: a tree declaring everything the config binds must read clean.
+    ok = TMP / "wdl-ok"
+    _fixture_wdl(ok, None, False)
+    with contextlib.redirect_stdout(out):
+        rc_ok = sys.modules["batch_configs"].check_maps(str(ok), only="10-GenotypeBatch")
+    if rc_ok != 0:
+        raise AssertionError(f"the check rejected a WDL declaring every bound key: "
+                             f"{out.getvalue()[-400:]}")
+
+    # Now become main: drop training_vcf from the declarations, add a required input nobody binds.
+    bad = TMP / "wdl-bad"
+    _fixture_wdl(bad, "training_vcf", True)
+    out.truncate(0)
+    out.seek(0)
+    with contextlib.redirect_stdout(out):
+        rc_bad = sys.modules["batch_configs"].check_maps(str(bad), only="10-GenotypeBatch")
+    txt = out.getvalue()
+    if rc_bad == 0:
+        raise AssertionError("a config key the WDL does not declare was accepted")
+    if "EXTRA  GenotypeBatch.training_vcf" not in txt:
+        raise AssertionError(f"the extra input was not named: {txt[-300:]}")
+    if "KNOWN branch-only" not in txt:
+        raise AssertionError("a known branch-only input was reported as unknown -- the table beside "
+                             "CONFIGS is what tells the two apart")
+    if "MISSING GenotypeBatch.probe_required_unbound" not in txt:
+        raise AssertionError("the required-but-unbound half of the check did not fire")
+
+    # create() must refuse before any request; the override phase proves it would otherwise POST.
+    # The tree declares all five workflows so the refusal is about the extra key, and the ref goes in
+    # GSVTK_BRANCH because `--against` is refused on commands that POST.
+    repo, ref = _fixture_repo("fakerepo", "training_vcf", all_workflows=True)
+    argv_save, env_save = sys.argv, os.environ.get("GSVTK_GATK_SV_CHECKOUT")
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": ref}, "terra", "batch_configs")
+    bc = sys.modules["batch_configs"]
+    install_recorder(sys.modules["terra"])           # fresh() re-imported terra: re-patch the calls
+    try:
+        REQUESTS.clear()
+        sys.argv = ["batch_configs.py", "create", "--confirm"]
+        refused = None
+        with contextlib.redirect_stdout(out):
+            try:
+                bc.create()
+            except SystemExit as e:
+                refused = str(e)
+        if refused is None or "do not fit the WDL" not in refused:
+            raise AssertionError(f"create() posted anyway: {refused!r} / {out.getvalue()[-300:]}")
+        if "EXTRA  GenotypeBatch.training_vcf" not in out.getvalue():
+            raise AssertionError("create() refused, but not for the branch-only key -- with a "
+                                 "single-workflow fixture it refused for CANNOT CHECK instead: "
+                                 f"{out.getvalue()[-300:]}")
+        if REQUESTS:
+            raise AssertionError(f"create() reached Terra before refusing: {REQUESTS}")
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--allow-unknown-inputs"]
+        REQUESTS.clear()
+        with contextlib.redirect_stdout(out):
+            try:
+                bc.create()
+            except (Exception, SystemExit):       # recorder answers 201; other noise is beside it --
+                pass                              # and SystemExit is NOT an Exception, so catch both
+        sent = len(REQUESTS)
+        if not sent:
+            raise AssertionError("control: with the override taken create() still sent nothing, so "
+                                 "the refusal above proves nothing about the guard")
+        said = "override" in out.getvalue().lower()
+    finally:
+        sys.argv = argv_save
+        if env_save is None:
+            os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+        else:
+            os.environ["GSVTK_GATK_SV_CHECKOUT"] = env_save
+    return (f"declared-everything -> clean; main-shaped tree -> extra named + labelled branch-only "
+            f"+ unbound required caught; create refused naming that key with 0 requests (override "
+            f"sent {sent}, said so: {said})")
+
+
+def _fixture_repo(name: str, drop: str | None, all_workflows: bool = False):
+    """A committed git repo holding the fixture WDL, so `git archive <ref>` works offline.
+
+    `all_workflows` writes every config's workflow (see `_fixture_tree`).
+    """
+    repo = TMP / name
+    if all_workflows:
+        _fixture_tree(repo, drop)
+    else:
+        _fixture_wdl(repo, drop, False)
+    env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
+               GIT_COMMITTER_EMAIL="p@p")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "fixture"]):
+        subprocess.run(cmd, cwd=str(repo), env=env, check=True, capture_output=True)
+    return repo, subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=str(repo),
+                                capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _fixture_two_refs(name: str, all_workflows: bool = False):
+    """One checkout, two named refs: `bad-ref` lacks training_vcf, `ok-ref` declares it.
+
+    Lets a probe check WHICH ref a guard compared. `all_workflows` writes all five workflows to both.
+    """
+    repo = TMP / name
+    fresh({"GSVTK_PROJECT": "probe"}, "terra", "batch_configs")   # fixture text comes from CONFIGS
+    if all_workflows:
+        _fixture_tree(repo, "training_vcf")
+    else:
+        _fixture_wdl(repo, "training_vcf", False)
+    env = dict(os.environ, GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p", GIT_COMMITTER_NAME="p",
+               GIT_COMMITTER_EMAIL="p@p")
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=str(repo), env=env, check=True, capture_output=True)
+
+    git("init", "-q"); git("add", "-A"); git("commit", "-qm", "bad"); git("branch", "bad-ref")
+    # now declare everything the map binds
+    if all_workflows:
+        _fixture_tree(repo, None)
+    else:
+        _fixture_wdl(repo, None, False)
+    git("add", "-A"); git("commit", "-qm", "ok"); git("branch", "ok-ref")
+    return repo
+
+
+def probe_rerun_map_guard() -> str:
+    """batch_rerun_step must run the same WDL pre-check, because it is the path that submits."""
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    # Import first (the fixture is generated from CONFIGS), then reload with the fixture's ref.
+    fresh({"GSVTK_PROJECT": "probe"}, "terra", "batch_configs")
+    repo = _fixture_two_refs("fakerepo-rerun", all_workflows=True)
+    ref = "bad-ref"
+    # The checkout goes in the environment, as a user would export it.
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": ref},
+          "terra", "batch_configs", "batch_rerun_step")
+    rr = sys.modules["batch_rerun_step"]
+    assert rr.tc.VERIFY_REF == ref, ("rerun compares bindings against "
+                                     f"{rr.tc.VERIFY_REF!r}, not the ref its config runs ({ref})")
+    install_recorder(sys.modules["terra"])
+    rr.CONFIRMED = True                      # what `--confirm` sets in main()
+    out, argv_save = io.StringIO(), sys.argv
+    try:
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm"]
+        REQUESTS.clear()
+        refused = None
+        with contextlib.redirect_stdout(out):
+            try:
+                rr.create()
+            except SystemExit as e:
+                refused = str(e)
+        if refused is None or "do not fit the WDL" not in refused:
+            raise AssertionError(f"rerun create() POSTed despite an undeclared key: {refused!r}")
+        if REQUESTS:
+            raise AssertionError(f"rerun create() reached Terra before refusing: {REQUESTS}")
+        named = "10-GenotypeBatch" in out.getvalue() or "GenotypeBatch" in out.getvalue()
+        # Control: with the override the same call DOES post. Catch SystemExit too, so a downstream
+        # refusal (e.g. the image-pin guard) does not read as a probe failure.
+        rr.ALLOW_UNPINNED = True
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm", "--allow-unknown-inputs"]
+        REQUESTS.clear()
+        with contextlib.redirect_stdout(out):
+            try:
+                rr.create()
+            except (Exception, SystemExit):
+                pass
+        sent = len(REQUESTS)
+        used_ref = ref in out.getvalue()
+    finally:
+        sys.argv = argv_save
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+    if not sent:
+        raise AssertionError("control: with the override the rerun path sent nothing, so the "
+                             "refusal above proves nothing")
+
+    # Which ref was graded? GSV_WDL_VERSION (what the config runs) lacks the key; GSVTK_BRANCH has it.
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    os.environ["GSV_WDL_VERSION"] = "bad-ref"
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "ok-ref"},
+          "terra", "batch_configs", "batch_rerun_step")
+    rr2 = sys.modules["batch_rerun_step"]
+    install_recorder(sys.modules["terra"])
+    rr2.CONFIRMED = rr2.ALLOW_UNPINNED = True
+    out2 = io.StringIO()
+    try:
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm"]
+        REQUESTS.clear()
+        refused2 = None
+        with contextlib.redirect_stdout(out2):
+            try:
+                rr2.create()
+            except SystemExit as e:
+                refused2 = str(e)
+        graded_pin = (refused2 is not None and "do not fit the WDL" in refused2
+                      and "bad-ref" in out2.getvalue())
+    finally:
+        os.environ.pop("GSV_WDL_VERSION", None)
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+    if not graded_pin:
+        raise AssertionError("the rerun pre-check graded GSVTK_BRANCH (ok-ref, which declares the "
+                             f"key) instead of the ref the config runs (GSV_WDL_VERSION=bad-ref): "
+                             f"{refused2!r}")
+
+    # submit gets the same check: the workspace config may come from an older map or another ref.
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)     # popped by phase 2 above
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "bad-ref"},
+          "terra", "batch_configs", "batch_rerun_step")
+    rr3 = sys.modules["batch_rerun_step"]
+    install_recorder(sys.modules["terra"])
+    rr3.CONFIRMED = True
+    out3 = io.StringIO()
+    sys.argv = ["batch_rerun_step.py", "submit", "--confirm"]
+    REQUESTS.clear()
+    refused3 = None
+    try:
+        with contextlib.redirect_stdout(out3):
+            try:
+                rr3.submit()
+            except SystemExit as e:
+                refused3 = str(e)
+    finally:
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+    if refused3 is None or "do not fit the WDL" not in refused3:
+        raise AssertionError(f"rerun submit() reached the money path despite the mismatch: "
+                             f"{refused3!r}")
+    if REQUESTS:
+        raise AssertionError(f"rerun submit() requested Terra before refusing: {REQUESTS}")
+
+    # Run the real CLI: its parser rejects unknown options, so the flag must be known to it. This also
+    # pins the stdout/stderr contract: `show` prints JSON on stdout and notices on stderr.
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, GSVTK_GATK_SV_CHECKOUT=str(repo), GSVTK_BRANCH="bad-ref",
+               GSV_WDL_VERSION="bad-ref")
+
+    def cli(extra):
+        r = subprocess.run([sys.executable, str(root / "terra" / "batch_rerun_step.py"), "show",
+                            *extra], env=env, capture_output=True, text=True, cwd=str(root))
+        try:
+            keys = json.loads(r.stdout)["inputs"]
+        except Exception:
+            raise AssertionError(f"`show {' '.join(extra)}` put no JSON on stdout "
+                                 f"(rc={r.returncode}): {(r.stderr or '')[:200]}")
+        return r, any("training_vcf" in k for k in keys)
+
+    r_on, bound_on = cli(["--drop-branch-only-inputs", "--allow-unpinned-docker"])
+    if r_on.returncode != 0:
+        raise AssertionError(f"the rerun CLI rejected --drop-branch-only-inputs: "
+                             f"{(r_on.stderr or '')[:200]}")
+    if bound_on:
+        raise AssertionError("the flag reached the CLI but pruned nothing")
+    if "dropped" not in r_on.stderr:
+        raise AssertionError("it pruned without saying so on stderr (stdout must stay JSON)")
+    _r_off, bound_off = cli(["--allow-unpinned-docker"])
+    if not bound_off:
+        raise AssertionError("the binding vanished with no flag -- a silent prune is what this "
+                             "guard must never become")
+    return (f"rerun create refused with 0 requests and named the key ({named}); override sent "
+            f"{sent}; named the ref it compared ({used_ref}); with GSV_WDL_VERSION=bad-ref and "
+            f"GSVTK_BRANCH=ok-ref it graded bad-ref")
+
+
+def probe_submit_reads_back() -> str:
+    """`submit` must read the workspace config back and refuse the POST unless it IS the body it built.
+
+    `terra.submit` POSTs a config NAME, so what runs is whatever the workspace holds under that name.
+    States: (a) unpinned image -> refused with no request; (b) agreeing copy -> read, then submit
+    (the control); (c) copy differs in two bindings and `rootEntityType` -> refused, all named;
+    (d) unreadable copy (404) -> refused with the cure named.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    fresh({"GSVTK_PROJECT": "probe-project"}, "terra", "batch_configs")
+    terra = sys.modules["terra"]
+    install_recorder(terra)
+    (bc, r) = fresh({"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                     "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                     "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                    "batch_configs", "batch_rerun_step")
+    reg = "us.gcr.io/probe-project/gatk-sv"
+    argv_save, read_save = sys.argv, terra.config_payload
+    quiet = (contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()))
+
+    def read_as(payload=None, raises=None):
+        """Answer the read-back, recording the coordinates it was asked with."""
+        def _read(ns, name, cns, cname):
+            REQUESTS.append(("config_payload", ns, name, cns, cname))
+            if raises:
+                raise raises
+            return payload
+        terra.config_payload = _read
+
+    def pin():
+        """What the dispatch in __main__ does with `--image`: fill IMAGES before the mode runs."""
+        specs = [f"gatk_docker={reg}/gatk:PINNED", f"sv_base_mini_docker={reg}/sv-base-mini:PINNED",
+                 f"sv_pipeline_docker={reg}/sv-pipeline:PINNED"]
+        r.IMAGES = r.parse_images(specs, r.resolved()["input_prefix"])
+        r.CLI_IMAGE_KEYS = set(r.IMAGES)
+
+    def held_as(b, mutate=None):
+        """The stored copy, shaped like a real method config read back from a workspace.
+
+        A real read-back carries only the method-config fields below, never submission options such
+        as `useCallCache`, so arm (c) must disagree on a field the guard can actually see.
+        """
+        real = ("deleted", "inputs", "methodConfigVersion", "methodRepoMethod", "name",
+                "namespace", "outputs", "prerequisites", "rootEntityType")
+        h = {k: json.loads(json.dumps(b[k])) for k in real if k in b}
+        h["namespace"] = b.get("namespace") or "config-namespace"
+        h["prerequisites"] = dict(b.get("prerequisites") or {})
+        h["methodConfigVersion"] = 4                     # bumped by the server on every overwrite
+        h["deleted"] = None
+        if mutate:
+            mutate(h)
+        return h
+
+    def submit_quietly():
+        REQUESTS.clear()
+        try:
+            with quiet[0], quiet[1]:
+                r.submit()
+        except SystemExit as e:
+            return str(e)
+        return None
+
+    try:
+        sys.argv = ["batch_rerun_step.py", "submit", "--confirm"]
+        r.CONFIRMED = True
+        # (a) the money path builds the body, so the unpinned refusal reaches it.
+        r.IMAGES, r.CLI_IMAGE_KEYS = {}, set()
+        r.ALLOW_UNPINNED = False
+        refused = submit_quietly()
+        if refused is None or "image inputs are not fully pinned" not in refused:
+            raise AssertionError(f"submit() reached the money path with an unpinned *_docker: "
+                                 f"{str(refused)[:160]!r}")
+        if REQUESTS:
+            raise AssertionError(f"the image refusal came after a request: {REQUESTS}")
+        # (b) Control: the copy agrees, so it reads back and then submits.
+        pin()
+        body = r.make_body()
+        read_as(held_as(body))
+        if submit_quietly() is not None:
+            raise AssertionError("submit refused a workspace copy that agrees with its own body")
+        order = [q[0] for q in REQUESTS]
+        # Order matters: read the config back, pre-flight the entity row, then POST the submission.
+        if order != ["config_payload", "get_entity", "create_submission"]:
+            raise AssertionError(f"expected read -> entity pre-flight -> submit, saw {order}")
+        if REQUESTS[0][1:] != ("probe-sandbox-ns", "probe-sandbox-ws", "probe-sandbox-ns",
+                              "10-GenotypeBatch-rerun"):
+            raise AssertionError(f"the read-back is not addressed at this step's config: "
+                                 f"{REQUESTS[0][1:]}")
+        # (c) one binding from another branch, plus a cache the operator did not ask for.
+        def drift(h):
+            key = [i for i in h["inputs"] if i.endswith(".gatk_docker")][0]
+            h["inputs"][key] = f'"{reg}/gatk:ANOTHER_BRANCH_TAG"'
+            h["inputs"][r.resolved()["input_prefix"] + "branch_only_input"] = "workspace.something_new"
+            h["rootEntityType"] = str(h.get("rootEntityType")) + "_set"
+        read_as(held_as(body, drift))
+        refused = submit_quietly()
+        if refused is None:
+            raise AssertionError("submit POSTed a config that is not the body it built")
+        named = [n for n in ("gatk_docker", "branch_only_input", "rootEntityType") if n in refused]
+        if len(named) != 3:
+            raise AssertionError(f"the disagreement names {named} of 3 planted differences: "
+                                 f"{refused[:300]}")
+        if "create_submission" in [q[0] for q in REQUESTS]:
+            raise AssertionError("it submitted anyway")
+        # (d) the copy cannot be read: "could not check" is not agreement.
+        read_as(raises=terra.TerraError('get_workspace_config: HTTP 404 {"message": "gone"}'))
+        refused = submit_quietly()
+        if refused is None or "create --confirm" not in refused or "Nothing was submitted" not in refused:
+            raise AssertionError(f"a 404 read did not refuse with its cure: {str(refused)[:200]}")
+        if "create_submission" in [q[0] for q in REQUESTS]:
+            raise AssertionError("it submitted a config it could not read")
+        return ("unpinned refused with 0 requests; agreeing copy read-then-submitted "
+                f"({order[0]} -> {order[1]}); 3 planted differences each named; 404 refused with "
+                "the cure")
+    finally:
+        sys.argv = argv_save
+        terra.config_payload = read_save
+
+
+def probe_adapt_drops() -> str:
+    """--drop-branch-only-inputs: explicit, verified, and it must not rewrite the table.
+
+    Pruning happens only with the flag, only when the ref can actually be read, and `body()` must
+    copy the map rather than prune CONFIGS in place.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe"}, "terra", "batch_configs")
+    repo, ref = _fixture_repo("fakerepo-adapt", "training_vcf")
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_BRANCH": ref}, "terra", "batch_configs")
+    tc = sys.modules["batch_configs"]
+    key = "GenotypeBatch.training_vcf"
+    argv_save = sys.argv
+    try:
+        sys.argv = ["batch_configs.py", "show"]
+        plain = tc.body("10-GenotypeBatch")["inputs"]
+        if key not in plain:
+            raise AssertionError("the binding vanished without the flag -- a silent prune is the "
+                                 "exact failure this guard must not become")
+        err = io.StringIO()
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        with contextlib.redirect_stderr(err):
+            adapted = tc.body("10-GenotypeBatch")["inputs"]
+        said = err.getvalue()
+        if key in adapted:
+            raise AssertionError(f"the flag dropped nothing: {said[-300:]}")
+        if "SEMANTIC" not in said:
+            raise AssertionError("it pruned without saying the run means something different now")
+        if key not in tc.CONFIGS["10-GenotypeBatch"]["inputs"]:
+            raise AssertionError("body() mutated CONFIGS in place: every later build in this process "
+                                 "-- including one with no flag -- would post the pruned map")
+        # Now make the ref unreadable: the flag must be IGNORED, not honoured on an assumption.
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        tc.VERIFY_REF = "no-such-ref-xyz"
+        err2 = io.StringIO()
+        with contextlib.redirect_stderr(err2):
+            unver = tc.body("10-GenotypeBatch")["inputs"]
+        refused_drop = key in unver and "cannot read" in err2.getvalue().lower()
+        tc.VERIFY_REF = ""
+    finally:
+        sys.argv = argv_save
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+    if not refused_drop:
+        raise AssertionError("it pruned against a ref it could not read -- unverified is not "
+                             "evidence that a binding is absent")
+    return (f"no flag -> key present; flag -> dropped + SEMANTIC warning + CONFIGS intact; "
+            f"unreadable ref -> drop refused ({refused_drop})")
+
+
+def probe_drop_flag_guard() -> str:
+    """--drop-branch-only-inputs has to reach the GUARD, not only the body.
+
+    The prune lives in `_adapt_inputs()` (via `body()`), while `preflight() -> check_maps()` gates
+    create/validate/submit. Without the flag the guard still refuses; with it the pruned map passes;
+    an unknown key is still EXTRA. Then both CLI paths (`cmd_check()`, `preflight()`) are driven with
+    a real argv and the POSTed body is inspected, and grading one ref while posting another is refused.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_BRANCH": "probe-branch"}, "terra", "batch_configs")
+    tc = sys.modules["batch_configs"]
+    tree = TMP / "wdl-droprule"
+    _fixture_wdl(tree, "training_vcf", False)          # a main-shaped ref: declares no training_vcf
+    key = "GenotypeBatch.training_vcf"
+
+    def run(drop):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = tc.check_maps(str(tree), only="10-GenotypeBatch", drop=drop)
+        return rc, out.getvalue()
+
+    rc_no, txt_no = run(False)
+    if rc_no == 0 or f"EXTRA  {key}" not in txt_no:
+        raise AssertionError(f"the guard stopped refusing an undeclared key: {txt_no[-300:]}")
+    rc_yes, txt_yes = run(True)
+    if rc_yes != 0 or "DROPPED" not in txt_yes:
+        raise AssertionError(f"the flag never reached the guard: {txt_yes[-300:]}")
+    if "EXTRA" in txt_yes:
+        raise AssertionError("it pruned the key and still reported it as EXTRA")
+
+    bogus = "GenotypeBatch.probe_not_a_real_input"
+    spec_inputs = tc.CONFIGS["10-GenotypeBatch"]["inputs"]
+    spec_inputs[bogus] = "workspace.probe_bogus"
+    try:
+        rc_bogus, txt_bogus = run(True)
+    finally:
+        del spec_inputs[bogus]
+    if rc_bogus == 0 or f"EXTRA  {bogus}" not in txt_bogus:
+        raise AssertionError("an unknown key slipped through with the flag set -- the guard was "
+                             "switched off instead of one known key being pruned")
+    # ------------------------------------------------- the two forwarding sites, driven by argv
+    # All five workflows, so preflight() refuses over the key rather than over CANNOT CHECK.
+    repo, ref = _fixture_repo("fakerepo-dropfwd", "training_vcf", all_workflows=True)
+    os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo)
+    argv_save = sys.argv
+
+    def load(branch):
+        """Re-import at `branch` (BRANCH is read at import) with the Terra calls recorded."""
+        fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+               "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": branch},
+              "terra", "batch_configs")
+        install_recorder(sys.modules["terra"])      # fresh() re-imports terra: re-patch it
+        return sys.modules["batch_configs"]
+
+    def bodies():
+        """The method-config bodies that actually reached the (recorded) Terra layer."""
+        return [x for r in REQUESTS for x in r[1:]
+                if isinstance(x, dict) and x.get("name") == "10-GenotypeBatch"]
+
+    try:
+        tc = load(ref)
+
+        def cli_check(drop):
+            sys.argv = ["batch_configs.py", "check", "--config", "10-GenotypeBatch"]
+            if drop:
+                sys.argv.append(tc.DROP_FLAG)
+            got = io.StringIO()
+            with contextlib.redirect_stdout(got):
+                rc = tc.cmd_check()
+            return rc, got.getvalue()
+
+        rc_ck_no, txt_ck_no = cli_check(False)
+        if rc_ck_no == 0 or f"EXTRA  {key}" not in txt_ck_no:
+            raise AssertionError(f"control: `check` with NO flag accepted an undeclared key "
+                                 f"(rc={rc_ck_no}), so the flagged run below proves nothing")
+        rc_ck, txt_ck = cli_check(True)
+        if rc_ck != 0 or "DROPPED" not in txt_ck:
+            raise AssertionError("`check --drop-branch-only-inputs` still refused the key it prunes: "
+                                 f"cmd_check() no longer forwards the flag (rc={rc_ck}) "
+                                 f"{txt_ck[-200:]}")
+        if ref not in txt_ck:
+            raise AssertionError("the report never named the ref it graded -- 'graded' has to say "
+                                 "against WHICH document")
+
+        # ---- preflight() -> create(): the gate that decides whether the POST happens, and the POST
+        sys.argv = ["batch_configs.py", "create", "--confirm"]
+        REQUESTS.clear()
+        refused = None
+        got = io.StringIO()
+        with contextlib.redirect_stdout(got):
+            try:
+                tc.create()
+            except SystemExit as e:
+                refused = str(e)
+        if refused is None or "do not fit the WDL" not in refused:
+            raise AssertionError(f"preflight() let an undeclared key through with no flag: "
+                                 f"{refused!r}")
+        if f"EXTRA  {key}" not in got.getvalue():
+            raise AssertionError(f"create() refused for something other than the branch-only key: "
+                                 f"{got.getvalue()[-300:]}")
+        if REQUESTS:
+            raise AssertionError(f"create() reached Terra before refusing: {len(REQUESTS)} request(s)")
+
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        REQUESTS.clear()
+        got2 = io.StringIO()
+        with contextlib.redirect_stdout(got2), contextlib.redirect_stderr(got2):
+            tc.create()                      # the recorder answers 201; nothing here should raise
+        posted = bodies()
+        if not posted:
+            raise AssertionError("control: the flagged create() POSTED no GenotypeBatch body "
+                                 f"({len(REQUESTS)} request(s)), so 'the guard grades what gets "
+                                 "POSTed' is not evidence of anything")
+        sent = posted[0]["inputs"]
+        if key in sent:
+            raise AssertionError("the guard passed the PRUNED map and body() POSTED the raw one: the "
+                                 "flag reached one component and not the other")
+        expect = len(tc.CONFIGS["10-GenotypeBatch"]["inputs"]) - 1
+        if len(sent) != expect:
+            raise AssertionError(f"it posted {len(sent)} inputs, not the pruned {expect}")
+        if key not in tc.CONFIGS["10-GenotypeBatch"]["inputs"]:
+            raise AssertionError("body() rewrote CONFIGS on the way (probe_adapt_drops pins that)")
+        guard_agrees = "DROPPED" in got2.getvalue() and ref in got2.getvalue()
+
+        # ---- one ref: the guard may grade only the document this config will run
+        # ok-ref DECLARES the key (and is what this command pins Dockstore to); bad-ref lacks it.
+        repo2 = _fixture_two_refs("fakerepo-droponeref", all_workflows=True)
+        os.environ["GSVTK_GATK_SV_CHECKOUT"] = str(repo2)
+        tc = load("ok-ref")
+        sys.argv = ["batch_configs.py", "create", "--confirm", "--against", "bad-ref", tc.DROP_FLAG]
+        REQUESTS.clear()
+        refused2 = None
+        got3 = io.StringIO()
+        with contextlib.redirect_stdout(got3), contextlib.redirect_stderr(got3):
+            try:
+                tc.create()
+            except SystemExit as e:
+                refused2 = str(e)
+        if refused2 is None or "--against" not in refused2 or "bad-ref" not in refused2:
+            raise AssertionError("the guard graded bad-ref and pruned there, then body() POSTED the "
+                                 f"map of ok-ref that this config runs: {refused2!r}, "
+                                 f"{len(REQUESTS)} request(s) left the machine")
+        if REQUESTS:
+            raise AssertionError(f"it POSTed while guard and body named different refs: "
+                                 f"{len(REQUESTS)} request(s)")
+        # Control: GSVTK_BRANCH at the ref whose shape you want posts the pruned body.
+        tc = load("bad-ref")
+        sys.argv = ["batch_configs.py", "create", "--confirm", tc.DROP_FLAG]
+        REQUESTS.clear()
+        got4 = io.StringIO()
+        with contextlib.redirect_stdout(got4), contextlib.redirect_stderr(got4):
+            tc.create()
+        control = bodies()
+        if not control or key in control[0]["inputs"]:
+            raise AssertionError("control: with GSVTK_BRANCH at the ref whose shape you want, the "
+                                 "flagged create() posted no pruned body -- so the refusal above is "
+                                 "a wall, not a guard")
+    finally:
+        sys.argv = argv_save
+        os.environ.pop("GSVTK_GATK_SV_CHECKOUT", None)
+    return (f"flag absent -> refuses ({rc_no}); flag present -> grades the pruned map and passes "
+            f"({rc_yes}); unknown key with flag set -> still EXTRA ({rc_bogus}); `check` CLI forwards "
+            f"the flag ({rc_ck_no} -> {rc_ck}, ref named: {ref in txt_ck}); create() without it names "
+            f"{key} and sends 0, with it posts {len(sent)} pruned inputs (guard said so: "
+            f"{guard_agrees}); --against bad-ref on create -> refused with 0 requests, and the "
+            f"GSVTK_BRANCH form posted the pruned body")
+
+
+def _profile_variant(dirname: str, mutate=None) -> Path:
+    """A mutated copy of the tracked profile in a temp MODULE_DIR; the tracked file is never edited."""
+    d = tmpdir(dirname)
+    doc = json.loads((ROOT / "profiles" / "genotyping.json").read_text())
+    if mutate:
+        mutate(doc)
+    (d / "genotyping.json").write_text(json.dumps(doc, indent=2))
+    return d
+
+
+def _require_refuses(r, want: list) -> str:
+    """`require()` must exit 4 and print every word that names the defect -- or the probe fails."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            r.require("probe")
+    except SystemExit as e:
+        txt = buf.getvalue() or str(e)
+        if e.code != 4:
+            raise AssertionError(f"refused with exit {e.code}, want 4 (the config layer's number): "
+                                 f"{txt[:120]}")
+        for frag in want:
+            if frag not in txt:
+                raise AssertionError(f"the refusal never says {frag!r}: {txt[:200]}")
+        return txt
+    raise AssertionError("an unusable profile was accepted: require() returned instead of refusing")
+
+
+def probe_profile_loader_refusals() -> str:
+    """Every way a profile can be valid JSON and still wrong must REFUSE, and by name.
+
+    Cases: an unsupported `schema_version`, an orphan `_why_` key, a suffix token on a literal, and a
+    rationale key inside a binding map. The control is the tracked `profiles/genotyping.json`, which
+    must load with zero findings.
+    """
+    import module_profile                                  # noqa: F401  (imported by fresh() below)
+    cases = []
+
+    def bump_schema(doc):
+        doc["schema_version"] = 99
+
+    def orphan_why(doc):
+        step = doc["steps"][4]
+        step["_why_GenotypeBatch.a_key_nobody_binds"] = step.pop("_why_GenotypeBatch.training_vcf")
+
+    def literal_token(doc):
+        doc["steps"][0]["inputs"]["GenerateBatchMetrics.chr_x"] = "100{frz}"
+
+    def why_inside_map(doc):
+        doc["steps"][4]["inputs"]["_why_GenotypeBatch.batch"] = "a rationale where a binding belongs"
+
+    for label, mutate, want in [
+        ("schema_version", bump_schema, ["schema_version 99 is not a version this build reads"]),
+        ("orphan _why_", orphan_why, ["orphan rationale", "_why_GenotypeBatch.a_key_nobody_binds"]),
+        ("token on a literal", literal_token, ["carries a suffix token but is not a path",
+                                               "this./workspace."]),
+        ("_why_ inside inputs", why_inside_map, ["rationale key INSIDE a binding map"]),
+    ]:
+        d = _profile_variant("profile-" + label.replace(" ", "-").replace("_", "-"), mutate)
+        (mp,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_MODULE_DIR": str(d)}, "module_profile")
+        r = mp.load()
+        if r.configs:
+            raise AssertionError(f"{label}: the tables came back populated despite the defect")
+        txt = _require_refuses(r, want)
+        cases.append(label)
+        say(txt.splitlines()[1] if len(txt.splitlines()) > 1 else "")
+
+    # Control: the tracked profile must load clean.
+    (mp,) = fresh({"GSVTK_PROJECT": "p"}, "module_profile")
+    good = mp.load()
+    if good.problems or len(good.configs) != 5:
+        raise AssertionError(f"the CONTROL profile does not load clean, so every refusal above is "
+                             f"meaningless: {good.problems} / {len(good.configs)} steps")
+    if good.branch_only_inputs != {"10-GenotypeBatch": {"GenotypeBatch.training_vcf"}}:
+        raise AssertionError(f"the paired `_why_*` did not survive the load: {good.branch_only_inputs}")
+    return (f"{len(cases)} unusable-profile classes each refuse with the defect named "
+            f"({', '.join(cases)}); the tracked profile is the control and loads clean")
+
+
+def probe_module_changes_output() -> str:
+    """Changing MODULE has to change what the tool prints.
+
+    Three arms: the default module prints the five shipped steps; a different profile prints a
+    different chain (including caller expansion); a module with no profile exits 4 naming every field
+    a working profile carries.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+
+    def shown(dir_=None, module="") -> str:
+        d = dict(GSVTK_PROJECT="p", GSVTK_TERRA_NAMESPACE="probe-ns",
+                 GSVTK_TERRA_WORKSPACE="probe-ws", GSVTK_BRANCH="probe-branch")
+        if dir_:
+            d["GSVTK_MODULE_DIR"] = str(dir_)
+        if module:
+            d["GSVTK_MODULE"] = module
+        bc = fresh(d, "module_profile", "batch_configs")[-1]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bc.show()
+        return buf.getvalue()
+
+    a = shown()
+    if "10-GenotypeBatch" not in a or a.count("===== ") != 5:
+        raise AssertionError(f"the default module does not print the five shipped steps:\n{a[:300]}")
+    if a.count("in  GenotypeBatch.") < 17:
+        raise AssertionError(f"the `@`-over-callers expansion lost a binding:\n{a[:300]}")
+
+    def other_module(doc):
+        step = doc["steps"][0]
+        doc["steps"] = [step]                     # a one-step chain is still a chain
+        step["step"] = "01-ClusterDepth"
+        step["wdl"], step["workflow"] = "DepthClustering", "ClusterDepth"
+        step["inputs"] = {"ClusterDepth.batch": "this.sample_set_id",
+                          "ClusterDepth.@_vcf": "this.clustered_@_vcf{frz}"}
+        step["outputs"] = {"ClusterDepth.clustered_depth_vcf": "this.clustered_depth_vcf{new}"}
+        for k in [k for k in step if k.startswith("_why_")]:
+            del step[k]
+        doc["callers"] = ["manta"]
+    b = shown(_profile_variant("module-other", other_module))
+    if "01-ClusterDepth" not in b or "10-GenotypeBatch" in b:
+        raise AssertionError(f"MODULE changed and the output did not:\n{b[:400]}")
+    # dockstore() uses the file basename while bindings use the declared workflow name.
+    if "gatk-sv%2FDepthClustering" not in b or "ClusterDepth.batch" not in b:
+        raise AssertionError(f"the wdl/workflow split collapsed into one name:\n{b[:400]}")
+    if "in  DepthClustering." in b:
+        raise AssertionError(f"bindings are being keyed by the file basename:\n{b[:400]}")
+    if b.count("this.clustered_manta_vcf_frz") != 1 or "wham" in b or "scramble" in b:
+        raise AssertionError(f"the caller list is not driving the expansion:\n{b[:400]}")
+
+    # Arm 3: the refusal must list every field.
+    bc = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch",
+                "GSVTK_MODULE": "copynumber"}, "module_profile", "batch_configs")[-1]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            bc.show()
+        raise AssertionError("a module with no profile printed something anyway")
+    except SystemExit as e:
+        txt = buf.getvalue()
+        if e.code != 4:
+            raise AssertionError(f"a missing module exited {e.code}, want 4")
+        for frag in ("copynumber.json", "schema_version", "callers", "steps", "wdl", "workflow",
+                     "rootEntityType", "inputs", "outputs", "branch_only_inputs", "entity_row", "_why_"):
+            if frag not in txt:
+                raise AssertionError(f"the refusal omits {frag!r} from the field list -- that is how a "
+                                     f"following author writes an incomplete profile")
+    return ("default module prints all 5 steps; a different MODULE prints a different chain (wdl/workflow "
+            "split kept, caller list drives the expansion); an absent module exits 4 naming all fields")
+
+
+def probe_nested_bindings() -> str:
+    """`check_maps` must count and name 3-segment (call-site) bindings instead of crashing.
+
+    Upstream configs do carry such bindings. Keying them by leaf name would also collapse two call
+    bindings that share a leaf.
+    """
+    if not (have("firecloud") and have("WDL")):
+        raise Skip("firecloud + WDL (miniwdl)")
+    fresh({"GSVTK_PROJECT": "probe", "GSVTK_TERRA_NAMESPACE": "probe-sandbox",
+           "GSVTK_TERRA_WORKSPACE": "probe-ws", "GSVTK_BRANCH": "probe-branch"},
+          "terra", "batch_configs")
+    bc = sys.modules["batch_configs"]
+    install_recorder(sys.modules["terra"])
+    out = io.StringIO()
+    NESTED = "GenotypeBatch.ProbeCpxRefine.probe_input"
+
+    # Generate both fixtures BEFORE injecting the key: _fixture_wdl derives declarations from CONFIGS.
+    clean, bad = TMP / "wdl-nested-clean", TMP / "wdl-nested-bad"
+    _fixture_wdl(clean, None, False)
+    _fixture_wdl(bad, "training_vcf", True)
+
+    # Control 1: with no call binding, the "NOT checked" count must be absent.
+    with contextlib.redirect_stdout(out):
+        rc_plain = bc.check_maps(str(clean), only="10-GenotypeBatch")
+    if rc_plain != 0 or "NOT checked" in out.getvalue():
+        raise AssertionError(f"the no-call-binding control was not clean: {out.getvalue()[-300:]}")
+
+    # Control 2: the fixture's own findings must appear before the key is injected.
+    out.truncate(0)
+    out.seek(0)
+    with contextlib.redirect_stdout(out):
+        rc_bad_before = bc.check_maps(str(bad), only="10-GenotypeBatch")
+    base = out.getvalue()
+    if rc_bad_before == 0 or "EXTRA  GenotypeBatch.training_vcf" not in base \
+            or "MISSING GenotypeBatch.probe_required_unbound" not in base:
+        raise AssertionError(f"the findings fixture does not produce its findings: {base[-300:]}")
+
+    bc.CONFIGS["10-GenotypeBatch"]["inputs"][NESTED] = "this.probe_nested"
+
+    # A call binding is counted and named, but does not fail the check.
+    out.truncate(0)
+    out.seek(0)
+    with contextlib.redirect_stdout(out):
+        rc = bc.check_maps(str(clean), only="10-GenotypeBatch")
+    txt = out.getvalue()
+    if "1 nested-call binding(s) NOT checked" not in txt:
+        raise AssertionError(f"the call binding is invisible again: {txt[-300:]}")
+    if NESTED not in txt or "ProbeCpxRefine" not in txt:
+        raise AssertionError(f"counted but never named with its callee: {txt[-300:]}")
+    if rc != 0:
+        raise AssertionError("reporting a call binding must not fail the check")
+
+    # Comparable findings still print alongside it.
+    out.truncate(0)
+    out.seek(0)
+    with contextlib.redirect_stdout(out):
+        rc_bad = bc.check_maps(str(bad), only="10-GenotypeBatch")
+    txt2 = out.getvalue()
+    if rc_bad == 0 or "EXTRA  GenotypeBatch.training_vcf" not in txt2 \
+            or "MISSING GenotypeBatch.probe_required_unbound" not in txt2:
+        raise AssertionError(f"a call binding suppressed the real findings: {txt2[-400:]}")
+    if "1 nested-call binding(s) NOT checked" not in txt2:
+        raise AssertionError("the un-compared binding stopped being reported next to the findings")
+    if REQUESTS:
+        raise AssertionError(f"check_maps made {len(REQUESTS)} request(s); it is an offline check")
+    return ("call bindings counted AND named, both controls hold, and EXTRA/MISSING still fire with one "
+            "present")
+
+
+def probe_listing_lie() -> str:
+    """An empty Terra listing must name the endpoint that claimed it, and never be the last word.
+
+    The fiss client has been seen answering [] for workspaces holding submissions and configs, while
+    raw REST on the same URL returned them.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    (tt,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-ws"}, "terra")
+    two = [{"submissionId": "s1"}, {"submissionId": "s2"}]
+    saved_rest, saved_fiss = tt.rest_get, tt.fapi.list_submissions
+    seen = {}
+    try:
+        def drive(rest_value, fiss_value, rest_raises=None):
+            calls = []
+
+            def fake_rest(path, what, params=None):
+                calls.append("rest")
+                if rest_raises:
+                    raise rest_raises
+                return rest_value
+            tt.rest_get = fake_rest
+
+            def fake_fiss(*a, **k):
+                calls.append("fiss")
+                # Response-like, not a dict: _j() reads .status_code/.json() off it.
+                return type("R", (), {"status_code": 200, "text": "",
+                                      "json": lambda self: fiss_value})()
+            tt.fapi.list_submissions = fake_fiss
+            err = None
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                try:
+                    got = tt.submissions("probe-ns", "probe-ws")["submissions"]
+                except Exception as e:
+                    got, err = None, e
+            seen[tuple(calls)] = None
+            return got, err, buf.getvalue()
+
+        # Control: both clients agree on a populated inventory, and both are asked.
+        got, err, note = drive(two, two)
+        if err is not None or len(got) != 2:
+            raise AssertionError(f"control: a healthy listing did not come back: {err} {got}")
+        if "raised" in note or "DISAGREE" in note:
+            raise AssertionError(f"the control was not actually healthy: {note[:170]}")
+        if set(seen) != {("rest", "fiss")}:
+            raise AssertionError(f"both clients were not asked: {list(seen)}")
+
+        # REST sees two, the fiss client sees nothing.
+        got, err, note = drive(two, [])
+        if err is not None or len(got) != 2:
+            raise AssertionError(f"the lie was preferred over the data: {err} {got}")
+        if "DISAGREE" not in note or "answered 2" not in note or "answered 0" not in note:
+            raise AssertionError(f"disagreement not printed with both counts: {note[:140]}")
+
+        # Both empty: raise, naming the endpoint AND what each client answered.
+        got, err, _ = drive([], [])
+        if not isinstance(err, tt.TerraError):
+            raise AssertionError(f"an empty listing was returned as a clean answer: {got!r}")
+        if "raw REST" not in str(err) or "list_submissions" not in str(err):
+            raise AssertionError(f"the refusal does not name both clients: {str(err)[:140]}")
+
+        # REST unreachable, fiss answers []: the fallback is loud and still refuses to call it empty.
+        got, err, note = drive(None, [], RuntimeError("HTTP 404"))
+        if not isinstance(err, tt.TerraError) or "unconfirmed" not in note:
+            raise AssertionError(f"REST-404 fallback was not marked unconfirmed: {str(err)[:120]}")
+
+        # A shape _as_items does not understand is not "nothing there" -- from EITHER client.
+        got, err, _ = drive({"unexpected": True}, {"unexpected": True})
+        if not isinstance(err, tt.TerraError) or "unexpected listing response shape" not in str(err):
+            raise AssertionError(f"an unknown shape read as empty: {str(err)[:140]}")
+    finally:
+        tt.rest_get, tt.fapi.list_submissions = saved_rest, saved_fiss
+    return ("control: 2/2 returned, both clients asked; REST 2 vs fiss 0 -> REST wins + DISAGREE with "
+            "both counts; 0/0 -> TerraError naming both; REST-404 fallback marked unconfirmed; "
+            "unknown shape refuses")
+
+
+def probe_recon_empty_inventory() -> str:
+    """recon must not exit 0 on an empty inventory the client may be misreporting.
+
+    recon counts failures by printed ` failed:` markers, so a quiet empty answer must print one.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import terra
+    (recon,) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                      "GSVTK_TERRA_WORKSPACE": "probe-ws"}, "recon")
+    real = recon.terra
+
+    class Stub:
+        TerraError = terra.TerraError
+        BASELINE_NS, BASELINE_WS = "probe-ns", "probe-ws"
+
+        def __init__(self, cfgs, subs):
+            self.cfgs, self.subs = cfgs, subs
+
+        def dump(self, obj, path):
+            return path
+
+        def whoami(self):
+            return "probe"
+
+        def billing_projects(self):
+            return []
+
+        def workspaces(self):
+            return []
+
+        def workspace(self, ns, name):
+            return {"workspace": {"workspaceId": "id", "bucketName": "b", "attributes": {}},
+                    "canCompute": True, "accessLevel": "OWNER", "workspaceSubmissionStats": {}}
+
+        def entity_types(self, ns, name):
+            return {}
+
+        def entity_sample(self, ns, name, etype, page_size=50, page=1):
+            return {"results": []}
+
+        def workspace_configs(self, ns, name):
+            if isinstance(self.cfgs, Exception):
+                raise self.cfgs
+            return self.cfgs
+
+        def submissions(self, ns, name, limit=20):
+            if isinstance(self.subs, Exception):
+                raise self.subs
+            return {"submissions": self.subs}
+
+        def submission(self, ns, name, sid):
+            return {}
+
+    def run(cfgs, subs):
+        recon.FAILS[:] = []
+        recon.terra = Stub(cfgs, subs)
+        out, argv = io.StringIO(), sys.argv
+        sys.argv = ["recon.py", "--ns", "probe-ns", "--ws", "probe-ws"]
+        try:
+            with contextlib.redirect_stdout(out):
+                recon.main()
+        finally:
+            sys.argv = argv
+        return out.getvalue()
+
+    try:
+        populated = run([{"namespace": "n", "name": "06-X", "snapshotId": 1,
+                          "rootEntityType": "sample_set", "methodUri": "dockstore://x"}],
+                        [{"submissionDate": "d", "workflowStatus": "SUCCEEDED",
+                          "methodConfigurationNamespace": "n", "methodConfigurationName": "06-X",
+                          "entityType": "sample_set", "entityName": "e", "submissionId": "sid"}])
+        bad = [f for f in recon.FAILS if "configs" in f or "submissions" in f or "recent" in f]
+        if bad or "1 recent" not in populated or "1 configs" not in populated:
+            raise AssertionError(f"CONTROL: a populated inventory did not read clean: {bad} "
+                                 f"{populated[-160:]}")
+        lied = run(terra.TerraError("raw REST GET /api/.../methodconfigs listed 0 method configs"),
+                   terra.TerraError("raw REST GET /api/.../submissions listed 0 submissions"))
+        got = [f for f in recon.FAILS if "configs failed" in f or "submissions failed" in f]
+        if len(got) != 2:
+            raise AssertionError(f"lying-empty inventory counted {len(got)} failures, not 2: {got}")
+        if "0 recent" in lied:
+            raise AssertionError("an empty listing still printed a summary with no failure marker")
+    finally:
+        recon.terra = real
+        recon.FAILS[:] = []
+    return (f"populated: same two summary lines, FAILS empty; lying-empty: {len(got)} named "
+            "failures, no bare '0 recent' line -- exit 1 by recon's own tail")
+
+
+def probe_step_lookup_names_itself() -> str:
+    """One step map, and a lookup that refuses by name instead of dying with StopIteration."""
+    (st, bs, bsm, bci) = fresh({"GSVTK_PROJECT": "p", "GSVTK_TERRA_NAMESPACE": "probe-ns",
+                                "GSVTK_TERRA_WORKSPACE": "probe-ws"},
+                               "steps", "batch_status", "batch_save_metadata", "batch_check_inputs")
+    names = ["10-GenotypeBatch_Ab12Cd", "10-GenotypeBatch"]
+    if st.match_configs("10", names)[0] != "10-GenotypeBatch":
+        raise AssertionError("a chain snapshot outranked the live config -- the freeze took the wrong "
+                             f"one: {st.match_configs('10', names)}")
+    if st.config_name("10", names) != "10-GenotypeBatch":
+        raise AssertionError(f"config_name took the snapshot, not the live config: "
+                             f"{st.config_name('10', names)}")
+    # A bare workflow name must resolve, or that step drops out of the manifest silently.
+    if st.config_name("09", ["MergeBatchSites"]) != "MergeBatchSites":
+        raise AssertionError("a workflow-named-only config matched nothing -- the hole comes back")
+    # A numbered config whose workflow was renamed still resolves: the number is what was asked for.
+    if st.config_name("10", ["10-SomethingElse"]) != "10-SomethingElse":
+        raise AssertionError("a numbered config from a renamed workflow stopped resolving")
+    try:
+        st.config_name("10", ["09-MergeBatchSites"])
+        raise AssertionError("no config for the step and still no refusal")
+    except SystemExit as e:
+        for frag in ("step 10", "GenotypeBatch", "tried"):
+            if frag not in str(e):
+                raise AssertionError(f"the refusal omits {frag!r}: {str(e)[:120]}")
+    # Control: every consumer reads the one shared map.
+    if list(bs.STEPS) != list(st.step_names()):
+        raise AssertionError("batch_status still carries its own step list")
+    if bsm.STEPS is not st.STEPS:
+        raise AssertionError("batch_save_metadata still carries its own step list")
+    if getattr(bci, "WDLS", None) is not None:
+        raise AssertionError("batch_check_inputs still carries the third copy (WDLS)")
+    return ("exact live name outranks the <step>_<sha> snapshot; un-numbered name matches; unknown "
+            "step refuses naming step+patterns; 3 consumers read one map, WDLS gone")
+
+
+def probe_call_cache() -> str:
+    """useCallCache must be chosen on the command line, not carried by the builder.
+
+    In a head-to-head a wrong value is worse than an error: one arm's calls can be served from the
+    other arm's cache and the run still succeeds.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import terra
+    install_recorder(terra)
+    (bc, r) = fresh({"GSVTK_PROJECT": "p", "GSVTK_BRANCH": "probe-branch",
+                     "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                     "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                    "batch_configs", "batch_rerun_step")
+    # The docker-pin guard is not under test here; only the useCallCache value is.
+    r.CONFIRMED = r.ALLOW_UNPINNED = True
+    seen = {}
+    argv_save = sys.argv
+    try:
+        for extra in ([], ["--no-call-cache"], ["--call-cache"]):
+            sys.argv = ["batch_configs.py", "show"] + extra
+            seen[" ".join(extra) or "(no flag)"] = bc.body("10-GenotypeBatch")["useCallCache"]
+        if seen["(no flag)"] is not False or seen["--no-call-cache"] is not False:
+            raise AssertionError(f"the default still turns caching on: {seen}")
+        if seen["--call-cache"] is not True:
+            raise AssertionError(f"--call-cache never reached the body: {seen}")
+
+        # The rerun path imports body(), so the flag must travel through it.
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm", "--call-cache"]
+        if r.make_body()["useCallCache"] is not True:
+            raise AssertionError("batch_rerun_step.make_body() lost the flag on its way in")
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm"]
+        if r.make_body()["useCallCache"] is not False:
+            raise AssertionError("batch_rerun_step still inherits a cache it was not asked for")
+
+        # Both flags is a contradiction, not last-one-wins.
+        sys.argv = ["batch_configs.py", "show", "--call-cache", "--no-call-cache"]
+        try:
+            bc.body("10-GenotypeBatch")
+            raise AssertionError("both flags were accepted -- argv order picked the arm")
+        except SystemExit as e:
+            if "both" not in str(e):
+                raise AssertionError(f"the refusal does not name the contradiction: {str(e)[:90]}")
+    finally:
+        sys.argv = argv_save
+    if REQUESTS:
+        raise AssertionError(f"a probe that only builds bodies sent {len(REQUESTS)} request(s)")
+    return ("default/--no-call-cache -> False, --call-cache -> True in both the builder and the "
+            "rerun body, both-flags refusal named, 0 requests left the machine")
+
+
+def probe_submission_call_cache() -> str:
+    """The call-cache choice has to reach the SUBMISSION POST, not just the config body and the print.
+
+    fiss's `create_submission` defaults `use_callcache=True` and always sends the key, so the request
+    is captured at fiss's own HTTP boundary. States: (a) default and --no-call-cache -> POST and
+    printed line both false; (b) --call-cache -> both true (the control); (c) a caller stating no
+    choice is refused with nothing captured.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    fresh({"GSVTK_PROJECT": "probe-project"}, "terra", "batch_configs")
+    terra = sys.modules["terra"]
+    install_recorder(terra)      # the belt: every other fiss entry point counts, never sends
+    if "create_submission" not in REAL:
+        raise AssertionError("install_recorder no longer snapshots the pristine create_submission, so "
+                             "this probe has no way to grade the real request builder")
+    bc, r = fresh({"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                   "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                  "batch_configs", "batch_rerun_step")
+    reg = "us.gcr.io/probe-project/gatk-sv"
+    fapi = terra.fapi
+    fapi.create_submission = REAL["create_submission"]   # the one call this probe must NOT replace
+    REQUESTS.clear()          # the end claim is "nothing reached the recorder IN THIS PROBE"
+    argv_save, read_save = sys.argv, terra.config_payload
+    verbs = ("__post", "__get", "__put", "__delete")     # fiss's own request boundary
+    verb_save = {v: getattr(fapi, v) for v in verbs}
+    POSTED = []
+
+    class _Sent:
+        """The response a captured POST hands back, so `submit` completes the way it would have."""
+
+        status_code = 200
+        text = '{"submissionId": "captured-offline"}'
+
+        def json(self):
+            return {"submissionId": "captured-offline", "message": "captured at the wire, never sent"}
+
+    def capture(methcall, headers=None, root_url=None, **kwargs):
+        """Hold the body fiss built and stop there: the request is what this probe grades."""
+        POSTED.append((methcall, kwargs.get("json")))
+        return _Sent()
+
+    def blocked(name):
+        def f(*a, **k):
+            raise AssertionError(f"a probe that must send nothing attempted {name!r}: {a!r}")
+        return f
+
+    def agree(ns, name, cns, cname):
+        """The read-back the submission guard demands: this body, plus what only the server states."""
+        return dict(r.make_body(), methodConfigVersion=4, deleted=None,
+                    workspace={"namespace": "probe-sandbox-ns", "name": "probe-sandbox-ws"})
+
+    def run_submit():
+        POSTED.clear()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            r.submit()
+        return out.getvalue()
+
+    try:
+        r.CONFIRMED, r.ALLOW_UNPINNED = True, False
+        specs = [f"gatk_docker={reg}/gatk:PINNED", f"sv_base_mini_docker={reg}/sv-base-mini:PINNED",
+                 f"sv_pipeline_docker={reg}/sv-pipeline:PINNED"]
+        r.IMAGES = r.parse_images(specs, r.resolved()["input_prefix"])
+        r.CLI_IMAGE_KEYS = set(r.IMAGES)
+        setattr(fapi, "__post", capture)
+        for v in verbs[1:]:
+            setattr(fapi, v, blocked(v))
+        terra.config_payload = agree
+        seen = {}
+        for extra, want in (([], False), (["--no-call-cache"], False), (["--call-cache"], True)):
+            sys.argv = ["batch_rerun_step.py"] + extra + ["submit", "--confirm"]
+            out = run_submit()
+            tag = " ".join(extra) or "(no flag)"
+            if len(POSTED) != 1:
+                raise AssertionError(f"{tag}: {len(POSTED)} submission POSTs, want exactly 1: {POSTED}")
+            where, body = POSTED[0]
+            if where != "workspaces/probe-sandbox-ns/probe-sandbox-ws/submissions":
+                raise AssertionError(f"{tag}: that is not the submission endpoint: {where}")
+            if "inputs" in body:
+                raise AssertionError(f"{tag}: the submission request carries a method config: "
+                                     f"{sorted(body)}")
+            if body.get("useCallCache") is not want:
+                raise AssertionError(f"{tag}: the submission body says {body.get('useCallCache')!r}, "
+                                     f"this arm asked for {want!r}")
+            line = [l for l in out.splitlines() if "useCallCache=" in l]
+            if len(line) != 1:
+                raise AssertionError(f"{tag}: {len(line)} printed lines name the cache: {line}")
+            said = line[0].split("useCallCache=")[1].split()[0]
+            if said != ("true" if want else "false"):
+                raise AssertionError(f"{tag}: printed {said} while the POST it sent says "
+                                     f"{body['useCallCache']!r}")
+            seen[tag] = said
+        # (c) No stated choice: terra.submit must refuse before fiss fills in `true`.
+        POSTED.clear()
+        try:
+            terra.submit("probe-sandbox-ns", "probe-sandbox-ws", "probe-sandbox-ns",
+                         "10-GenotypeBatch-rerun", "all_samples", "sample_set", None, confirm=True)
+            raise AssertionError("an unstated call cache reached fiss, whose default is `true`")
+        except terra.TerraError as exc:
+            unnamed = [w for w in ("call-cache", "useCallCache", "Nothing was submitted")
+                       if w not in str(exc)]
+            if unnamed:
+                raise AssertionError(f"the refusal does not name {unnamed}: {str(exc)[:200]}")
+        if POSTED:
+            raise AssertionError(f"it POSTed a submission it refused to choose for: {POSTED}")
+        # submit reads the config and pre-flights the entity row before the cache check, so only
+        # MUTATING calls must be absent, and the entity read must have happened.
+        mutating = [q for q in REQUESTS if q[0] in ("create_submission", "create_workspace_config",
+                                                    "overwrite_workspace_config", "validate_config",
+                                                    "list_submissions", "get_submission")]
+        if mutating:
+            raise AssertionError(f"a MUTATING request reached the recorder instead of the captured seam: "
+                                 f"{mutating}")
+        if not any(q[0] == "get_entity" for q in REQUESTS):
+            raise AssertionError("the entity pre-flight did not happen before the cache refusal; "
+                                 f"requests were {REQUESTS}")
+        return (f"default/--no-call-cache -> POST false, --call-cache -> POST true, each under a printed "
+                f"line that says the same ({seen['(no flag)']}/{seen['--call-cache']}); unstated choice "
+                "refused with 0 bodies captured")
+    finally:
+        # Restore fiss's module globals, which every later probe shares.
+        sys.argv = argv_save
+        terra.config_payload = read_save
+        for v, saved in verb_save.items():
+            setattr(fapi, v, saved)
+
+
+def probe_task_artifact_tail() -> str:
+    """batch_peek has to READ a task's artifacts (stderr tail, script, rc), not print where they live.
+
+    Control on the same fixture: with one artifact missing, the peek must not exit 0.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    import contextlib
+    import io
+    import json
+    import shutil
+    import tempfile
+
+    bp = fresh({"GSVTK_PROJECT": "p"}, "batch_peek")[0]
+    d = tempfile.mkdtemp(prefix="probe-peek-")
+    try:
+        att = os.path.join(d, "call-Foo", "shard-0", "attempt-1")
+        os.makedirs(att)
+        head, tail = "HEAD-line-not-the-answer", "scala.MatchError: the reason is on the LAST line"
+        with open(os.path.join(att, "stderr"), "w") as fh:
+            fh.write("\n".join([head] + [f"noise {i}" for i in range(400)] + [tail]) + "\n")
+        with open(os.path.join(att, "script"), "w") as fh:
+            fh.write("set -e\ngatk --java-options \"-Xmx8g\" CallVariants --REF hg38\n")
+        with open(os.path.join(att, "rc"), "w") as fh:
+            fh.write("10\n")
+        meta_path = os.path.join(d, "meta.json")
+        with open(meta_path, "w") as fh:
+            json.dump({"status": "Failed", "workflowName": "WF",
+                       "calls": {"Foo": [{"shardIndex": 0, "attempt": 1, "executionStatus": "Failed",
+                                          "callRoot": att + "/"}]}}, fh)
+
+        argv_save, out_lines = sys.argv, 0
+        try:
+            def run(extra):
+                sys.argv = ["batch_peek.py", "--metadata", meta_path, "--task", "Foo",
+                            "--no-scratch", *extra]
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = bp.main()
+                return code, buf.getvalue()
+
+            code, out = run(["--tail", "3"])
+            out_lines = len(out.splitlines())
+            if tail not in out:
+                raise AssertionError("the stderr CONTENT never reached the page -- printing the "
+                                     "PATH is not reading the log")
+            if head in out:
+                raise AssertionError("all 402 lines were dumped; the bounded tail is the promise")
+            if "gatk --java-options" not in out:
+                raise AssertionError("the rendered `script` block was not printed")
+            if "rc: 10" not in out:
+                raise AssertionError("the rc file was not read")
+            if code != 0:
+                raise AssertionError(f"the readable case exited {code}")
+
+            os.remove(os.path.join(att, "rc"))
+            code2, out2 = run([])
+            if code2 == 0 or "UNREADABLE" not in out2:
+                raise AssertionError(f"a missing artifact read as fine (exit {code2}); the whole "
+                                     "lesson of the lying-empty endpoint is that a failed read must "
+                                     "not print like an empty answer")
+        finally:
+            sys.argv = argv_save
+        return (f"tailed a 402-line log to {out_lines} line(s) with the reason on screen; "
+                "exit goes non-zero the moment an artifact is unreadable")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+
+def probe_dropped_binding_post() -> str:
+    """A config whose SOURCE TEMPLATE binds one key twice must not reach Terra with a live read for it.
+
+    `json.load` keeps the last of two duplicate keys, so a discarded `workspace.`/`this.` read vanishes
+    silently. Graded at the request boundary: (a) a planted duplicate with no override is refused,
+    naming the key and both values, with zero requests; (b) `--allow-duplicate-key <key>` POSTs (the
+    control); (c) without the duplicate it POSTs and reports `0 key(s) bound more than once`.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    fresh({"GSVTK_PROJECT": "probe-project"}, "terra", "batch_configs")
+    terra = sys.modules["terra"]
+    install_recorder(terra)
+    bc, r = fresh({"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                   "GSVTK_TERRA_NAMESPACE": "probe-sandbox-ns",
+                   "GSVTK_TERRA_WORKSPACE": "probe-sandbox-ws"},
+                  "batch_configs", "batch_rerun_step")
+    reg = "us.gcr.io/probe-project/gatk-sv"
+    r.CONFIRMED, r.ALLOW_UNPINNED = True, False
+    rd = r.resolved()
+    r.IMAGES = r.parse_images(
+        [f"gatk_docker={reg}/gatk:PINNED", f"sv_base_mini_docker={reg}/sv-base-mini:PINNED",
+         f"sv_pipeline_docker={reg}/sv-pipeline:PINNED"], rd["input_prefix"])
+    r.CLI_IMAGE_KEYS = set(r.IMAGES)
+
+    body = r.make_body()["inputs"]
+    key = next((k for k, v in sorted(body.items())
+                if str(v).startswith(("this.", "workspace."))), "")
+    if not key:
+        raise AssertionError("no step-10 binding is a `this.`/`workspace.` read, so there is nothing to "
+                             "plant a duplicate on -- this probe would pass by having nothing to say")
+    wf = rd["workflow"]
+
+    root = TMP / "dropped-binding-post"
+    leaf = root / "templates" / "probe"
+    leaf.mkdir(parents=True, exist_ok=True)
+
+    def plant(second=None):
+        # Raw text: a Python dict cannot hold a duplicate key, so json.dump would plant nothing.
+        pair = f'"{key}": "${{workspace.probe_first_attr}}"'
+        if second is not None:
+            pair += f', "{key}": "{second}"'
+        (leaf / f"{wf}.json.tmpl").write_text(f'{{"inputs": {{{pair}}}, "outputs": {{}}}}\n',
+                                              encoding="utf-8")
+
+    def create(extra):
+        sys.argv = ["batch_rerun_step.py", "create", "--confirm",
+                    "--tmpl-dir", str(root / "templates")] + list(extra)
+        REQUESTS.clear()
+        out = io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                r.create()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+            # The refusal text is the SystemExit argument, not stdout; keep it so the asserts can
+            # tell which guard fired.
+            out.write("\n" + str(exc) + "\n")
+        return code, out.getvalue(), [t[0] for t in REQUESTS]
+
+    plant("${workspace.probe_second_attr}")
+    verbs = ("__post", "__get", "__put", "__delete")
+    verb_save = {v: getattr(terra.fapi, v) for v in verbs}
+    argv_save = sys.argv
+
+    def blocked(name):
+        def f(*a, **k):
+            raise AssertionError(f"the dropped-binding probe attempted a real request via {name}: {a!r}")
+        return f
+
+    try:
+        for v in verbs:
+            setattr(terra.fapi, v, blocked(v))
+
+        code, said, reqs = create([])
+        if not code:
+            raise AssertionError(f"the duplicate reached Terra-bound create() unnoticed ({said[-300:]})")
+        if key not in said or "probe_first_attr" not in said or "probe_second_attr" not in said:
+            raise AssertionError(f"refused without naming the key and both values: {said[-400:]}")
+        if reqs:
+            raise AssertionError(f"refused but still sent {reqs} -- a refusal that POSTs is not a refusal")
+
+        code2, said2, reqs2 = create(["--allow-duplicate-key", key])
+        if code2 or "create_workspace_config" not in reqs2:
+            raise AssertionError(f"the named override did not clear the key (exit {code2}, requests "
+                                 f"{reqs2}): {said2[-400:]}")
+
+        plant(None)
+        code3, said3, reqs3 = create([])
+        if code3 or "create_workspace_config" not in reqs3:
+            raise AssertionError(f"a clean template was refused (exit {code3}, requests {reqs3}): "
+                                 f"{said3[-400:]}")
+        if "0 key(s) bound more than once" not in said3:
+            raise AssertionError(f"a clean template posted quietly instead of counting itself: "
+                                 f"{said3[-400:]}")
+    finally:
+        sys.argv = argv_save
+        for v, f in verb_save.items():
+            setattr(terra.fapi, v, f)
+
+    return (f"{wf}.{key} planted 2x -> refused, {reqs or 'no request'}; named override -> posted "
+            f"({reqs2}); duplicate removed -> posted and counted itself 0 ({reqs3})")
+
+
+def probe_shared_target_flag() -> str:
+    """`--allow-shared-target` must be PARSED on the rerun path, not only documented by it.
+
+    The control is the refusal the flag overrides: without it the baseline workspace is refused with
+    zero requests.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    if shutil.which("gcloud") is None:
+        # The positive control builds a Terra session, and fiss shells out to `gcloud` for
+        # credentials; without it the tool dies before reaching the recorder.
+        raise Skip("gcloud on PATH (fiss's application-default credential helper)",
+                   remedy="run where the Google Cloud CLI is on PATH, which CI images carry")
+    import terra
+    install_recorder(terra)
+    cfg = importlib.reload(importlib.import_module("config"))
+    base_ns = cfg.get("BASELINE_NAMESPACE")
+    base_ws = cfg.get("BASELINE_WORKSPACE")
+    if not (base_ns and base_ws):
+        raise Skip("baseline workspace defaults are unset in this profile")
+    baseline = {"GSVTK_PROJECT": "probe-project", "GSVTK_BRANCH": "probe-branch",
+                "GSVTK_TERRA_NAMESPACE": base_ns, "GSVTK_TERRA_WORKSPACE": base_ws}
+    imgs = ["--image", "gatk_docker=us.gcr.io/probe/gatk:T",
+            "--image", "sv_base_mini_docker=us.gcr.io/probe/svb:T",
+            "--image", "sv_pipeline_docker=us.gcr.io/probe/svp:T"]
+
+    # The guard, in process, with requests counted: the baseline pair is refused before anything is sent.
+    (bc, r) = fresh(baseline, "batch_configs", "batch_rerun_step")
+    r.CONFIRMED = True
+    sys.argv = ["batch_rerun_step.py", "create", "--confirm"] + imgs
+    REQUESTS.clear()
+    try:
+        r.create()
+        raise AssertionError("create() POSTed a config into the shared baseline workspace")
+    except (SystemExit, terra.TerraError) as exc:
+        if "baseline workspace" not in str(exc):
+            raise AssertionError(f"create() refused for the wrong reason: {str(exc)[:140]}")
+        if REQUESTS:
+            raise AssertionError(f"the baseline refusal still sent {len(REQUESTS)} request(s): {REQUESTS}")
+
+    # The parser runs in a child process (the defect is in __main__'s dispatch). The API root is a
+    # closed port, so "cannot reach Terra" marks getting past the guard.
+    def run(*extra):
+        return subprocess.run([sys.executable, str(ROOT / "terra" / "batch_rerun_step.py"),
+                               "create", "--confirm"] + imgs + list(extra),
+                              capture_output=True, text=True,
+                              env=dict(os.environ, GSVTK_TERRA_API_ROOT="http://127.0.0.1:9/api/"))
+
+    refused = run()
+    if "unknown option" in refused.stdout + refused.stderr:
+        raise AssertionError("the parser still refuses the flag the tool's own --help documents: "
+                             + (refused.stdout + refused.stderr)[:200])
+    if "baseline workspace" not in refused.stdout + refused.stderr:
+        raise AssertionError("the guard stopped firing without the flag -- the control is broken: "
+                             + (refused.stdout + refused.stderr)[:200])
+    allowed = run("--allow-shared-target")
+    said = allowed.stdout + allowed.stderr
+    if "unknown option" in said:
+        raise AssertionError("the flag reached the parser and was refused: " + said[:200])
+    if "baseline workspace" in said:
+        raise AssertionError("--allow-shared-target did not clear the guard: " + said[:300])
+    # Past the guard, the next thing that can stop the run is the closed API port, or on a machine
+    # with no Google credentials (CI) the credential lookup. Either one proves the guard was cleared.
+    past_guard = ("cannot reach Terra", "DefaultCredentialsError", "RefreshError")
+    if not any(m in said for m in past_guard):
+        raise AssertionError("the override did not reach the request boundary, so it proved nothing: "
+                             + said[-300:])
+    return ("guard refused the baseline pair with 0 requests; --allow-shared-target parsed, cleared it "
+            "and reached the (closed) request boundary")
+
+
+def probe_abort_resolved_triple() -> str:
+    """`terra abort` must reach abort_submission with the RESOLVED triple, and never without --confirm.
+
+    `abort_submission` has no confirmation of its own, and an unresolved target would send
+    `DELETE /api/workspaces//submissions/<id>`. Every arm is graded by request count; the positive
+    control is the sandbox arm that actually reaches the DELETE.
+    """
+    if not have("firecloud"):
+        raise Skip("firecloud")
+    cfgmod = importlib.reload(importlib.import_module("config"))
+    base_ns, base_ws = cfgmod.get("BASELINE_NAMESPACE"), cfgmod.get("BASELINE_WORKSPACE")
+    if not (base_ns and base_ws):
+        raise Skip("baseline workspace defaults are unset in this profile")
+    sub = "11111111-2222-3333-4444-555555555555"
+    no_target = {"GSVTK_PROJECT": "probe-project"}
+    sandbox = dict(no_target, GSVTK_TERRA_NAMESPACE="probe-sandbox-ns",
+                   GSVTK_TERRA_WORKSPACE="probe-sandbox-ws")
+    baseline = dict(no_target, GSVTK_TERRA_NAMESPACE=base_ns, GSVTK_TERRA_WORKSPACE=base_ws)
+
+    class Resp:
+        """Response-like (fiss returns requests.Response); a 204 has no JSON body."""
+
+        def __init__(self, code=204, body=None):
+            self.status_code = code
+            self._body = body
+
+        def json(self):
+            if self._body is None:
+                raise ValueError("204 No Content carries no body")
+            return self._body
+
+    def load(profile):
+        # fresh() returns the modules in the order named.
+        terra, _tc, mod = fresh(profile, "terra", "batch_configs", "abort_submission")
+        install_recorder(terra)
+        # Answer the two calls this tool makes with realistic shapes, still recorded in REQUESTS.
+        def fake_abort(ns, ws, submission_id):
+            REQUESTS.append(("abort_submission", ns, ws, submission_id))
+            return Resp(204)
+
+        def fake_read(ns, ws, submission_id):
+            REQUESTS.append(("get_submission", ns, ws, submission_id))
+            return Resp(200, {"submissionId": submission_id, "status": "Aborted",
+                              "methodConfigurationName": "10-GenotypeBatch",
+                              "entityName": "probe_batch",
+                              "submissionDate": "2026-10-20T00:00:00.000Z",
+                              "workflows": [{"workflowId": "wf-aaa", "status": "Aborted"}]})
+
+        terra.fapi.abort_submission = fake_abort
+        terra.fapi.get_submission = fake_read
+        return mod, terra
+
+    def drive(mod, terra, argv):
+        sys.argv = ["abort_submission.py"] + argv
+        REQUESTS.clear()
+        out = io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                mod.main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            if not isinstance(exc.code, int):
+                out.write("\n" + str(exc) + "\n")     # see the note in probe_dropped_binding_post
+        except terra.TerraError as exc:               # what the excepthook would print, then exit 1
+            out.write("\n" + str(exc) + "\n")
+            code = 1
+        finally:
+            sys.argv = ["probe_fixes.py"]
+        return code or 0, out.getvalue(), [r[0] for r in REQUESTS]
+
+    # (a) no --confirm: refuse, and refuse with ZERO requests -- fiss's abort has nothing to lean on.
+    mod, terra = load(sandbox)
+    code, said, verbs = drive(mod, terra, ["--submission", sub, "--polls", "2", "--interval", "0"])
+    if code != 1:
+        raise AssertionError(f"abort without --confirm exited {code}, expected 1")
+    if verbs:
+        raise AssertionError(f"abort without --confirm sent {len(verbs)} request(s): {verbs}")
+    if "confirm" not in said:
+        raise AssertionError(f"the refusal did not name --confirm: {said[-200:]!r}")
+
+    # (b) unresolved target WITH --confirm: exit 4 naming the key, zero requests, no empty DELETE.
+    mod, terra = load(no_target)
+    code, said, verbs = drive(mod, terra,
+                              ["--submission", sub, "--confirm", "--polls", "1", "--interval", "0"])
+    if code != 4:
+        raise AssertionError(f"abort with no target resolved exited {code}, expected 4 (name the key)")
+    if verbs:
+        raise AssertionError(f"an unresolved target still sent {len(verbs)} request(s): {verbs}")
+    if "TERRA_NAMESPACE" not in said:
+        raise AssertionError(f"exit 4 did not name the missing key: {said[-200:]!r}")
+
+    # (c) shared baseline: refuse BEFORE the pre-read, since an abort cannot be undone.
+    mod, terra = load(baseline)
+    code, said, verbs = drive(mod, terra,
+                              ["--submission", sub, "--confirm", "--polls", "1", "--interval", "0"])
+    if code == 0 or "baseline workspace" not in said:
+        raise AssertionError(f"abort() did not refuse the shared baseline workspace (exit {code}, "
+                             f"requests {verbs}): {said[-200:]!r}")
+    if verbs:
+        raise AssertionError(f"the baseline refusal still sent {len(verbs)} request(s): {verbs}")
+
+    # POSITIVE CONTROL: the same argv WITH --confirm against a sandbox, and the triple it reached with.
+    mod, terra = load(sandbox)
+    code, said, verbs = drive(mod, terra,
+                              ["--submission", sub, "--confirm", "--polls", "2", "--interval", "0"])
+    got = [r for r in REQUESTS if r[0] == "abort_submission"]
+    if len(got) != 1:
+        raise AssertionError(f"the control reached abort_submission {len(got)} time(s), expected 1: "
+                             f"{REQUESTS}")
+    if got[0][1:] != ("probe-sandbox-ns", "probe-sandbox-ws", sub):
+        raise AssertionError(f"abort_submission was reached with {got[0][1:]!r}, not the resolved triple "
+                             "('probe-sandbox-ns', 'probe-sandbox-ws', the typed id)")
+    if code != 0:
+        raise AssertionError(f"the control arm exited {code}, expected 0 (terminal Aborted): "
+                             f"{said[-300:]!r}")
+    if sub not in said or "ABORTED" not in said:
+        raise AssertionError(f"the observed-state report did not print the id it aborted and the state: "
+                             f"{said[-300:]!r}")
+    others = [v for v in verbs if v not in ("abort_submission", "get_submission")]
+    if others:
+        raise AssertionError(f"abort touched verbs nobody authorised: {others}")
+    say(f"control: DELETE carried ({got[0][1]}/{got[0][2]}, {got[0][3][:8]}); "
+        f"{len(verbs)} request(s) total, exit 0")
+    return ("no --confirm / no target / shared baseline each refused with 0 requests (exit 1, 4, 1); "
+            "control reached abort_submission once with the resolved triple and reported ABORTED")
+
+
+
+PROBES = [
+    ("rerun_guards", probe_rerun_guards),
+    ("stage_batch_row", probe_stage_batch_row),
+    ("adopt_fallback", probe_adopt_fallback),
+    ("wdl_flat_dup", probe_wdl_flat_dup),
+    ("publish_guard", probe_publish_guard),
+    ("miniwdl_resolver", probe_miniwdl_resolver),
+    ("help_writes_nothing", probe_help_writes_nothing),
+    ("dstore_drift", probe_dstore_drift),
+    ("map_vs_wdl", probe_map_vs_wdl),
+    ("rerun_map_guard", probe_rerun_map_guard),
+    ("submit_reads_back", probe_submit_reads_back),
+    ("adapt_drops", probe_adapt_drops),
+    ("drop_flag_guard", probe_drop_flag_guard),
+    ("listing_lie", probe_listing_lie),
+    ("recon_empty_inventory", probe_recon_empty_inventory),
+    ("step_lookup_names_itself", probe_step_lookup_names_itself),
+    ("call_cache", probe_call_cache),
+    ("submission_call_cache", probe_submission_call_cache),
+    ("task_artifact_tail", probe_task_artifact_tail),
+    ("profile_loader_refusals", probe_profile_loader_refusals),
+    ("module_changes_output", probe_module_changes_output),
+    ("dropped_binding_post", probe_dropped_binding_post),
+    ("shared_target_flag", probe_shared_target_flag),
+    ("abort_resolved_triple", probe_abort_resolved_triple),
+    # Last: this probe mutates batch_configs.CONFIGS.
+    ("nested_bindings", probe_nested_bindings),
+]
+
+
+def main() -> int:
+    global VERBOSE
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--keep", action="store_true", help="keep the temp tree and print its path")
+    ap.add_argument("--env", action="store_true",
+                    help="keep the inherited GSVTK_* environment (a probe then reads YOUR machine)")
+    a = ap.parse_args()
+    VERBOSE = a.verbose
+    ok = skip = fail = 0
+    print(f"probes: {len(PROBES)} defects, offline, temp tree {TMP}")
+    if not a.env:
+        # Don't let a probe read the developer's machine: exported GSVTK_* values beat the profile
+        # fresh() writes. GSVTK_CONFIG stays, because fresh() sets it.
+        leaked = sorted(k for k in os.environ if k.startswith("GSVTK_") and k != "GSVTK_CONFIG")
+        for k in leaked:
+            os.environ.pop(k)
+        if leaked:
+            print(f"  (unset {len(leaked)} inherited key(s) so no probe reads this machine: "
+                  f"{' '.join(leaked)})")
+            print("  (a probe that NEEDS a checkout sets GSVTK_GATK_SV_CHECKOUT itself; --env keeps "
+                  "them if you mean to)")
+    try:
+        for name, fn in PROBES:
+            REQUESTS.clear()
+            argv = list(sys.argv)  # some probes drive a tool through sys.argv; never let it leak
+            try:
+                detail = fn()
+                ok += 1
+                print(f"  ok    {name:20s} {detail}")
+            except Skip as e:
+                skip += 1
+                print(f"  SKIP  {name:20s} needs {e} "
+                      f"({getattr(e, 'remedy', 'requirements.txt')})")
+            except SystemExit as e:                       # the kit's own sys.exit on a missing dep,
+                m = str(e).strip()                        # from an import find_spec() swore was there
+                if "missing dependency" in m:
+                    skip += 1
+                    print(f"  SKIP  {name:20s} {m.splitlines()[0]}")
+                else:                                     # ... but a guarded exit is a finding
+                    fail += 1
+                    print(f"  FAIL  {name:20s} SystemExit: {m}")
+            except Exception as e:                        # a probe blowing up is a finding
+                fail += 1
+                print(f"  FAIL  {name:20s} {type(e).__name__}: {e}")
+            finally:
+                sys.argv[:] = argv
+    finally:
+        if a.keep:
+            print(f"  (temp tree kept: {TMP})")
+        else:
+            shutil.rmtree(TMP, ignore_errors=True)
+    print(f"probes: {ok} ok, {skip} skipped, {fail} failed")
+    return 1 if fail else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

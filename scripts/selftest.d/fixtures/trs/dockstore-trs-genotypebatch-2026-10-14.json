@@ -1,0 +1,60 @@
+[
+ {
+  "id": "#workflow/github.com/broadinstitute/gatk-sv/GenotypeBatch",
+  "organization": "broadinstitute",
+  "name": "gatk-sv/GenotypeBatch",
+  "toolclass": {
+   "description": "Workflow",
+   "id": "1",
+   "name": "Workflow"
+  },
+  "meta_version": "2024-01-05 19:44:44.862",
+  "url": "https://dockstore.org/api/ga4gh/trs/v2/tools/%23workflow%2Fgithub.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch",
+  "versions": [
+   {
+    "author": [],
+    "containerfile": false,
+    "descriptor_type": [
+     "WDL"
+    ],
+    "descriptor_type_version": {
+     "WDL": [
+      "1.0"
+     ]
+    },
+    "id": "#workflow/github.com/broadinstitute/gatk-sv/GenotypeBatch:main",
+    "images": [],
+    "included_apps": [],
+    "is_production": false,
+    "meta_version": "2026-10-08 15:49:43.0",
+    "name": "main",
+    "signed": false,
+    "url": "https://dockstore.org/api/ga4gh/trs/v2/tools/%23workflow%2Fgithub.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch/versions/main",
+    "verified": false,
+    "verified_source": []
+   },
+   {
+    "author": [],
+    "containerfile": false,
+    "descriptor_type": [
+     "WDL"
+    ],
+    "descriptor_type_version": {
+     "WDL": [
+      "1.0"
+     ]
+    },
+    "id": "#workflow/github.com/broadinstitute/gatk-sv/GenotypeBatch:dev_genotype_scale",
+    "images": [],
+    "included_apps": [],
+    "is_production": false,
+    "meta_version": "2026-10-01 16:07:38.0",
+    "name": "dev_genotype_scale",
+    "signed": false,
+    "url": "https://dockstore.org/api/ga4gh/trs/v2/tools/%23workflow%2Fgithub.com%2Fbroadinstitute%2Fgatk-sv%2FGenotypeBatch/versions/dev_genotype_scale",
+    "verified": false,
+    "verified_source": []
+   }
+  ]
+ }
+]
